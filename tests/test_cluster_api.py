@@ -20,9 +20,30 @@ from tests.test_bop_evaluation import make_tiny_evaluation_run, write_result_csv
 class FakeRunner:
     def __init__(self, root: Path):
         self.job_root = root
+        self.submissions: list[dict[str, Any]] = []
 
     def list(self, *, include_services: bool = True):
         return []
+
+    def submit(self, **kwargs):
+        self.submissions.append(kwargs)
+        job_id = f"service-{len(self.submissions)}"
+
+        class FakeJob:
+            id = job_id
+
+            def to_dict(self):
+                return {
+                    "id": self.id,
+                    "name": kwargs["name"],
+                    "command": kwargs["command"],
+                    "status": "queued",
+                    "resources": kwargs["resources"],
+                    "scope_kind": kwargs["scope_kind"],
+                    "parameters": kwargs["parameters"],
+                }
+
+        return FakeJob()
 
 
 def _status() -> dict[str, Any]:
@@ -142,6 +163,141 @@ class FakeController:
         return "controller log\nremote /secret/work\nAuthorization: Bearer fixture\n"
 
 
+class GenericController(FakeController):
+    def __init__(self):
+        super().__init__()
+        self.estimation_payload: dict[str, Any] | None = None
+        self.estimation_key: str | None = None
+
+    def status(self):
+        profile = {
+            "profile_id": "smoke",
+            "enabled": True,
+            "partition": "gpu",
+            "gres": "gpu:1",
+            "cpus": 4,
+            "memory": "24G",
+            "walltime": "00:20:00",
+            "max_targets": 2,
+        }
+        return {
+            "schema_version": "posetestbot_cluster_status.v1",
+            "ready": True,
+            "connection": {"ready": True},
+            "features": {
+                "archive_read": True,
+                "archive_mutation": True,
+                "estimation_submission": True,
+            },
+            "feature_blockers": {
+                "archive": [],
+                "estimation": [],
+                "estimation_submission": [],
+            },
+            "domains": {
+                "storage": {
+                    "ready": True,
+                    "read": True,
+                    "mutation": True,
+                    "blockers": [],
+                },
+                "scheduler": {"ready": True, "blockers": []},
+            },
+            "estimators": [
+                {
+                    "estimator_id": "megapose",
+                    "driver_id": "megapose.v1",
+                    "display_name": "MegaPose",
+                    "installed": True,
+                    "configured": True,
+                    "enabled": True,
+                    "ready": True,
+                    "blockers": [],
+                    "readiness_blockers": [],
+                    "input_contracts": ["posetestbot.bop.v5.pose_and_masks"],
+                    "output_contract": "bop19.csv.v1",
+                    "runtime": {
+                        "estimator_id": "megapose",
+                        "driver_id": "megapose.v1",
+                        "runtime_id": "megapose-fixture",
+                        "container": {
+                            "filename": "megapose.sif",
+                            "sha256": "6" * 64,
+                        },
+                        "assets": {
+                            "weights": {
+                                "filename": "weights.json",
+                                "sha256": "7" * 64,
+                            },
+                            "bad": {
+                                "filename": "/secret/weights.json",
+                                "sha256": "8" * 64,
+                            },
+                        },
+                        "source_revisions": {
+                            "megapose": "abcdef0123456789",
+                            "private": "/secret/checkout",
+                        },
+                        "licenses": [
+                            {"name": "Fixture license", "sha256": "9" * 64}
+                        ],
+                        "input_contracts": [
+                            "posetestbot.bop.v5.pose_and_masks"
+                        ],
+                        "output_contract": "bop19.csv.v1",
+                        "qualified_resource_profiles": ["smoke"],
+                        "qualification_manifest_sha256": "a" * 64,
+                        "qualified": True,
+                        "ready": True,
+                        "qualification_blockers": [],
+                    },
+                    "profiles": [profile],
+                }
+            ],
+            "runtime": {},
+            "profiles": [],
+            "blockers": [],
+        }
+
+    def create_estimation_job(self, payload, *, idempotency_key: str):
+        self.estimation_payload = dict(payload)
+        self.estimation_key = idempotency_key
+        job_id = f"pose-{uuid.UUID('12345678-1234-4234-9234-123456789abc')}"
+        return {
+            "job": {
+                "schema_version": "posetestbot_cluster_job.v1",
+                "job_id": job_id,
+                "kind": "estimation",
+                "state": "preparing",
+                "status": "preparing",
+                "payload": dict(payload),
+            }
+        }
+
+    def estimation_jobs(self, **_kwargs):
+        return {
+            "jobs": [self.job_value] if self.job_value else [],
+            "next_cursor": None,
+        }
+
+
+class ArchiveOnlyController(GenericController):
+    def status(self):
+        status = super().status()
+        status["ready"] = False
+        status["connection"] = {"ready": False}
+        status["domains"]["scheduler"] = {
+            "ready": False,
+            "blockers": ["The LUIS login host is not connected."],
+        }
+        status["estimators"][0]["ready"] = False
+        status["estimators"][0]["readiness_blockers"] = [
+            "The LUIS login host is not connected."
+        ]
+        status["blockers"] = ["The LUIS login host is not connected."]
+        return status
+
+
 class OfflineController(FakeController):
     def status(self):
         raise ClusterClientError("Cluster controller is unavailable")
@@ -180,7 +336,14 @@ def _pose_ready_run(root: Path) -> Path:
     return run
 
 
-def _app(tmp_path: Path, controller, *, enabled: bool = True):
+def _app(
+    tmp_path: Path,
+    controller,
+    *,
+    enabled: bool = True,
+    service_manager=None,
+    cluster_env_file: Path | None = None,
+):
     runs_root = tmp_path / "runs"
     runs_root.mkdir(exist_ok=True)
     settings = WebSettings(
@@ -191,10 +354,119 @@ def _app(tmp_path: Path, controller, *, enabled: bool = True):
         cluster_url="http://127.0.0.1:8765",
         cluster_token="x" * 32,
         cluster_enabled=enabled,
+        cluster_env_file=cluster_env_file,
     )
     runner = FakeRunner(settings.job_root)
-    runtime = WebRuntime(settings, runner, controller)
+    runtime = WebRuntime(settings, runner, controller, service_manager)
     return create_app(runtime=runtime), runs_root
+
+
+class FakeControllerServiceManager:
+    def __init__(self) -> None:
+        self.state = "stopped"
+        self.commands: list[str] = []
+
+    def status(self):
+        active = self.state == "running"
+        return {
+            "managed": True,
+            "service_unit": "posetestbot-cluster.service",
+            "unit_installed": True,
+            "state": self.state,
+            "active": active,
+            "can_start": not active,
+            "can_stop": active,
+            "load_state": "loaded",
+            "active_state": "active" if active else "inactive",
+            "sub_state": "running" if active else "dead",
+            "unit_file_state": "disabled",
+            "blockers": [],
+            "private_path": "/must/not/reach/browser",
+        }
+
+    def command(self, action: str):
+        self.commands.append(action)
+        return [
+            "/usr/bin/systemctl",
+            "--user",
+            "--no-block",
+            action,
+            "posetestbot-cluster.service",
+        ]
+
+
+def test_cluster_controller_service_status_and_actions_are_server_owned(
+    tmp_path: Path,
+) -> None:
+    manager = FakeControllerServiceManager()
+    app, _runs_root = _app(
+        tmp_path,
+        FakeController(),
+        enabled=False,
+        service_manager=manager,
+        cluster_env_file=tmp_path / "private" / "controller.env",
+    )
+    client = app.test_client()
+
+    status = client.get("/cluster/controller-service")
+    rejected = client.post(
+        "/cluster/controller-service/start", json={"confirm": False}
+    )
+    caller_controlled = client.post(
+        "/cluster/controller-service/start",
+        json={"confirm": True, "service_unit": "caller-controlled.service"},
+    )
+    started = client.post(
+        "/cluster/controller-service/start", json={"confirm": True}
+    )
+
+    assert status.status_code == 200
+    assert status.get_json()["state"] == "stopped"
+    assert status.get_json()["integration"] == {
+        "enabled": False,
+        "controller_configured": True,
+        "environment_file_configured": True,
+    }
+    assert "private_path" not in status.get_data(as_text=True)
+    assert "controller.env" not in status.get_data(as_text=True)
+    assert "xxxxxxxx" not in status.get_data(as_text=True)
+    assert rejected.status_code == 400
+    assert caller_controlled.status_code == 400
+    assert started.status_code == 202
+    assert started.get_json()["job"]["command"][-1] == (
+        "posetestbot-cluster.service"
+    )
+    assert "caller-controlled" not in started.get_data(as_text=True)
+    assert manager.commands == ["start"]
+
+    manager.state = "running"
+    stopped = client.post(
+        "/cluster/controller-service/stop", json={"confirm": True}
+    )
+
+    assert stopped.status_code == 202
+    assert stopped.get_json()["job"]["scope_kind"] == "global"
+    assert stopped.get_json()["job"]["resources"] == [
+        "cluster_controller_service"
+    ]
+    assert manager.commands == ["start", "stop"]
+
+
+def test_cluster_controller_service_is_explicitly_unmanaged_by_default(
+    tmp_path: Path,
+) -> None:
+    app, _runs_root = _app(tmp_path, FakeController())
+    client = app.test_client()
+
+    status = client.get("/cluster/controller-service")
+    action = client.post(
+        "/cluster/controller-service/start", json={"confirm": True}
+    )
+
+    assert status.status_code == 200
+    assert status.get_json()["state"] == "unmanaged"
+    assert status.get_json()["can_start"] is False
+    assert action.status_code == 409
 
 
 def test_pose_setup_submission_is_server_revalidated_and_loopback_proxied(
@@ -235,6 +507,75 @@ def test_pose_setup_submission_is_server_revalidated_and_loopback_proxied(
     }
     assert controller.pose_key is not None
     assert controller.pose_key.startswith("pose-submit:")
+
+
+def test_generic_estimator_is_discovered_selected_and_submitted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    controller = GenericController()
+    app, runs_root = _app(tmp_path, controller)
+    run = _pose_ready_run(runs_root)
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs_root.as_posix())
+    client = app.test_client()
+
+    setup_response = client.get(
+        "/cluster/pose-estimation/setup",
+        query_string={
+            "run_root": run.as_posix(),
+            "estimator_id": "megapose",
+        },
+    )
+
+    assert setup_response.status_code == 200
+    setup = setup_response.get_json()
+    assert setup["schema_version"] == "cluster_estimation_setup.v2"
+    assert setup["estimator_id"] == "megapose"
+    assert setup["estimator"]["display_name"] == "MegaPose"
+    assert setup["ready"] is True
+    serialized = setup_response.get_data(as_text=True)
+    assert "/secret" not in serialized
+    assert "bad" not in setup["runtime"]["assets"]
+    assert "private" not in setup["runtime"]["source_revisions"]
+
+    submitted = client.post(
+        "/cluster/pose-estimation/jobs",
+        json={
+            "run_root": run.as_posix(),
+            "estimator_id": "megapose",
+            "profile_id": "smoke",
+            "operator": "Fixture Operator",
+        },
+    )
+
+    assert submitted.status_code == 202
+    dataset = inspect_dataset(run, include_depth_content=True)
+    assert controller.estimation_payload == {
+        "estimator_id": "megapose",
+        "run_root": run.as_posix(),
+        "dataset_alias": dataset["dataset_alias"],
+        "dataset_sha256": dataset["dataset_sha256"],
+        "profile_id": "smoke",
+        "operator": "Fixture Operator",
+    }
+    assert controller.estimation_key is not None
+    assert controller.estimation_key.startswith("estimation-submit:")
+
+
+def test_archive_storage_status_is_independent_of_estimator_readiness(
+    tmp_path: Path
+) -> None:
+    controller = ArchiveOnlyController()
+    app, _runs_root = _app(tmp_path, controller)
+
+    response = app.test_client().get("/cluster/archives")
+
+    assert response.status_code == 200
+    assert response.get_json()["storage"] == {
+        "ready": True,
+        "read": True,
+        "mutation": True,
+        "blockers": [],
+    }
 
 
 def test_pose_setup_exposes_controller_outage_and_containment_blockers(
@@ -362,6 +703,107 @@ def _successful_external_job(
     return job_id
 
 
+def _successful_generic_external_job(
+    controller: GenericController, run: Path, tmp_path: Path
+) -> str:
+    dataset = inspect_dataset(run)
+    job_id = "pose-22345678-1234-4234-9234-123456789abc"
+    result = write_result_csv(
+        tmp_path / f"megapose_{dataset['dataset_alias']}-test_{job_id}.csv"
+    )
+    result_hash = hashlib.sha256(result.read_bytes()).hexdigest()
+    runtime = {
+        "estimator_id": "megapose",
+        "driver_id": "megapose.v1",
+        "runtime_id": "megapose-fixture",
+        "container": {"filename": "megapose.sif", "sha256": "1" * 64},
+        "assets": {
+            "weights": {"filename": "weights.json", "sha256": "2" * 64}
+        },
+        "source_revisions": {"megapose": "abcdef0123456789"},
+        "build_provenance": {"base_image_digest": f"sha256:{'3' * 64}"},
+        "licenses": [{"name": "Fixture license", "sha256": "4" * 64}],
+        "input_contracts": ["posetestbot.bop.v5.pose_and_masks"],
+        "output_contract": "bop19.csv.v1",
+        "qualified_resource_profiles": ["smoke"],
+        "qualification_manifest_sha256": "5" * 64,
+        "qualified": True,
+        "ready": True,
+        "qualification_blockers": [],
+        "private_path": "/secret/runtime",
+    }
+    estimator = {
+        "estimator_id": "megapose",
+        "driver_id": "megapose.v1",
+        "runtime_id": "megapose-fixture",
+        "input_contracts": ["posetestbot.bop.v5.pose_and_masks"],
+        "output_contract": "bop19.csv.v1",
+    }
+    provenance = {
+        "schema_version": "posetestbot_cluster_collected_result.v1",
+        "job_id": job_id,
+        "dataset_sha256": dataset["dataset_sha256"],
+        "bop_content_sha256": "6" * 64,
+        "input_manifest_sha256": "7" * 64,
+        "input_hashes": {"rgb": "8" * 64, "depth": "9" * 64},
+        "runtime": runtime,
+        "estimator": estimator,
+        "external_job": {
+            "provider": "posetestbot-cluster",
+            "job_id": job_id,
+            "slurm_job_id": "91234",
+            "estimator_id": "megapose",
+            "driver_id": "megapose.v1",
+            "runtime_id": "megapose-fixture",
+        },
+        "result": {
+            "filename": result.name,
+            "sha256": result_hash,
+            "size_bytes": result.stat().st_size,
+        },
+        "output_hashes": {result.name: result_hash},
+        "project_copy": {
+            "state": "verified",
+            "artifact_sha256": {result.name: result_hash},
+        },
+        "estimate_count": 1,
+        "failure_count": 0,
+        "collected_at": "2026-08-06T12:00:00+00:00",
+        "remote_work_dir": "/secret/project/results",
+    }
+    provenance_path = tmp_path / "generic-controller-provenance.json"
+    provenance_path.write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n")
+    controller.result_source = result
+    controller.provenance_source = provenance_path
+    controller.job_value = {
+        "schema_version": "posetestbot_cluster_job.v1",
+        "job_id": job_id,
+        "kind": "estimation",
+        "state": "succeeded",
+        "status": "succeeded",
+        "payload": {
+            "run_root": run.as_posix(),
+            "estimator_id": "megapose",
+            "driver_id": "megapose.v1",
+            "runtime_id": "megapose-fixture",
+        },
+        "result": {
+            "filename": result.name,
+            "sha256": result_hash,
+            "provenance_sha256": hashlib.sha256(
+                provenance_path.read_bytes()
+            ).hexdigest(),
+            "dataset_sha256": dataset["dataset_sha256"],
+            "estimator_id": "megapose",
+            "runtime_id": "megapose-fixture",
+            "estimate_count": 1,
+            "failure_count": 0,
+        },
+        "terminal": True,
+    }
+    return job_id
+
+
 def test_external_result_import_is_idempotent_and_historical_download_survives_drift(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -403,6 +845,32 @@ def test_external_result_import_is_idempotent_and_historical_download_survives_d
     )
     assert download.status_code == 200
     assert hashlib.sha256(download.data).hexdigest() == records[0]["sha256"]
+
+
+def test_generic_external_result_import_retains_neutral_provenance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    controller = GenericController()
+    app, runs_root = _app(tmp_path, controller)
+    run = _pose_ready_run(runs_root)
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs_root.as_posix())
+    job_id = _successful_generic_external_job(controller, run, tmp_path)
+
+    response = app.test_client().post(
+        f"/cluster/jobs/{job_id}/import-result",
+        json={"run_root": run.as_posix()},
+    )
+
+    assert response.status_code == 201
+    [record] = list_results(run)
+    assert record["method"] == "megapose"
+    assert record["method_name"] == "Megapose (cluster)"
+    stored = json.loads((run / record["controller_provenance_path"]).read_text())
+    assert stored["method"] == "megapose"
+    assert stored["external_job"]["driver_id"] == "megapose.v1"
+    assert stored["runtime"]["container"]["filename"] == "megapose.sif"
+    assert stored["runtime"]["output_contract"] == "bop19.csv.v1"
+    assert "/secret" not in json.dumps(stored)
 
 
 def test_external_result_import_refuses_dataset_drift_without_losing_remote_result(

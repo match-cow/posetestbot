@@ -24,13 +24,12 @@ import org.json.simple.parser.JSONParser;
 /**
  * Static-camera calibration application with one taught motion frame.
  *
- * Teach only /PoseTestBot/PoseTemplateBase/CalibrationStatiCenter with the
- * robot-carried calibration target centered in front of the static camera.
- * The program generates every other calibration pose with small LIN_REL
- * motions expressed in that frame. The 3 x 3 planar grid uses +/-65 mm axes,
- * so its furthest corner is approximately 92 mm from the taught center. Small
- * depth and orientation dithers add calibration diversity without translating
- * the flange outside the same 100 mm center envelope.
+ * Teach only /PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle at
+ * the minimum local-Z extent of the calibration pattern. Its +Z axis must
+ * point from that bottom position toward the available workspace. The program
+ * moves +50 mm from the taught frame to the generated pattern center before
+ * running the 3 x 3 planar grid, depth dither, and center swivel motions. This
+ * keeps every generated endpoint at or above the taught local-Z position.
  *
  * IMPORTANT: This source does not establish which application is deployed on
  * the lab controller. Compile and simulate it in the exact Sunrise.Workbench
@@ -45,8 +44,8 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 		extends RoboticsAPIApplication {
 	private static final String POSE_TEMPLATE_BASE_PATH =
 			"/PoseTestBot/PoseTemplateBase";
-	private static final String CALIBRATION_STATI_CENTER_PATH =
-			"/PoseTestBot/PoseTemplateBase/CalibrationStatiCenter";
+	private static final String CALIBRATION_STATIC_BOTTOM_MIDDLE_PATH =
+			"/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle";
 	private static final String DEFAULT_RECEIVER_IP = "172.31.1.169";
 	private static final Charset UTF_8 = Charset.forName("UTF-8");
 
@@ -59,8 +58,10 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 
 	private static final double GRID_HALF_SPAN_MM = 65.0;
 	private static final double DEPTH_DITHER_MM = 50.0;
+	private static final double PATTERN_CENTER_Z_OFFSET_MM = 50.0;
 	private static final double ORIENTATION_DITHER_DEG = 10.0;
 	private static final double MAX_CENTER_TRANSLATION_MM = 100.0;
+	private static final double MAX_BOTTOM_MIDDLE_TRANSLATION_MM = 110.0;
 	private static final double MAX_START_TRANSLATION_MM = 25.0;
 
 	private static final double CAPTURE_VELOCITY_SCALE = 0.60;
@@ -76,19 +77,19 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 	@Inject
 	private InfoTemplate robotinfo;
 
-	private ObjectFrame calibrationStatiCenter;
+	private ObjectFrame calibrationStaticBottomMiddle;
 	private PoseTestBotPoseStreamFunction poseStream;
 
 	@Override
 	public void initialize() {
 		robot = getContext().getDeviceFromType(LBR.class);
 		robotinfo.setBase(POSE_TEMPLATE_BASE_PATH);
-		calibrationStatiCenter = requiredFrame(
-				CALIBRATION_STATI_CENTER_PATH);
+		calibrationStaticBottomMiddle = requiredFrame(
+				CALIBRATION_STATIC_BOTTOM_MIDDLE_PATH);
 		validateProgramEnvelope();
 
 		getLogger().info("Resolved single taught static-camera calibration "
-				+ "frame: " + CALIBRATION_STATI_CENTER_PATH);
+				+ "frame: " + CALIBRATION_STATIC_BOTTOM_MIDDLE_PATH);
 		getLogger().info("Configured pose-stream reference: "
 				+ POSE_TEMPLATE_BASE_PATH);
 	}
@@ -114,18 +115,38 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 			throw new IllegalStateException("Depth dither exceeds the "
 					+ MAX_CENTER_TRANSLATION_MM + " mm center envelope");
 		}
+		if (PATTERN_CENTER_Z_OFFSET_MM != DEPTH_DITHER_MM) {
+			throw new IllegalStateException("Pattern-center local-Z offset must "
+					+ "equal the depth half-span so the taught frame remains the "
+					+ "bottom of the pattern");
+		}
+		double gridCornerFromBottomMm = translationRadiusMm(
+				GRID_HALF_SPAN_MM,
+				GRID_HALF_SPAN_MM,
+				PATTERN_CENTER_Z_OFFSET_MM);
+		double depthTopFromBottomMm =
+				PATTERN_CENTER_Z_OFFSET_MM + DEPTH_DITHER_MM;
+		double furthestPointFromBottomMm = Math.max(
+				gridCornerFromBottomMm, depthTopFromBottomMm);
+		if (furthestPointFromBottomMm > MAX_BOTTOM_MIDDLE_TRANSLATION_MM) {
+			throw new IllegalStateException("Generated calibration endpoint is "
+					+ furthestPointFromBottomMm
+					+ " mm from CalibrationStaticBottomMiddle; limit is "
+					+ MAX_BOTTOM_MIDDLE_TRANSLATION_MM + " mm");
+		}
 		if (MAX_START_TRANSLATION_MM <= 0.0
-				|| MAX_START_TRANSLATION_MM > MAX_CENTER_TRANSLATION_MM) {
+				|| MAX_START_TRANSLATION_MM
+						> MAX_BOTTOM_MIDDLE_TRANSLATION_MM) {
 			throw new IllegalStateException("Start-position tolerance must be "
-					+ "positive and no greater than the center envelope");
+					+ "positive and no greater than the bottom-middle envelope");
 		}
 	}
 
 	@Override
 	public void run() {
 		getLogger().warn("Before the first start command, manually position the "
-				+ "robot at or near the taught CalibrationStatiCenter pose with "
-				+ "the attached target visible in the intended static camera. "
+				+ "robot at or near the taught CalibrationStaticBottomMiddle pose "
+				+ "with the attached target visible in the intended static camera. "
 				+ "This is an operator commissioning requirement, not an enforced "
 				+ "safety check.");
 		getLogger().warn("UDP STOP is not a safety stop and cannot interrupt "
@@ -163,7 +184,7 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 	}
 
 	private void runCapture(CaptureCommand command) {
-		requireCurrentPositionNearCenter();
+		requireCurrentPositionNearBottomMiddle();
 		poseStream.configure(
 				command.receiverAddress.getHostAddress(),
 				command.receiverPort,
@@ -174,20 +195,41 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 		getLogger().info("Starting single-frame static-camera calibration for "
 				+ "run " + command.runId + " at " + cartVelocityMmS + " mm/s");
 
-		moveToCenter("capture start anchor");
+		moveToBottomMiddle("capture start anchor");
+		moveFromBottomMiddleToPatternCenter(cartVelocityMmS);
 		runRelativePlanarGrid(cartVelocityMmS);
 		runRelativeDepthDither(cartVelocityMmS);
 		runRelativeOrientationDither(cartVelocityMmS);
-		moveToCenter("capture end anchor");
+		moveFromPatternCenterToBottomMiddle(cartVelocityMmS);
+		moveToBottomMiddle("capture end anchor confirmation");
 
-		/* Report success only after the blocking return to the taught center. */
+		/* Report success only after the blocking return to the taught anchor. */
 		poseStream.finishCapture();
+	}
+
+	private void moveFromBottomMiddleToPatternCenter(
+			double cartVelocityMmS) {
+		requirePatternPointInsideEnvelope(0.0, 0.0, 0.0,
+				"pattern_center");
+		captureRelativePose(0.0, 0.0, PATTERN_CENTER_Z_OFFSET_MM,
+				0.0, 0.0, 0.0,
+				cartVelocityMmS, "bottom_middle_to_pattern_center");
+	}
+
+	private void moveFromPatternCenterToBottomMiddle(
+			double cartVelocityMmS) {
+		requirePatternPointInsideEnvelope(
+				0.0, 0.0, -PATTERN_CENTER_Z_OFFSET_MM,
+				"bottom_middle");
+		captureRelativePose(0.0, 0.0, -PATTERN_CENTER_Z_OFFSET_MM,
+				0.0, 0.0, 0.0,
+				cartVelocityMmS, "pattern_center_to_bottom_middle");
 	}
 
 	/**
 	 * Visit the eight non-center points of a 3 x 3 grid. Each point is reached
 	 * from center and immediately reversed, keeping every individual relative
-	 * translation and every endpoint within 100 mm of the taught anchor.
+	 * translation within 100 mm of the generated pattern center.
 	 */
 	private void runRelativePlanarGrid(double cartVelocityMmS) {
 		captureGridPoint(-GRID_HALF_SPAN_MM, GRID_HALF_SPAN_MM,
@@ -210,7 +252,7 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 
 	private void captureGridPoint(double xMm, double yMm,
 			double cartVelocityMmS, String motionName) {
-		requireInsideCenterEnvelope(xMm, yMm, 0.0, motionName);
+		requirePatternPointInsideEnvelope(xMm, yMm, 0.0, motionName);
 		captureRelativePose(xMm, yMm, 0.0, 0.0, 0.0, 0.0,
 				cartVelocityMmS, motionName + "_outbound");
 		captureRelativePose(-xMm, -yMm, 0.0, 0.0, 0.0, 0.0,
@@ -226,7 +268,7 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 
 	private void captureDepthPoint(double zMm, double cartVelocityMmS,
 			String motionName) {
-		requireInsideCenterEnvelope(0.0, 0.0, zMm, motionName);
+		requirePatternPointInsideEnvelope(0.0, 0.0, zMm, motionName);
 		captureRelativePose(0.0, 0.0, zMm, 0.0, 0.0, 0.0,
 				cartVelocityMmS, motionName + "_outbound");
 		captureRelativePose(0.0, 0.0, -zMm, 0.0, 0.0, 0.0,
@@ -262,34 +304,69 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 				cartVelocityMmS, motionName + "_return_center");
 	}
 
-	private void requireInsideCenterEnvelope(double xMm, double yMm,
+	private void requirePatternPointInsideEnvelope(double xMm, double yMm,
+			double zFromCenterMm, String motionName) {
+		double centerRadiusMm = translationRadiusMm(
+				xMm, yMm, zFromCenterMm);
+		double zFromBottomMiddleMm =
+				PATTERN_CENTER_Z_OFFSET_MM + zFromCenterMm;
+		double bottomMiddleRadiusMm = translationRadiusMm(
+				xMm, yMm, zFromBottomMiddleMm);
+		if (Double.isNaN(centerRadiusMm)
+				|| Double.isInfinite(centerRadiusMm)
+				|| centerRadiusMm > MAX_CENTER_TRANSLATION_MM) {
+			throw new IllegalArgumentException("Pattern endpoint "
+					+ motionName + " is " + centerRadiusMm
+					+ " mm from the generated center; limit is "
+					+ MAX_CENTER_TRANSLATION_MM + " mm");
+		}
+		if (Double.isNaN(zFromBottomMiddleMm)
+				|| Double.isInfinite(zFromBottomMiddleMm)
+				|| zFromBottomMiddleMm < 0.0) {
+			throw new IllegalArgumentException("Pattern endpoint "
+					+ motionName + " has invalid bottom-relative Z "
+					+ zFromBottomMiddleMm + " mm");
+		}
+		if (Double.isNaN(bottomMiddleRadiusMm)
+				|| Double.isInfinite(bottomMiddleRadiusMm)
+				|| bottomMiddleRadiusMm
+						> MAX_BOTTOM_MIDDLE_TRANSLATION_MM) {
+			throw new IllegalArgumentException("Pattern endpoint "
+					+ motionName + " is " + bottomMiddleRadiusMm
+					+ " mm from CalibrationStaticBottomMiddle; limit is "
+					+ MAX_BOTTOM_MIDDLE_TRANSLATION_MM + " mm");
+		}
+	}
+
+	private void requireInsideRelativeTranslationEnvelope(
+			double xMm, double yMm,
 			double zMm, String motionName) {
 		double radiusMm = translationRadiusMm(xMm, yMm, zMm);
 		if (Double.isNaN(radiusMm) || Double.isInfinite(radiusMm)
 				|| radiusMm > MAX_CENTER_TRANSLATION_MM) {
 			throw new IllegalArgumentException("Relative endpoint "
 					+ motionName + " is " + radiusMm
-					+ " mm from CalibrationStatiCenter; limit is "
+					+ " mm from the current phase anchor; limit is "
 					+ MAX_CENTER_TRANSLATION_MM + " mm");
 		}
 	}
 
-	private void requireCurrentPositionNearCenter() {
-		Frame currentInCenter = robot.getCurrentCartesianPosition(
-				robot.getFlange(), calibrationStatiCenter);
+	private void requireCurrentPositionNearBottomMiddle() {
+		Frame currentInBottomMiddle = robot.getCurrentCartesianPosition(
+				robot.getFlange(), calibrationStaticBottomMiddle);
 		double radiusMm = translationRadiusMm(
-				currentInCenter.getX(),
-				currentInCenter.getY(),
-				currentInCenter.getZ());
+				currentInBottomMiddle.getX(),
+				currentInBottomMiddle.getY(),
+				currentInBottomMiddle.getZ());
 		if (Double.isNaN(radiusMm) || Double.isInfinite(radiusMm)
 				|| radiusMm > MAX_START_TRANSLATION_MM) {
 			throw new IllegalStateException("Current flange is " + radiusMm
-					+ " mm from CalibrationStatiCenter; manually position it "
+					+ " mm from CalibrationStaticBottomMiddle; manually position it "
 					+ "within " + MAX_START_TRANSLATION_MM
 					+ " mm before START");
 		}
-		getLogger().info("Accepted near-center start position at "
-				+ radiusMm + " mm from CalibrationStatiCenter");
+		getLogger().info("Accepted near-bottom-middle start position at "
+				+ radiusMm + " mm from CalibrationStaticBottomMiddle");
 	}
 
 	private double translationRadiusMm(double xMm, double yMm,
@@ -297,9 +374,10 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 		return Math.sqrt(xMm * xMm + yMm * yMm + zMm * zMm);
 	}
 
-	private void moveToCenter(String motionName) {
-		getLogger().info("PTP to taught CalibrationStatiCenter: " + motionName);
-		robot.move(ptp(calibrationStatiCenter)
+	private void moveToBottomMiddle(String motionName) {
+		getLogger().info("PTP to taught CalibrationStaticBottomMiddle: "
+				+ motionName);
+		robot.move(ptp(calibrationStaticBottomMiddle)
 				.setJointVelocityRel(REPOSITION_PTP_VEL_REL)
 				.setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)
 				.setJointJerkRel(SMOOTH_MOTION_JOINT_JERK_REL));
@@ -309,13 +387,14 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 	private void captureRelativePose(double xMm, double yMm, double zMm,
 			double alphaDeg, double betaDeg, double gammaDeg,
 			double cartVelocityMmS, String motionName) {
-		requireInsideCenterEnvelope(xMm, yMm, zMm, motionName);
+		requireInsideRelativeTranslationEnvelope(
+				xMm, yMm, zMm, motionName);
 		Transformation offset = Transformation.ofDeg(
 				xMm, yMm, zMm, alphaDeg, betaDeg, gammaDeg);
 		long sentPoseCount;
 		poseStream.startMotion(motionName);
 		try {
-			robot.move(linRel(offset, calibrationStatiCenter)
+			robot.move(linRel(offset, calibrationStaticBottomMiddle)
 					.setCartVelocity(cartVelocityMmS)
 					.setJointVelocityRel(RELATIVE_MOTION_JOINT_VEL_REL)
 					.setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)

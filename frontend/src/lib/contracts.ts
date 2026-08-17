@@ -16,6 +16,7 @@ export interface Bootstrap {
 export interface RunIndexItem {
   path: string
   name: string
+  run_name: string | null
   sequence: string | null
   plan_only: boolean | null
   config_valid: boolean
@@ -272,7 +273,18 @@ export interface ClusterProfile {
 }
 
 export interface ClusterRuntimeIdentity {
+  estimator_id?: string
+  driver_id?: string
   runtime_id?: string
+  container?: { filename?: string; sha256?: string }
+  assets?: Record<string, { filename?: string; sha256?: string }>
+  source_revisions?: Record<string, string>
+  input_contracts?: string[]
+  output_contract?: string
+  qualified_resource_profiles?: string[]
+  qualification_manifest_sha256?: string
+  qualification_blockers?: string[]
+  ready?: boolean
   foundationpose_revision?: string
   bop_toolkit_revision?: string
   sif_sha256?: string | null
@@ -283,6 +295,29 @@ export interface ClusterRuntimeIdentity {
   [key: string]: JsonValue | undefined
 }
 
+export interface ClusterCapabilityDomain {
+  ready: boolean
+  read?: boolean
+  mutation?: boolean
+  blockers: string[]
+}
+
+export interface ClusterEstimator {
+  estimator_id: string
+  driver_id?: string | null
+  display_name: string
+  installed: boolean
+  configured: boolean
+  enabled: boolean
+  ready: boolean
+  blockers: string[]
+  readiness_blockers: string[]
+  input_contracts: string[]
+  output_contract?: string | null
+  runtime: ClusterRuntimeIdentity
+  profiles: ClusterProfile[]
+}
+
 export interface ClusterStatus {
   schema_version: string
   ready: boolean
@@ -291,6 +326,9 @@ export interface ClusterStatus {
   connection?: Record<string, JsonValue>
   features?: Record<string, boolean>
   feature_blockers?: Record<string, string[]>
+  domains?: Record<string, ClusterCapabilityDomain>
+  estimators?: ClusterEstimator[]
+  configuration_blockers?: string[]
   runtime?: ClusterRuntimeIdentity
   profiles?: ClusterProfile[]
   blockers: ClusterBlocker[]
@@ -300,10 +338,34 @@ export interface ClusterStatus {
   }
 }
 
+export interface ClusterControllerServiceStatus {
+  schema_version: "posetestbot_cluster_controller_service.v1"
+  managed: boolean
+  service_unit: string | null
+  unit_installed: boolean
+  state: "unmanaged" | "unavailable" | "stopped" | "starting" | "running" | "stopping" | "failed" | "unknown"
+  active: boolean
+  can_start: boolean
+  can_stop: boolean
+  load_state: string | null
+  active_state: string | null
+  sub_state: string | null
+  unit_file_state: string | null
+  integration: {
+    enabled: boolean
+    controller_configured: boolean
+    environment_file_configured: boolean
+  }
+  blockers: ClusterBlocker[]
+}
+
 export interface ClusterPoseSetup {
-  schema_version: "cluster_pose_estimation_setup.v1"
+  schema_version: "cluster_pose_estimation_setup.v1" | "cluster_estimation_setup.v2"
   run_root: string
   ready: boolean
+  estimator_id?: string | null
+  estimator?: ClusterEstimator | null
+  estimators?: ClusterEstimator[]
   dataset: {
     dataset_alias: string
     dataset_sha256: string
@@ -320,9 +382,9 @@ export interface ClusterPoseSetup {
     warnings: ClusterBlocker[]
   }
   annotation_mode: string | null
-  oracle_mask_contract: string
-  score_contract: string
-  execution_contract: string
+  oracle_mask_contract: string | null
+  score_contract: string | null
+  execution_contract: string | null
   controller: ClusterStatus
   runtime: ClusterRuntimeIdentity | null
   profiles: ClusterProfile[]
@@ -342,6 +404,9 @@ export interface ClusterJob {
   slurm_job_id: string | null
   payload: {
     run_root?: string
+    estimator_id?: string
+    driver_id?: string
+    runtime_id?: string
     dataset_alias?: string
     dataset_sha256?: string
     profile_id?: string

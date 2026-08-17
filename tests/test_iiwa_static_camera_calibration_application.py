@@ -34,46 +34,66 @@ def test_iiwa_application_initialization_never_commands_motion() -> None:
         assert "robot.move(" not in initialize_body, path.name
 
 
-def test_static_camera_application_requires_only_the_requested_taught_center() -> None:
+def test_static_camera_application_requires_only_the_taught_bottom_middle() -> None:
     java = JAVA_PATH.read_text()
     application_data_paths = set(re.findall(r'"(/PoseTestBot/[^"]+)"', java))
 
     assert application_data_paths == {
         "/PoseTestBot/PoseTemplateBase",
-        "/PoseTestBot/PoseTemplateBase/CalibrationStatiCenter",
+        "/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle",
     }
     assert (
-        "calibrationStatiCenter = requiredFrame(\n"
-        "\t\t\t\tCALIBRATION_STATI_CENTER_PATH);" in java
+        "calibrationStaticBottomMiddle = requiredFrame(\n"
+        "\t\t\t\tCALIBRATION_STATIC_BOTTOM_MIDDLE_PATH);" in java
     )
     assert "robotinfo.setBase(POSE_TEMPLATE_BASE_PATH);" in java
     assert "new Frame(" not in java
     assert re.findall(r"private ObjectFrame ([A-Za-z0-9_]+);", java) == [
-        "calibrationStatiCenter"
+        "calibrationStaticBottomMiddle"
     ]
 
 
-def test_static_camera_grid_stays_inside_the_100_mm_center_envelope() -> None:
+def test_static_camera_pattern_stays_above_the_taught_bottom_middle() -> None:
     java = JAVA_PATH.read_text()
 
     half_span_match = re.search(r"GRID_HALF_SPAN_MM = ([0-9.]+);", java)
     depth_match = re.search(r"DEPTH_DITHER_MM = ([0-9.]+);", java)
+    center_offset_match = re.search(
+        r"PATTERN_CENTER_Z_OFFSET_MM = ([0-9.]+);", java
+    )
     limit_match = re.search(r"MAX_CENTER_TRANSLATION_MM = ([0-9.]+);", java)
+    bottom_limit_match = re.search(
+        r"MAX_BOTTOM_MIDDLE_TRANSLATION_MM = ([0-9.]+);", java
+    )
     start_limit_match = re.search(r"MAX_START_TRANSLATION_MM = ([0-9.]+);", java)
     assert half_span_match is not None
     assert depth_match is not None
+    assert center_offset_match is not None
     assert limit_match is not None
+    assert bottom_limit_match is not None
     assert start_limit_match is not None
     half_span = float(half_span_match.group(1))
     depth = float(depth_match.group(1))
+    center_offset = float(center_offset_match.group(1))
     limit = float(limit_match.group(1))
+    bottom_limit = float(bottom_limit_match.group(1))
     start_limit = float(start_limit_match.group(1))
 
     assert half_span == 65.0
     assert math.hypot(half_span, half_span) < limit == 100.0
-    assert depth == 50.0 < limit
-    assert start_limit == 25.0 < limit
+    assert center_offset == depth == 50.0 < limit
+    assert center_offset - depth == 0.0
+    assert math.sqrt(2 * half_span**2 + center_offset**2) < bottom_limit == 110.0
+    assert center_offset + depth < bottom_limit
+    assert start_limit == 25.0 < bottom_limit
     assert "radiusMm > MAX_CENTER_TRANSLATION_MM" in java
+    assert "PATTERN_CENTER_Z_OFFSET_MM != DEPTH_DITHER_MM" in java
+    assert "furthestPointFromBottomMm > MAX_BOTTOM_MIDDLE_TRANSLATION_MM" in java
+    assert "zFromBottomMiddleMm < 0.0" in java
+    assert (
+        "bottomMiddleRadiusMm\n"
+        "\t\t\t\t\t\t> MAX_BOTTOM_MIDDLE_TRANSLATION_MM" in java
+    )
     assert "validateProgramEnvelope();" in java
 
     grid_body = java.split("private void runRelativePlanarGrid", 1)[1].split(
@@ -121,20 +141,61 @@ def test_static_camera_program_waits_for_start_before_any_robot_motion() -> None
         "runCapture(command)"
     )
     assert "robot.move(" not in run_body
-    assert capture_body.index("requireCurrentPositionNearCenter();") < (
+    assert capture_body.index("requireCurrentPositionNearBottomMiddle();") < (
         capture_body.index("poseStream.configure(")
     )
     assert capture_body.index("poseStream.configure(") < capture_body.index(
-        'moveToCenter("capture start anchor")'
+        'moveToBottomMiddle("capture start anchor")'
     )
-    assert capture_body.index('moveToCenter("capture start anchor")') < (
+    assert capture_body.index('moveToBottomMiddle("capture start anchor")') < (
+        capture_body.index("moveFromBottomMiddleToPatternCenter(cartVelocityMmS)")
+    )
+    assert capture_body.index(
+        "moveFromBottomMiddleToPatternCenter(cartVelocityMmS)"
+    ) < (
         capture_body.index("runRelativePlanarGrid(cartVelocityMmS)")
     )
-    assert capture_body.index('moveToCenter("capture end anchor")') < (
+    assert capture_body.index("runRelativePlanarGrid(cartVelocityMmS)") < (
+        capture_body.index("runRelativeDepthDither(cartVelocityMmS)")
+    )
+    assert capture_body.index("runRelativeDepthDither(cartVelocityMmS)") < (
+        capture_body.index("runRelativeOrientationDither(cartVelocityMmS)")
+    )
+    assert capture_body.index("runRelativeOrientationDither(cartVelocityMmS)") < (
+        capture_body.index("moveFromPatternCenterToBottomMiddle(cartVelocityMmS)")
+    )
+    assert capture_body.index(
+        "moveFromPatternCenterToBottomMiddle(cartVelocityMmS)"
+    ) < (
+        capture_body.index(
+            'moveToBottomMiddle("capture end anchor confirmation")'
+        )
+    )
+    assert capture_body.index(
+        'moveToBottomMiddle("capture end anchor confirmation")'
+    ) < (
         capture_body.index("poseStream.finishCapture();")
     )
     assert "robot.getCurrentCartesianPosition(" in java
     assert "radiusMm > MAX_START_TRANSLATION_MM" in java
+
+    center_move_body = java.split(
+        "private void moveFromBottomMiddleToPatternCenter", 1
+    )[1].split("private void runRelativePlanarGrid", 1)[0]
+    assert (
+        "captureRelativePose(0.0, 0.0, PATTERN_CENTER_Z_OFFSET_MM,"
+        in center_move_body
+    )
+    assert '"bottom_middle_to_pattern_center"' in center_move_body
+
+    bottom_move_body = java.split(
+        "private void moveFromPatternCenterToBottomMiddle", 1
+    )[1].split("private void runRelativePlanarGrid", 1)[0]
+    assert (
+        "captureRelativePose(0.0, 0.0, -PATTERN_CENTER_Z_OFFSET_MM,"
+        in bottom_move_body
+    )
+    assert '"pattern_center_to_bottom_middle"' in bottom_move_body
 
 
 def test_static_camera_relative_motion_and_pose_stream_contracts_are_preserved() -> (
@@ -146,7 +207,7 @@ def test_static_camera_relative_motion_and_pose_stream_contracts_are_preserved()
     )[0]
 
     assert "Transformation.ofDeg(" in java
-    assert "linRel(offset, calibrationStatiCenter)" in java
+    assert "linRel(offset, calibrationStaticBottomMiddle)" in java
     assert "new Frame(" not in java
     assert "command.runId,\n\t\t\t\tPOSE_TEMPLATE_BASE_PATH);" in java
     assert "poseStream.startMotion(motionName);" in java
@@ -159,8 +220,12 @@ def test_static_camera_relative_motion_and_pose_stream_contracts_are_preserved()
     assert ".setJointJerkRel(SMOOTH_MOTION_JOINT_JERK_REL)" in java
     assert "moveAsync(" not in java
     assert ".isFinished()" not in java
-    assert relative_motion_body.index("requireInsideCenterEnvelope(") < (
-        relative_motion_body.index("linRel(offset, calibrationStatiCenter)")
+    assert relative_motion_body.index(
+        "requireInsideRelativeTranslationEnvelope("
+    ) < (
+        relative_motion_body.index(
+            "linRel(offset, calibrationStaticBottomMiddle)"
+        )
     )
 
 
@@ -177,3 +242,4 @@ def test_static_camera_program_adds_depth_and_multi_axis_orientation_diversity()
     assert orientation_body.count("captureOrientationPoint(") == 6
     assert "ORIENTATION_DITHER_DEG = 10.0" in java
     assert "-alphaDeg, -betaDeg, -gammaDeg," in java
+    assert "captureRelativePose(0.0, 0.0, 0.0," in java

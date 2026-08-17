@@ -15,6 +15,14 @@ operator reviews another step in the same journey, but changing the active run
 folder clears run-setup and placement drafts instead of carrying them into the
 new run.
 
+The persistent top bar presents the active run display name and exact folder
+path as read-only context. **Change** opens **Run folders**, whose searchable
+chooser is the only normal place to switch an existing run or select a fresh
+sibling folder for the next acquisition. The optional display name saved in
+Workflow is metadata and defaults to the folder name; it never chooses or
+renames storage. One folder owns one physical acquisition, although its selected
+pose template may contain several simultaneously captured object instances.
+
 Camera identity controls follow one scope boundary. **Devices** stores reusable
 lab defaults: aliases have a nearby **Save alias** action, while mounting and
 supported orientation selectors save immediately. Each successful response is
@@ -347,6 +355,20 @@ Each page shows its workflow handoff because visiting or editing a reusable
 library does not by itself mutate the selected run. The global **Operator
 console guide** summarizes these scopes and the physical-execution boundary
 without replacing the step-local prerequisites and safety text.
+
+**Run folders** also owns the optional cluster-archive handoff. Its **Cluster
+storage** panel appears directly below the page header, before local run
+selection and detailed inventory. Verified copy and restore use the companion's
+independent storage capability and remain available when no pose-estimator
+runtime is installed or enabled. **Pose Estimation** is a downstream Inspect
+handoff after a complete annotation-bearing BOP export; its header links back
+to Cluster storage, it discovers only server-installed, qualified estimator
+methods, and it never becomes a Workflow stage. The Dashboard places the one
+fixed local companion control in its first readiness row, links directly to
+Cluster storage, and reports storage readiness separately from estimator
+readiness. Stopping it pauses both archive and estimator orchestration until
+restart reconciliation; all submitted background work remains visible in
+**Jobs**.
 
 The machine-readable contract mirrors the same compact five- and six-step
 spines. Its `required`, `optional`, and `automatic` fields let other clients

@@ -12,9 +12,16 @@ from posetestbot.web.routes import ui as web_ui
 from posetestbot.web.security import DEFAULT_RUN_ROOTS
 
 
-def _write_valid_run(path: Path, *, sequence: str, plan_only: bool = True) -> None:
+def _write_valid_run(
+    path: Path,
+    *,
+    sequence: str,
+    plan_only: bool = True,
+    run_name: str | None = None,
+) -> None:
     config = create_run_config(
         run_root=path,
+        run_name=run_name,
         sequence_id=sequence,
         plan_only=plan_only,
     )
@@ -34,7 +41,11 @@ def test_ui_run_discovery_is_contained_safe_and_newest_first(
     object_catalog = allowed / "object_catalog"
     outside = tmp_path / "outside"
     _write_valid_run(older, sequence="sync_aruco")
-    _write_valid_run(newer, sequence="real_full_capture_validation")
+    _write_valid_run(
+        newer,
+        sequence="real_full_capture_validation",
+        run_name="Newest calibration recording",
+    )
     invalid.mkdir()
     (invalid / "run_config.json").write_text("{not json\n")
     jobs.mkdir()
@@ -62,9 +73,12 @@ def test_ui_run_discovery_is_contained_safe_and_newest_first(
     assert paths.index(newer.as_posix()) < paths.index(older.as_posix())
     records = {item["name"]: item for item in payload["runs"]}
     assert records["newer"]["sequence"] == "real_full_capture_validation"
+    assert records["newer"]["run_name"] == "Newest calibration recording"
+    assert records["older"]["run_name"] == "older"
     assert records["newer"]["plan_only"] is True
     assert records["newer"]["config_valid"] is True
     assert records["invalid"]["config_valid"] is False
+    assert records["invalid"]["run_name"] is None
     assert records["invalid"]["config_error"]
 
 

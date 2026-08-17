@@ -7,6 +7,8 @@ include frontend/tsconfig.app.json
 include frontend/tsconfig.json
 include frontend/tsconfig.node.json
 include frontend/vite.config.ts
+include deploy/systemd/posetestbot-cluster.service.example
+include deploy/systemd/posetestbot-web.service.example
 include THIRD_PARTY_NOTICES.md
 include third_party/PoseTemplateCreator/LICENSE
 graft frontend/src

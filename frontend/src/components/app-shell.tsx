@@ -1,14 +1,9 @@
 import { useEffect, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
-import { ArrowRight, BookOpen, Bot, Boxes, ChartNoAxesCombined, Check, Circle, CircleDot, Cpu, FlaskConical, FolderOpen, Folders, Gauge, Github, Grid3X3, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Plus, Route, Sun, Workflow } from "lucide-react"
-import { toast } from "sonner"
+import { ArrowRight, BookOpen, Bot, Boxes, ChartNoAxesCombined, Check, Circle, CircleDot, Cpu, FlaskConical, FolderOpen, Folders, Gauge, Github, Grid3X3, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Route, Sun, Workflow } from "lucide-react"
 import { ConsoleGuide } from "@/components/console-guide"
 import { Button } from "@/components/ui/button"
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useOperator } from "@/providers/operator-provider"
 import { useTheme } from "@/providers/theme-provider"
@@ -61,22 +56,6 @@ interface WorkflowRuntimeStatus {
   label: string
 }
 
-function runRootForPath(path: string, allowedRoots: string[]) {
-  return [...allowedRoots]
-    .sort((left, right) => right.length - left.length)
-    .find((root) => path === root || path.startsWith(`${root.replace(/\/+$/, "")}/`))
-    ?? allowedRoots[0]
-}
-
-function runFolderPath(root: string, name: string) {
-  return `${root.replace(/\/+$/, "")}/${name.trim()}`
-}
-
-function validRunFolderName(name: string) {
-  const value = name.trim()
-  return Boolean(value) && value !== "." && value !== ".." && !/[\\/\0]/.test(value)
-}
-
 function workflowRuntimePresentation(runtime: WorkflowRuntimeStatus) {
   if (["failed", "canceled", "cancelled"].includes(runtime.value)) {
     return { label: runtime.label, className: "border-destructive/30 bg-destructive/10 text-destructive", icon: LockKeyhole }
@@ -110,14 +89,14 @@ function CurrentWorkflowCard({ workflow, runtime }: { workflow: ActiveWorkflow; 
 }
 
 export function AppShell() {
-  const { bootstrap, runs, selectedRun, selectRun, currentWorkflow } = useOperator()
+  const { bootstrap, runs, selectedRun, currentWorkflow } = useOperator()
   const { theme, setTheme } = useTheme()
   const location = useLocation()
-  const [newRunOpen, setNewRunOpen] = useState(false)
-  const [newRunRoot, setNewRunRoot] = useState(() => runRootForPath(bootstrap.default_run_root, bootstrap.allowed_run_roots))
-  const [newRunName, setNewRunName] = useState("")
   const [guideOpen, setGuideOpen] = useState(false)
   const workflowHref = currentWorkflow ? activeWorkflowHref(currentWorkflow) : "/workflow/setup"
+  const activeRun = runs.find((run) => run.path === selectedRun)
+  const activeFolderName = selectedRun.split("/").filter(Boolean).at(-1) ?? selectedRun
+  const activeRunName = activeRun?.run_name ?? activeFolderName
   const captureState = useQuery({
     queryKey: ["capture-jobs", selectedRun],
     queryFn: () => api<CaptureState>(query("/capture/jobs", { run_root: selectedRun })),
@@ -171,24 +150,6 @@ export function AppShell() {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" })
   }, [location.pathname])
 
-  const openRunDialog = () => {
-    setNewRunRoot(runRootForPath(selectedRun, bootstrap.allowed_run_roots))
-    setNewRunName("")
-    setNewRunOpen(true)
-  }
-
-  const applyNewRun = () => {
-    if (!validRunFolderName(newRunName)) {
-      toast.error("Run folder name must be one folder, not a path")
-      return
-    }
-    if (!selectRun(runFolderPath(newRunRoot, newRunName))) {
-      toast.error("Run folder must stay inside an allowed run root")
-      return
-    }
-    setNewRunOpen(false)
-  }
-
   return (
     <TooltipProvider delayDuration={150}>
       <div className="min-h-screen bg-workspace text-foreground">
@@ -222,39 +183,35 @@ export function AppShell() {
         </aside>
 
         <div className="min-w-0 xl:ml-[244px]">
-          <header className="sticky top-0 z-30 border-b border-border bg-card/95 px-4 py-3 backdrop-blur-xl sm:px-5 xl:h-[68px] xl:px-7 xl:py-0">
-            <div className="flex h-full flex-wrap items-center justify-between gap-3">
+          <header className="sticky top-0 z-30 border-b border-border bg-card/95 py-2 backdrop-blur-xl xl:h-[72px] xl:py-2">
+            <div className="mx-auto flex h-full max-w-[1600px] flex-wrap items-center justify-between gap-3 px-4 sm:px-5 xl:px-7">
               <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
                 <Link to="/dashboard" className="shrink-0 xl:hidden" aria-label="Open dashboard">
                   <img src={bootstrap.brand.logo_urls[theme]} alt="" className="size-8 rounded-[7px] object-contain" />
                 </Link>
                 <section
                   aria-label="Active run context"
-                  className="min-w-0 flex-1 xl:max-w-[780px]"
+                  className="flex h-14 min-w-0 flex-1 items-stretch gap-2 xl:max-w-[1000px]"
                   data-testid="active-run-context"
                 >
-                  <Select value={runs.some((run) => run.path === selectedRun) ? selectedRun : "__custom"} onValueChange={(value) => value === "__new" ? openRunDialog() : value !== "__custom" && selectRun(value)}>
-                    <SelectTrigger
-                      aria-label="Active run folder"
-                      className="h-[50px] min-w-0 gap-2 border-border bg-muted/45 px-3 py-1.5 text-left shadow-none hover:border-primary/45 hover:bg-muted/70 focus:ring-1 focus:ring-ring/55 focus:ring-offset-0"
-                      title={selectedRun}
-                    >
-                      <FolderOpen className="hidden size-[18px] shrink-0 text-primary-strong sm:block" aria-hidden="true" />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex min-w-0 items-center gap-2">
-                          <span className="shrink-0 text-[9px] font-bold uppercase tracking-[0.14em] text-foreground">Active run folder</span>
-                          <span className="hidden truncate text-[10px] text-muted-foreground md:inline">All run-owned pages and actions use this folder</span>
-                        </div>
-                        <SelectValue><span className="mt-0.5 block truncate font-mono text-[11px] font-semibold text-foreground">{selectedRun}</span></SelectValue>
+                  <div className="flex h-full min-w-0 flex-1 items-center gap-3 rounded-lg border border-border bg-muted/35 px-3.5" title={selectedRun}>
+                    <span className="hidden size-9 shrink-0 place-items-center rounded-md bg-primary/10 sm:grid"><FolderOpen className="size-[18px] text-primary-strong" aria-hidden="true" /></span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="shrink-0 text-[9px] font-bold uppercase tracking-[0.14em] text-primary-strong">Active acquisition run</span>
+                        <span className={cn("hidden rounded-full border px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider sm:inline-flex", activeRun?.config_valid ? "border-success/30 bg-success/10 text-success" : "border-warning/35 bg-warning/10 text-warning-foreground")}>{activeRun?.config_valid ? "Configured" : "Not configured"}</span>
                       </div>
-                      <span aria-hidden="true" className="hidden shrink-0 rounded-[6px] border bg-card px-2 py-1 text-[10px] font-semibold text-muted-foreground sm:inline">Change</span>
-                    </SelectTrigger>
-                    <SelectContent className="min-w-[var(--radix-select-trigger-width)] max-w-[min(720px,calc(100vw-2rem))]">
-                      {!runs.some((run) => run.path === selectedRun) && <SelectItem value="__custom">{selectedRun}</SelectItem>}
-                      {runs.map((run) => <SelectItem value={run.path} textValue={`${run.name} · ${run.config_valid ? run.sequence ?? "configured" : "not configured"} · ${run.path}`} key={run.path}><span className="flex min-w-0 flex-col gap-0.5 py-0.5"><span className="font-medium">{run.name} · {run.config_valid ? run.sequence ?? "configured" : "not configured"}</span><span className="truncate font-mono text-[10px] text-muted-foreground">{run.path}</span></span></SelectItem>)}
-                      <SelectItem value="__new"><span className="flex items-center gap-2"><Plus className="size-3.5" />Create or open a run folder…</span></SelectItem>
-                    </SelectContent>
-                  </Select>
+                      <div className="mt-1 flex min-w-0 items-center gap-2">
+                        <strong className="max-w-[36%] shrink-0 truncate text-[12px]" data-testid="active-run-name">{activeRunName}</strong>
+                        <span className="h-3.5 w-px shrink-0 bg-border" aria-hidden="true" />
+                        <span className="shrink-0 text-[8px] font-bold uppercase tracking-wider text-muted-foreground">Folder</span>
+                        <span className="min-w-0 truncate font-mono text-[9px] text-muted-foreground" data-testid="active-run-path">{selectedRun}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <Button asChild className="h-full shrink-0 rounded-lg px-4 shadow-sm" data-testid="change-active-run">
+                    <Link to="/run-folders" aria-label="Change active run folder"><Folders aria-hidden="true" /><span className="hidden sm:inline">Change run</span></Link>
+                  </Button>
                 </section>
               </div>
               <div className="flex shrink-0 items-center gap-2">
@@ -275,33 +232,6 @@ export function AppShell() {
         </div>
       </div>
 
-      <Dialog open={newRunOpen} onOpenChange={setNewRunOpen}>
-        <DialogContent>
-          <form onSubmit={(event) => { event.preventDefault(); applyNewRun() }} className="space-y-4">
-            <DialogHeader>
-              <DialogTitle>Create or open a run folder</DialogTitle>
-              <DialogDescription>Each acquisition run is a separate folder directly below an approved storage root. The run name saved during setup is metadata and does not choose this folder.</DialogDescription>
-            </DialogHeader>
-            <div className="flex gap-3 rounded-lg border bg-muted/40 p-3 text-xs leading-relaxed">
-              <FolderOpen className="mt-0.5 size-4 shrink-0 text-primary-strong" aria-hidden="true" />
-              <div>
-                <strong>Choose one folder per acquisition run.</strong>
-                <p className="mt-1 text-muted-foreground">A new folder starts unconfigured. Creating another sibling folder preserves the configuration and evidence of every earlier run.</p>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="new-run-root">Storage root</Label>
-              <Select value={newRunRoot} onValueChange={setNewRunRoot}>
-                <SelectTrigger id="new-run-root" aria-label="Run storage root"><SelectValue /></SelectTrigger>
-                <SelectContent>{bootstrap.allowed_run_roots.map((root) => <SelectItem value={root} key={root}>{root}</SelectItem>)}</SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2"><Label htmlFor="new-run-name">Run folder name</Label><Input id="new-run-name" autoFocus value={newRunName} onChange={(event) => setNewRunName(event.target.value)} placeholder="e.g. object_capture_20260803" /></div>
-            <div className="rounded-lg bg-muted p-3 text-xs text-muted-foreground"><strong className="text-foreground">Resulting run folder</strong><div className="mt-1 break-all font-mono" data-testid="new-run-path-preview">{validRunFolderName(newRunName) ? runFolderPath(newRunRoot, newRunName) : `${newRunRoot.replace(/\/+$/, "")}/…`}</div><p className="mt-2">The folder is created when its setup is saved.</p></div>
-            <DialogFooter><Button type="button" variant="outline" onClick={() => setNewRunOpen(false)}>Cancel</Button><Button type="submit" disabled={!validRunFolderName(newRunName)}>Use run folder</Button></DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
       <ConsoleGuide open={guideOpen} onOpenChange={setGuideOpen} />
     </TooltipProvider>
   )

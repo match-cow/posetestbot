@@ -10,12 +10,14 @@ import {
   CloudUpload,
   Clock3,
   FileWarning,
+  FolderPlus,
   FolderOpen,
   HardDrive,
   Link2,
   LoaderCircle,
   MoveRight,
   RefreshCw,
+  Search,
   ShieldCheck,
   Trash2,
 } from "lucide-react"
@@ -35,7 +37,7 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, errorMessage } from "@/lib/api"
-import type { ClusterArchive, ClusterJob, Job, RunFolder, RunFolderInventory, RunFolderInventory as Inventory } from "@/lib/contracts"
+import type { ClusterArchive, ClusterCapabilityDomain, ClusterJob, Job, RunFolder, RunFolderInventory, RunFolderInventory as Inventory } from "@/lib/contracts"
 import { cn, formatDate, titleCase } from "@/lib/utils"
 import { activeWorkflowHref } from "@/lib/workflow-session"
 import { useOperator } from "@/providers/operator-provider"
@@ -104,6 +106,43 @@ function isSelectedRunFolder(run: RunFolder, selectedRun: string) {
   const selected = normalizeRunPath(selectedRun)
   return [run.path, ...(run.relocation?.aliases ?? [])]
     .some((candidate) => normalizeRunPath(candidate) === selected)
+}
+
+function runRootForPath(path: string, allowedRoots: string[]) {
+  return [...allowedRoots]
+    .sort((left, right) => right.length - left.length)
+    .find((root) => path === root || path.startsWith(`${root.replace(/\/+$/, "")}/`))
+    ?? allowedRoots[0]
+}
+
+function runFolderPath(root: string, name: string) {
+  return `${root.replace(/\/+$/, "")}/${name.trim()}`
+}
+
+function validRunFolderName(name: string) {
+  const value = name.trim()
+  return Boolean(value) && value !== "." && value !== ".." && !/[\\/\0]/.test(value)
+}
+
+function runDisplayName(run: RunFolder) {
+  return run.config.run_name?.trim() || run.name
+}
+
+function runMatchesSearch(run: RunFolder, search: string) {
+  const needle = search.trim().toLocaleLowerCase()
+  if (!needle) return true
+  const searchable = [
+    runDisplayName(run),
+    run.name,
+    run.path,
+    run.root,
+    run.config.sequence ?? "",
+    run.contents.dataset_mode ?? "",
+    ...run.contents.object_names,
+    ...run.contents.sensors.flatMap((sensor) => [sensor.name, sensor.sensor_type, sensor.device_id, sensor.mounting_mode]),
+    ...evidenceEntries(run).filter(([, , exists]) => exists).map(([, label]) => label),
+  ].join("\n").toLocaleLowerCase()
+  return searchable.includes(needle)
 }
 
 function jobTone(status: string) {
@@ -270,7 +309,7 @@ function ClusterStorageSection({ inventory }: { inventory: RunFolderInventory })
 
   const archives = useQuery({
     queryKey: ["cluster-archives"],
-    queryFn: () => api<{ archives: ClusterArchive[]; integration: { enabled: boolean } }>("/cluster/archives"),
+    queryFn: () => api<{ archives: ClusterArchive[]; integration: { enabled: boolean }; storage?: ClusterCapabilityDomain }>("/cluster/archives"),
     retry: false,
     refetchInterval: (state) => state.state.data?.archives.some((archive) => !["succeeded", "failed", "canceled"].includes(archive.state)) ? 2_000 : 15_000,
   })
@@ -316,14 +355,18 @@ function ClusterStorageSection({ inventory }: { inventory: RunFolderInventory })
   })
   const source = runs.find((run) => run.path === effectiveSourcePath) ?? null
   const integration = archives.data?.integration
-  const mutationReady = Boolean(integration?.enabled && operator.trim().length >= 2)
+  const storage = archives.data?.storage
+  const storageMutationEnabled = storage?.mutation ?? Boolean(integration?.enabled)
+  const storageConnected = storage?.ready ?? Boolean(integration?.enabled)
+  const mutationReady = Boolean(integration?.enabled && storageConnected && storageMutationEnabled && operator.trim().length >= 2)
   const remoteOnlyCount = (archives.data?.archives ?? []).filter((archive) => !runs.some((run) => run.path === archive.source_run_root)).length
   const remoteOperationActive = Boolean(remoteJobId && !remoteJob.data?.job.terminal)
 
   return <Card data-testid="cluster-storage-section" className="border-primary/25">
     <CardHeader>
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div><CardTitle className="flex items-center gap-2"><Archive className="size-5 text-primary-strong" />Cluster storage</CardTitle><CardDescription className="mt-1">Copy complete runs to durable PROJECT storage or restore a verified archive. Archive creation never deletes the local run; use the separate confirmed local delete control when appropriate.</CardDescription></div>
+        <div><CardTitle className="flex items-center gap-2"><Archive className="size-5 text-primary-strong" />Cluster storage</CardTitle><CardDescription className="mt-1">Copy complete runs to durable PROJECT storage or restore a verified archive. This capability is independent of every pose-estimator runtime.</CardDescription></div>
+        {storage && <StatusBadge status={storage.ready ? storage.mutation ? "ready" : "read-only" : "unavailable"} tone={storage.ready ? storage.mutation ? "success" : "warning" : "destructive"} />}
         <Button variant="outline" size="sm" onClick={() => archives.refetch()} disabled={archives.isFetching}><RefreshCw className={archives.isFetching ? "animate-spin" : undefined} />Refresh remote inventory</Button>
       </div>
     </CardHeader>
@@ -331,6 +374,9 @@ function ClusterStorageSection({ inventory }: { inventory: RunFolderInventory })
       {archives.isError
         ? <div className="rounded-lg border bg-muted/25 p-3 text-xs text-muted-foreground">Cluster storage is unavailable: {errorMessage(archives.error)}. Local run-folder controls remain available.</div>
         : <>
+          {integration && !integration.enabled && <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/35 bg-warning/5 p-3 text-xs text-warning-foreground"><div><div className="font-semibold">Cluster integration is disabled</div><div className="mt-1">Configure or start the fixed companion from Dashboard before archive copy or restore.</div></div><Button asChild size="sm" variant="outline"><Link to="/dashboard">Open Dashboard</Link></Button></div>}
+          {storage && !storageMutationEnabled && <div className="rounded-lg border border-warning/35 bg-warning/5 p-3 text-xs text-warning-foreground"><div className="font-semibold">Archive mutation is disabled</div><div className="mt-1">{storage.blockers.join(" ") || "Enable archive mutation in the controller; estimator qualification is not required."}</div></div>}
+          {storage && !storage.ready && <div className="rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs text-destructive"><div className="font-semibold">Cluster storage is not ready</div><div className="mt-1">{storage.blockers.join(" ") || "The transfer connection or project quota check is unavailable."}</div></div>}
           <div className="grid gap-3 xl:grid-cols-[minmax(260px,1fr)_minmax(220px,0.65fr)_auto]">
             <div className="space-y-1.5"><Label>Local archive source</Label><Select value={effectiveSourcePath} onValueChange={setSourcePath}><SelectTrigger aria-label="Local archive source"><SelectValue placeholder="Choose a local run" /></SelectTrigger><SelectContent>{runs.map((run) => <SelectItem value={run.path} key={run.path}>{run.name} · {formatBytes(run.size_bytes)}</SelectItem>)}</SelectContent></Select></div>
             <div className="space-y-1.5"><Label htmlFor="archive-operator">Operator</Label><Input id="archive-operator" value={operator} onChange={(event) => setOperator(event.target.value)} placeholder="Name or lab account" maxLength={120} /></div>
@@ -348,7 +394,7 @@ function ClusterStorageSection({ inventory }: { inventory: RunFolderInventory })
         </>}
     </CardContent>
 
-    <Dialog open={Boolean(restoreArchive)} onOpenChange={(open) => !open && !restore.isPending && setRestoreArchive(null)}><DialogContent><DialogHeader><DialogTitle>Restore verified archive</DialogTitle><DialogDescription>The controller downloads into temporary storage, verifies the archive and every regular file, then atomically publishes the run below an approved root.</DialogDescription></DialogHeader><div className="space-y-3"><div className="space-y-1.5"><Label>Destination root</Label><Select value={destinationRoot} onValueChange={setDestinationRoot}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{inventory.roots.filter((root) => root.exists).map((root) => <SelectItem value={root.path} key={root.path}>{root.path} · {formatBytes(root.storage.free_bytes)} free</SelectItem>)}</SelectContent></Select></div><div className="space-y-1.5"><Label htmlFor="restore-name">Run folder name</Label><Input id="restore-name" value={destinationName} onChange={(event) => setDestinationName(event.target.value)} /></div></div><DialogFooter><Button variant="outline" onClick={() => setRestoreArchive(null)} disabled={restore.isPending}>Cancel</Button><Button onClick={() => restoreArchive && restore.mutate(restoreArchive)} disabled={!restoreArchive || !destinationRoot || !destinationName.trim() || restore.isPending}>{restore.isPending ? <LoaderCircle className="animate-spin" /> : <CloudDownload />}Queue verified restore</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={Boolean(restoreArchive)} onOpenChange={(open) => !open && !restore.isPending && setRestoreArchive(null)}><DialogContent><DialogHeader><DialogTitle>Restore verified archive</DialogTitle><DialogDescription>The controller downloads into temporary storage, verifies the archive and every regular file, then atomically publishes the run below an approved root.</DialogDescription></DialogHeader><div className="space-y-3"><div className="space-y-1.5"><Label>Destination root</Label><Select value={destinationRoot} onValueChange={setDestinationRoot}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{inventory.roots.filter((root) => root.exists).map((root) => <SelectItem value={root.path} key={root.path}>{root.path} · {formatBytes(root.storage.free_bytes)} free</SelectItem>)}</SelectContent></Select></div><div className="space-y-1.5"><Label htmlFor="restore-name">Run folder name</Label><Input id="restore-name" value={destinationName} onChange={(event) => setDestinationName(event.target.value)} /></div></div><DialogFooter><Button variant="outline" onClick={() => setRestoreArchive(null)} disabled={restore.isPending}>Cancel</Button><Button onClick={() => restoreArchive && restore.mutate(restoreArchive)} disabled={!restoreArchive || !destinationRoot || !destinationName.trim() || !mutationReady || restore.isPending}>{restore.isPending ? <LoaderCircle className="animate-spin" /> : <CloudDownload />}Queue verified restore</Button></DialogFooter></DialogContent></Dialog>
   </Card>
 }
 
@@ -379,10 +425,16 @@ function RunDetails({ run }: { run: RunFolder }) {
 
 export function RunFoldersPage() {
   const queryClient = useQueryClient()
-  const { currentWorkflow, selectedRun } = useOperator()
+  const { bootstrap, currentWorkflow, runs: indexedRuns, selectedRun, selectRun } = useOperator()
   const [moveTarget, setMoveTarget] = useState<RunFolder | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<RunFolder | null>(null)
   const [destinationRoot, setDestinationRoot] = useState("")
+  const [runSearch, setRunSearch] = useState("")
+  const [runRootFilter, setRunRootFilter] = useState("all")
+  const [runSort, setRunSort] = useState("recent")
+  const [storageSearch, setStorageSearch] = useState("")
+  const [newRunRoot, setNewRunRoot] = useState(() => runRootForPath(selectedRun, bootstrap.allowed_run_roots))
+  const [newRunFolderName, setNewRunFolderName] = useState("")
   const [trackedOperation, setTrackedOperation] = useState<TrackedOperation | null>(null)
   const automaticRefreshSignature = useRef<string | null>(null)
   const handledTerminalJob = useRef<string | null>(null)
@@ -525,8 +577,28 @@ export function RunFoldersPage() {
     () => [...(inventory.data?.runs ?? [])].sort((left, right) => right.size_bytes - left.size_bytes || right.modified_at.localeCompare(left.modified_at)),
     [inventory.data?.runs],
   )
+  const selectableRuns = useMemo(() => {
+    const values = (inventory.data?.runs ?? []).filter((run) => {
+      if (runRootFilter !== "all" && run.root !== runRootFilter) return false
+      return runMatchesSearch(run, runSearch)
+    })
+    return [...values].sort((left, right) => {
+      if (runSort === "name") return runDisplayName(left).localeCompare(runDisplayName(right)) || left.path.localeCompare(right.path)
+      if (runSort === "size") return right.size_bytes - left.size_bytes || right.modified_at.localeCompare(left.modified_at)
+      return right.modified_at.localeCompare(left.modified_at) || left.path.localeCompare(right.path)
+    })
+  }, [inventory.data?.runs, runRootFilter, runSearch, runSort])
+  const storageRuns = useMemo(
+    () => runs.filter((run) => runMatchesSearch(run, storageSearch)),
+    [runs, storageSearch],
+  )
   const totalSize = runs.reduce((total, run) => total + run.size_bytes, 0)
   const totalFiles = runs.reduce((total, run) => total + run.file_count, 0)
+  const activeInventoryRun = runs.find((run) => isSelectedRunFolder(run, selectedRun))
+  const activeIndexedRun = indexedRuns.find((run) => run.path === selectedRun)
+  const activeFolderName = selectedRun.split("/").filter(Boolean).at(-1) ?? selectedRun
+  const activeRunName = activeInventoryRun?.config.run_name ?? activeIndexedRun?.run_name ?? activeFolderName
+  const activeConfigured = activeInventoryRun?.config.valid ?? activeIndexedRun?.config_valid ?? false
   const maintenanceBlocking = (inventory.data?.maintenance?.unresolved_count ?? 0) > 0
   const destinationRoots = (inventory.data?.roots ?? []).filter((root) => root.path !== moveTarget?.root)
   const inventoryRefreshing = inventory.data?.inventory_state === "refreshing"
@@ -543,21 +615,105 @@ export function RunFoldersPage() {
     setMoveTarget(run)
   }
 
+  const activateRun = (path: string, label: string) => {
+    if (!selectRun(path)) {
+      toast.error("Run folder must stay inside an allowed storage root")
+      return
+    }
+    toast.success("Active run changed", { description: `${label} is now used by every run-owned page and action.` })
+  }
+
+  const activateNewRun = () => {
+    if (!validRunFolderName(newRunFolderName)) {
+      toast.error("Run folder name must be one folder, not a path")
+      return
+    }
+    const path = runFolderPath(newRunRoot, newRunFolderName)
+    if (!selectRun(path)) {
+      toast.error("Run folder must stay inside an allowed storage root")
+      return
+    }
+    setNewRunFolderName("")
+    toast.success("New acquisition folder selected", { description: "Workflow creates and configures the folder when setup is saved." })
+  }
+
   return <div className="space-y-6">
     <PageHeader
-      eyebrow="Lab-wide storage"
+      eyebrow="Active run and storage"
       title="Run folders"
-      description="Compare every discovered acquisition run across the allowed storage roots, including its measured disk footprint, configured sensors and objects, durable evidence, and relocation history."
+      description="Choose the acquisition folder used by every run-owned page, start a fresh folder for the next capture, and manage existing run storage."
       actions={<Button variant="outline" onClick={() => refreshInventory.mutate(false)} disabled={inventoryRefreshing || operationBlocking}><RefreshCw className={inventoryRefreshing ? "animate-spin" : undefined} />Refresh inventory</Button>}
     />
+    {inventory.data
+      ? <ClusterStorageSection inventory={inventory.data} />
+      : <Card data-testid="cluster-storage-section" className="border-primary/25">
+          <CardHeader><CardTitle className="flex items-center gap-2"><Archive className="size-5 text-primary-strong" />Cluster storage</CardTitle><CardDescription>Copy complete runs to durable PROJECT storage or restore a verified archive. This capability is independent of every pose-estimator runtime.</CardDescription></CardHeader>
+          <CardContent>{inventory.isPending
+            ? <div className="space-y-2" aria-label="Loading local run inventory for cluster storage"><Skeleton className="h-10 w-full" /><Skeleton className="h-16 w-full" /></div>
+            : <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs text-destructive"><span>Cluster storage cannot select a local source because run-folder inventory is unavailable: {errorMessage(inventory.error)}</span><Button variant="outline" size="sm" onClick={() => inventory.refetch()}><RefreshCw />Retry inventory</Button></div>}
+          </CardContent>
+        </Card>}
+    <Card data-testid="active-run-selection" className="border-primary/35 bg-primary/5">
+      <CardHeader>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div><CardTitle>Active acquisition run</CardTitle><CardDescription className="mt-1">This is the storage and provenance context used by Workflow, Cell View, BOP Evaluation, Jobs, and every other run-owned action.</CardDescription></div>
+          <StatusBadge status={activeConfigured ? "configured" : "not configured"} tone={activeConfigured ? "success" : "warning"} />
+        </div>
+      </CardHeader>
+      <CardContent className="grid gap-5 xl:grid-cols-[minmax(0,1.05fr)_minmax(420px,0.95fr)]">
+        <div className="rounded-lg border bg-card p-4" data-testid="current-run-details">
+          <div className="grid gap-4 md:grid-cols-[minmax(180px,0.45fr)_minmax(0,1fr)]">
+            <div><div className="text-[9px] font-bold uppercase tracking-[0.13em] text-muted-foreground">Run name</div><div className="mt-1 break-words font-display text-xl font-semibold" data-testid="run-folder-active-name">{activeRunName}</div><p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">Human-readable metadata. It defaults to the folder name when Workflow setup is saved.</p></div>
+            <div><div className="text-[9px] font-bold uppercase tracking-[0.13em] text-muted-foreground">Run folder</div><div className="mt-1 font-mono text-sm font-semibold">{activeFolderName}</div><div className="mt-1 break-all font-mono text-[10px] leading-relaxed text-muted-foreground" data-testid="run-folder-active-path">{selectedRun}</div><p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">Filesystem boundary for one acquisition and all of its raw and derived evidence.</p></div>
+          </div>
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-4"><p className="max-w-2xl text-[11px] leading-relaxed text-muted-foreground">Use one sibling folder per physical acquisition. A multi-object template may place several objects in that single capture.</p><Button asChild size="sm"><Link to={workflowHref}>Open active run in Workflow</Link></Button></div>
+        </div>
+        <form className="rounded-lg border bg-card p-4" onSubmit={(event) => { event.preventDefault(); activateNewRun() }}>
+          <div className="flex items-start gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10"><FolderPlus className="size-4 text-primary-strong" /></span><div><h2 className="text-sm font-semibold">Start another acquisition</h2><p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">Select a new sibling folder now. It remains unconfigured until you save setup in Workflow; its run name will initially default to this folder name.</p></div></div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(220px,1fr)_minmax(190px,0.8fr)]">
+            <div className="space-y-1.5"><Label htmlFor="new-run-root">Storage root</Label><Select value={newRunRoot} onValueChange={setNewRunRoot}><SelectTrigger id="new-run-root" aria-label="New run storage root"><SelectValue /></SelectTrigger><SelectContent>{bootstrap.allowed_run_roots.map((root) => <SelectItem value={root} key={root}>{root}</SelectItem>)}</SelectContent></Select></div>
+            <div className="space-y-1.5"><Label htmlFor="new-run-folder-name">Run folder name</Label><Input id="new-run-folder-name" value={newRunFolderName} onChange={(event) => setNewRunFolderName(event.target.value)} placeholder="object_A_20260806_001" /></div>
+          </div>
+          <div className="mt-3 rounded-md bg-muted p-3"><div className="text-[9px] font-bold uppercase tracking-[0.12em] text-muted-foreground">Resulting folder</div><div className="mt-1 break-all font-mono text-[10px]" data-testid="new-run-path-preview">{validRunFolderName(newRunFolderName) ? runFolderPath(newRunRoot, newRunFolderName) : `${newRunRoot.replace(/\/+$/, "")}/…`}</div></div>
+          <div className="mt-3 flex justify-end"><Button type="submit" disabled={!validRunFolderName(newRunFolderName)}><FolderPlus />Use new run folder</Button></div>
+        </form>
+      </CardContent>
+    </Card>
+
+    <Card data-testid="run-folder-chooser">
+      <CardHeader className="border-b bg-muted/20">
+        <div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle>Choose an existing run</CardTitle><CardDescription className="mt-1">Search by run name, folder, path, object, sensor, or workflow sequence. Selecting a run changes browser-local context; it does not modify that run.</CardDescription></div><div className="text-[10px] text-muted-foreground">{selectableRuns.length.toLocaleString()} of {runs.length.toLocaleString()} folders shown</div></div>
+        <div className="mt-4 grid gap-3 md:grid-cols-[minmax(280px,1fr)_minmax(220px,0.55fr)_180px]">
+          <div className="relative"><Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input aria-label="Search run folders" className="pl-9" value={runSearch} onChange={(event) => setRunSearch(event.target.value)} placeholder="Search runs, objects, sensors…" /></div>
+          <Select value={runRootFilter} onValueChange={setRunRootFilter}><SelectTrigger aria-label="Filter run folders by storage root"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All storage roots</SelectItem>{bootstrap.allowed_run_roots.map((root) => <SelectItem value={root} key={root}>{root}</SelectItem>)}</SelectContent></Select>
+          <Select value={runSort} onValueChange={setRunSort}><SelectTrigger aria-label="Sort run folders"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="recent">Recently changed</SelectItem><SelectItem value="name">Run name</SelectItem><SelectItem value="size">Largest first</SelectItem></SelectContent></Select>
+        </div>
+      </CardHeader>
+      <CardContent className="p-0">
+        {inventory.isPending
+          ? <div className="space-y-2 p-4"><Skeleton className="h-16" /><Skeleton className="h-16" /><Skeleton className="h-16" /></div>
+          : inventory.isError
+            ? <div className="p-5 text-sm text-destructive">Run-folder inventory is unavailable: {errorMessage(inventory.error)}</div>
+            : selectableRuns.length === 0
+              ? <div className="p-6 text-center text-sm text-muted-foreground">{runs.length ? "No run folders match these filters." : "No configured run folders have been discovered yet. Start a new acquisition above."}</div>
+              : <div className="max-h-[430px] overflow-auto" data-testid="run-folder-selection-list"><table className="w-full min-w-[980px] text-left text-xs"><thead className="sticky top-0 z-10 border-b bg-muted text-[9px] font-bold uppercase tracking-wider text-muted-foreground"><tr><th className="px-4 py-2.5">Run</th><th className="px-4 py-2.5">Capture contents</th><th className="px-4 py-2.5">Evidence</th><th className="px-4 py-2.5">Last changed</th><th className="px-4 py-2.5 text-right">Selection</th></tr></thead><tbody className="divide-y">{selectableRuns.map((run) => {
+                const active = isSelectedRunFolder(run, selectedRun)
+                return <tr className={cn(active && "bg-primary/5")} data-testid="run-selection-row" data-run-path={run.path} key={run.path}>
+                  <td className="px-4 py-3"><div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{runDisplayName(run)}</span>{active && <StatusBadge status="active" tone="informational">Active run</StatusBadge>}{!run.config.valid && <StatusBadge status="invalid" tone="destructive" />}</div><div className="mt-1 text-[10px] text-muted-foreground">Folder <span className="font-mono">{run.name}</span></div><div className="mt-1 max-w-[420px] truncate font-mono text-[9px] text-muted-foreground" title={run.path}>{run.path}</div></td>
+                  <td className="px-4 py-3"><div>{plural(run.contents.object_count, "object instance")} · {run.contents.enabled_sensor_count}/{run.contents.sensor_count} sensors enabled</div><div className="mt-1 max-w-[320px] truncate text-[10px] text-muted-foreground" title={run.contents.object_names.join(" · ")}>{run.contents.object_names.length ? run.contents.object_names.join(" · ") : run.contents.dataset_mode === "objectless" ? "Objectless recording" : "No selected objects"}</div></td>
+                  <td className="px-4 py-3"><EvidenceSummary run={run} /></td>
+                  <td className="px-4 py-3"><div>{formatDate(run.modified_at)}</div><div className="mt-1 font-mono text-[9px] text-muted-foreground">{formatBytes(run.size_bytes)}</div></td>
+                  <td className="px-4 py-3 text-right"><Button size="sm" variant={active ? "secondary" : "outline"} disabled={active} aria-label={active ? `${run.name} is the active run` : `Use ${run.name} as active run`} onClick={() => activateRun(run.path, runDisplayName(run))}>{active ? "Current run" : "Use this run"}</Button></td>
+                </tr>
+              })}</tbody></table></div>}
+      </CardContent>
+    </Card>
     <ProcessHandoff
       title="Manage storage here; acquire and process data in Workflow"
       description="Moving or deleting a run changes its managed storage, not its captured configuration. Return to the guided workflow to configure, record, synchronize, or export the active run."
       to={workflowHref}
       action="Open workflow"
     />
-
-    {inventory.data && <ClusterStorageSection inventory={inventory.data} />}
 
     {inventory.data?.maintenance && (inventory.data.maintenance.recovered_count > 0 || inventory.data.maintenance.unresolved_count > 0) && <Card data-testid="run-folder-maintenance" className={inventory.data.maintenance.unresolved_count > 0 ? "border-destructive/45 bg-destructive/5" : "border-primary/35 bg-primary/5"}>
       <CardHeader>
@@ -622,16 +778,17 @@ export function RunFoldersPage() {
           ? <EmptyState icon={FolderOpen} title={inventoryRefreshing ? "Run-folder inventory is being measured" : "No run folders found"} description={inventoryRefreshing ? "The background inventory job is measuring allowed roots. This page updates when it completes." : "Configured acquisition runs will appear after they contain a run configuration or dataset manifest and the inventory is refreshed."} />
           : <Card>
             <CardHeader className="border-b bg-muted/20">
-              <div className="flex flex-wrap items-end justify-between gap-3"><div><CardTitle>Existing run folders</CardTitle><CardDescription className="mt-1">Largest folders are shown first. Actions are disabled for the active run and while another storage operation is running.</CardDescription></div><div className="font-mono text-[10px] text-muted-foreground">{formatBytes(totalSize)} · {plural(totalFiles, "file")}</div></div>
+              <div className="flex flex-wrap items-end justify-between gap-3"><div><CardTitle>Storage inventory and actions</CardTitle><CardDescription className="mt-1">Detailed folders are shown largest first. Select the active run in the chooser above; move and delete remain unavailable for that active folder.</CardDescription></div><div className="font-mono text-[10px] text-muted-foreground">{storageRuns.length.toLocaleString()} of {runs.length.toLocaleString()} folders · {formatBytes(totalSize)} · {plural(totalFiles, "file")}</div></div>
+              <div className="relative mt-4 max-w-2xl"><Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input aria-label="Search storage inventory" className="bg-card pl-9" value={storageSearch} onChange={(event) => setStorageSearch(event.target.value)} placeholder="Search run name, folder, path, object, sensor, or evidence…" /></div>
             </CardHeader>
             <CardContent className="p-0">
-              <div data-testid="run-folders-table" className="overflow-x-auto">
+              <div data-testid="run-folders-table" className="max-h-[720px] overflow-auto">
                 <table className="w-full min-w-[1280px] table-fixed text-left">
-                  <thead className="border-b bg-muted/35 text-[9px] font-bold uppercase tracking-[0.12em] text-muted-foreground">
+                  <thead className="sticky top-0 z-10 border-b bg-muted text-[9px] font-bold uppercase tracking-[0.12em] text-muted-foreground">
                     <tr><th className="w-[19%] px-4 py-3">Run</th><th className="w-[15%] px-4 py-3">Measured size</th><th className="w-[25%] px-4 py-3">Configuration and contents</th><th className="w-[16%] px-4 py-3">Evidence</th><th className="w-[14%] px-4 py-3">Location</th><th className="w-[11%] px-4 py-3 text-right">Actions</th></tr>
                   </thead>
                   <tbody className="divide-y divide-border">
-                    {runs.map((run) => {
+                    {storageRuns.map((run) => {
                       const active = isSelectedRunFolder(run, selectedRun)
                       const actionDisabled = active || operationBlocking || maintenanceBlocking || !inventoryReadyForMutation
                       const hasDestination = (inventory.data?.roots ?? []).some((root) => root.exists && root.identity && root.path !== run.root)
@@ -675,6 +832,7 @@ export function RunFoldersPage() {
                         </td>
                       </tr>
                     })}
+                    {storageRuns.length === 0 && <tr><td className="px-4 py-10 text-center text-sm text-muted-foreground" colSpan={6}>No storage rows match this search.</td></tr>}
                   </tbody>
                 </table>
               </div>

@@ -116,6 +116,12 @@ function clusterTone(status: string) {
   return "neutral" as const
 }
 
+function estimatorLabel(job: ClusterJob) {
+  const estimatorId = typeof job.payload.estimator_id === "string" ? job.payload.estimator_id : "foundationpose"
+  if (estimatorId === "foundationpose") return "FoundationPose"
+  return estimatorId.split(/[-_]/).filter(Boolean).map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" ")
+}
+
 function ClusterJobsSection() {
   const queryClient = useQueryClient()
   const { selectedRun } = useOperator()
@@ -156,7 +162,7 @@ function ClusterJobsSection() {
   return <Card data-testid="cluster-jobs-section" className="border-primary/25">
     <CardHeader className="pb-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div><CardTitle className="flex items-center gap-2"><Server className="size-5 text-primary-strong" />Cluster provider</CardTitle><CardDescription className="mt-1">Durable FoundationPose and SLURM state from the loopback companion controller. The bounded view loads at most 50 recent jobs.</CardDescription></div>
+        <div><CardTitle className="flex items-center gap-2"><Server className="size-5 text-primary-strong" />Cluster provider</CardTitle><CardDescription className="mt-1">Durable estimator and SLURM state from the loopback companion controller. The bounded view loads at most 50 recent jobs.</CardDescription></div>
         <div className="flex gap-2"><Button asChild variant="outline" size="sm"><Link to="/pose-estimation"><Cpu />Pose Estimation</Link></Button><Button variant="outline" size="sm" onClick={() => jobs.refetch()} disabled={jobs.isFetching}><RefreshCw className={jobs.isFetching ? "animate-spin" : undefined} />Refresh</Button></div>
       </div>
     </CardHeader>
@@ -175,7 +181,7 @@ function ClusterJobsSection() {
               ? <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">No matching cluster jobs.</p>
               : <div className="max-h-[440px] space-y-2 overflow-y-auto pr-1">
                 {filtered.map((job) => <div key={job.job_id} data-testid={`cluster-job-${job.job_id}`} className="grid items-center gap-3 rounded-lg border bg-muted/15 p-3 xl:grid-cols-[minmax(0,1fr)_150px_190px_auto]">
-                  <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-semibold">FoundationPose</span><StatusBadge status={job.state} tone={clusterTone(job.state)} /></div><div className="mt-1 truncate font-mono text-[11px] text-muted-foreground" title={job.job_id}>{job.job_id}</div><div className="mt-1 truncate font-mono text-[10px] text-muted-foreground" title={String(job.payload.run_root ?? "")}>{job.payload.run_root === selectedRun ? "Active run · " : "Other run · "}{String(job.payload.run_root ?? "unknown")}</div></div>
+                  <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{estimatorLabel(job)}</span><StatusBadge status={job.state} tone={clusterTone(job.state)} /></div><div className="mt-1 truncate font-mono text-[11px] text-muted-foreground" title={job.job_id}>{job.job_id}</div><div className="mt-1 truncate font-mono text-[10px] text-muted-foreground" title={String(job.payload.run_root ?? "")}>{job.payload.run_root === selectedRun ? "Active run · " : "Other run · "}{String(job.payload.run_root ?? "unknown")}</div></div>
                   <div><div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">SLURM</div><div className="mt-1 font-mono text-xs">{job.slurm_job_id ?? "not assigned"}</div></div>
                   <div><div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Updated</div><div className="mt-1 text-xs">{formatDate(job.updated_at)}</div>{job.result && <div className="mt-1 text-[10px] text-muted-foreground">{job.result.estimate_count} estimates · {job.result.failure_count} failures</div>}</div>
                   <div className="flex gap-2 xl:justify-end"><Button variant="outline" size="sm" onClick={() => setDetailId(job.job_id)}><FileText />Log</Button>{CLUSTER_ACTIVE.has(job.state) && <Button variant="destructive" size="sm" onClick={() => cancel.mutate(job)} disabled={cancel.isPending || job.state === "canceling"}><Ban />{job.state === "canceling" ? "Canceling…" : "Cancel"}</Button>}</div>
@@ -267,7 +273,7 @@ export function JobsPage() {
   const workflowHref = currentWorkflow ? activeWorkflowHref(currentWorkflow) : "/workflow/setup"
 
   return <div className="space-y-6">
-    <PageHeader eyebrow="Local and cluster providers" title="Jobs & resource locks" description="Monitor local background work and durable external FoundationPose jobs, inspect live logs, and cancel only the exact recorded workload. Each job shows whether it belongs to the active run." actions={<Button variant="outline" onClick={() => jobs.refetch()} disabled={jobs.isFetching}><RefreshCw className={jobs.isFetching ? "animate-spin" : undefined} />Refresh local jobs</Button>} />
+    <PageHeader eyebrow="Local and cluster providers" title="Jobs & resource locks" description="Monitor local background work and durable external estimator jobs, inspect live logs, and cancel only the exact recorded workload. Each job shows whether it belongs to the active run." actions={<Button variant="outline" onClick={() => jobs.refetch()} disabled={jobs.isFetching}><RefreshCw className={jobs.isFetching ? "animate-spin" : undefined} />Refresh local jobs</Button>} />
     <ProcessHandoff
       title="Jobs continue when you leave their originating page"
       description="Use this page for status, resource ownership, logs, and safe cancellation. Committed storage operations remain non-cancelable so they cannot be interrupted midway. When a job finishes, return to the guided workflow to review its durable evidence and continue."

@@ -19,6 +19,7 @@ import { formatDate, titleCase } from "@/lib/utils"
 import { workflowJourneyMetadata, type WorkflowJourneyId, type WorkflowProgressStatus } from "@/lib/workflow-session"
 import { useOperator } from "@/providers/operator-provider"
 import { RoomMonitor } from "@/features/dashboard/room-monitor"
+import { ClusterControllerControl } from "@/features/dashboard/cluster-controller-control"
 
 function SummaryCard({ icon: Icon, label, value, status, tone, detail }: { icon: typeof Bot; label: string; value: string; status?: string; tone: StatusTone; detail: string }) {
   return (
@@ -333,7 +334,7 @@ export function DashboardPage() {
   const availableRuntimes = runtimeItems.filter((item) => item.available).length
   const workflowEvidence = dashboardWorkflowEvidence(overview.data, Boolean(annotationSetup.data?.current_output?.verified))
 
-  const refresh = () => queryClient.invalidateQueries({ predicate: (item) => ["overview", "storage", "sensors", "robot", "runtime", "capture-jobs", "jobs", "bop-annotations"].includes(String(item.queryKey[0])) })
+  const refresh = () => queryClient.invalidateQueries({ predicate: (item) => ["overview", "storage", "sensors", "robot", "runtime", "capture-jobs", "jobs", "bop-annotations", "cluster-controller-service", "cluster-status"].includes(String(item.queryKey[0])) })
   const statusErrors = [
     overview.isError && "run evidence",
     storage.isError && "run storage",
@@ -352,19 +353,20 @@ export function DashboardPage() {
       {statusErrors.length > 0 && <div role="alert" className="flex flex-col gap-3 rounded-xl border border-destructive/35 bg-destructive/5 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-start gap-3"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="text-sm font-semibold">Some dashboard status is unavailable</div><p className="mt-1 text-xs text-muted-foreground">Could not load {statusErrors.join(", ")}. Missing responses are not treated as ready; refresh before relying on this overview.</p></div></div><Button variant="outline" size="sm" onClick={refresh}><RefreshCw />Refresh status</Button></div>}
       {activeCapture && <div className="flex flex-col items-start justify-between gap-4 rounded-xl border border-primary/35 bg-primary/10 px-5 py-4 sm:flex-row sm:items-center"><div className="flex items-center gap-3"><span className="relative flex size-3"><span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-60" /><span className="relative inline-flex size-3 rounded-full bg-primary" /></span><div><div className="font-semibold">Capture is {activeCapture.status}</div><div className="text-xs text-muted-foreground">{activeCapture.name} · continues after navigation; use Jobs for live logs and stop controls</div></div></div><div className="flex flex-wrap gap-2"><Button variant="destructive" size="sm" onClick={() => stopCapture.mutate(activeCapture.id)} disabled={stopCapture.isPending || activeCapture.status === "canceling"}><Square />{stopCapture.isPending || activeCapture.status === "canceling" ? "Stopping…" : "Stop capture"}</Button><Button asChild size="sm"><Link to="/jobs">Open controls <ArrowRight /></Link></Button></div></div>}
 
-      <div className="operator-grid">
-        <RoomMonitor />
-        <DashboardJobActivity jobs={jobs.data?.jobs} pending={jobs.isPending} failed={jobs.isError} selectedRun={selectedRun} />
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
-        {overview.isPending || storage.isPending || sensors.isPending ? Array.from({ length: 5 }).map((_, index) => <Skeleton className="h-40" key={index} />) : <>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+        {overview.isPending || storage.isPending || sensors.isPending ? Array.from({ length: 6 }).map((_, index) => <Skeleton className="h-40" key={index} />) : <>
           <StorageSummaryCard storage={storage.data} />
           <SummaryCard icon={ShieldCheck} label="Readiness check" value={titleCase(preflight?.status ?? "pending")} status={preflight?.status} tone={preflight?.status === "complete" ? "success" : preflight?.status === "blocked" ? "destructive" : "neutral"} detail={preflight?.status === "complete" ? "Artifact-backed readiness evidence is present." : "Check or refresh readiness before recording."} />
           <SummaryCard icon={Camera} label="Sensors" value={`${sensors.data?.total_connected ?? 0} connected`} status={sensors.data?.all_expected_connected ? "connected" : "warning"} tone={sensors.data?.all_expected_connected ? "informational" : "warning"} detail="RealSense, OAK-D Pro, and ZED discovery." />
           <IiwaQuickControls profileStatus={robotProfileStatus} />
           <SummaryCard icon={Cpu} label="Optional runtimes" value={`${availableRuntimes}/${runtimeItems.length} available`} status={availableRuntimes === runtimeItems.length ? "ready" : "warning"} tone={availableRuntimes === runtimeItems.length ? "success" : "warning"} detail="BlenderProc and Stereolabs SDK visibility." />
+          <ClusterControllerControl />
         </>}
+      </div>
+
+      <div className="operator-grid">
+        <RoomMonitor />
+        <DashboardJobActivity jobs={jobs.data?.jobs} pending={jobs.isPending} failed={jobs.isError} selectedRun={selectedRun} />
       </div>
 
       {overview.isPending ? <Card data-testid="dashboard-workflow-overview"><CardHeader><Skeleton className="h-6 w-52" /><Skeleton className="h-4 w-full max-w-2xl" /></CardHeader><CardContent><Skeleton className="h-28 w-full" /></CardContent></Card> : workflowEvidence ? <Card data-testid="dashboard-workflow-overview" data-workflow-journey={workflowEvidence.journey}>

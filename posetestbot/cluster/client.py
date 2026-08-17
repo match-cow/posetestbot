@@ -70,8 +70,12 @@ class ClusterControllerClient:
         self.__opener = urllib.request.build_opener(_NoRedirect)
 
     def _url(self, path: str, query: Mapping[str, object] | None = None) -> str:
-        if not path.startswith("/v1/") or "\0" in path or "\n" in path:
-            raise ValueError("Controller path must use the v1 API")
+        if (
+            not path.startswith(("/v1/", "/v2/"))
+            or "\0" in path
+            or "\n" in path
+        ):
+            raise ValueError("Controller path must use the versioned API")
         encoded = urllib.parse.urlencode(
             {
                 key: str(value)
@@ -213,6 +217,34 @@ class ClusterControllerClient:
         return self._json(
             "POST",
             "/v1/pose-jobs",
+            body=payload,
+            idempotency_key=idempotency_key,
+        )
+
+    def estimators(self) -> dict[str, Any]:
+        return self._json("GET", "/v2/estimators")
+
+    def estimation_jobs(
+        self,
+        *,
+        limit: int = 50,
+        state: str | None = None,
+    ) -> dict[str, Any]:
+        return self._json(
+            "GET",
+            "/v2/estimation-jobs",
+            query={"limit": limit, "state": state},
+        )
+
+    def create_estimation_job(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return self._json(
+            "POST",
+            "/v2/estimation-jobs",
             body=payload,
             idempotency_key=idempotency_key,
         )

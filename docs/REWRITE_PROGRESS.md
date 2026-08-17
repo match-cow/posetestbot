@@ -1,6 +1,6 @@
 # Rewrite Progress
 
-Last updated: 2026-08-04
+Last updated: 2026-08-06
 
 PoseTestBot is acquisition-first. Its repository boundary is real capture,
 calibration, non-destructive synchronization, optional GT/mask generation,
@@ -43,6 +43,105 @@ The code rewrite is implemented across:
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
 
+## 2026-08-06 Cluster Operations Discoverability and Durable Web Service
+
+Cluster operations are now visible before the operator reaches downstream pose
+estimation. The Dashboard places the fixed companion service control in its
+first readiness row, fully inside the canonical 1920×1080 viewport, and gives
+cluster archive/restore the primary handoff. **Run folders** renders its
+**Cluster storage** panel directly below the page header—even while local
+inventory is loading or unavailable—and **Pose Estimation** links back to it.
+Storage readiness and archive transfer remain independent of estimator
+qualification.
+
+The deployment examples now cover both the companion and the PoseTestBot web
+console with enabled user-systemd operation and `Restart=always`. The install
+guide documents intentional rebuild/restart deployment boundaries instead of a
+source watcher that could interrupt process-owned jobs. The installer verifies
+that both service examples ship with the bundled console.
+
+Validation completed with 695 default tests, 18 desktop Playwright tests,
+frontend typecheck and lint, the production Vite build, installer check-only,
+shell syntax, and diff checks.
+
+## 2026-08-06 Independent Cluster Archive and Estimator Registry
+
+The separate `posetestbot-cluster` companion now keeps one credential and
+durability boundary while splitting its capabilities internally. Archive copy,
+restore, and prepare-move have an independent server policy/readiness domain
+and no longer depend on FoundationPose qualification. Estimator execution uses
+a closed driver registry, an exact estimator-neutral runtime manifest, and a
+generic v2 job API; FoundationPose is the first driver and its v1 API/runtime
+manifest remain compatible. New methods can be added only as trusted companion
+drivers with pinned qualification and provenance validation—not as browser
+commands or PoseTestBot stages.
+
+PoseTestBot's loopback client/proxy now discovers the companion's estimator
+catalogue, selects only an advertised estimator ID and qualified resource
+profile, and retains browser-safe generic estimator/runtime provenance. The
+Pose Estimation page exposes that selection. Run folders uses the independent
+storage domain, so verified archive/restore remains available while estimation
+is disabled or unqualified. The Dashboard reports storage and estimator
+readiness separately, and its fixed service start/stop warning covers both
+archive and estimator work. Companion policy stays in the shared mode-0600
+`.env`; PoseTestBot reads only loopback host/port/token.
+
+Validation completed with 50 companion tests, 695 default PoseTestBot tests,
+17 desktop Playwright tests, Ruff and frontend lint checks, both Python package
+builds, the production Vite build, and the installer check-only path.
+
+All FoundationPose deployment instructions are now consolidated in the
+companion's canonical `docs/FOUNDATIONPOSE_CLUSTER_SETUP.md`; the superseded
+LUIS-only runbook and duplicated install steps were removed.
+
+## 2026-08-06 Active Run Selection Clarity
+
+The operator console now treats the top bar as persistent read-only run context
+instead of a dropdown that attempted to hold every acquisition. It shows the
+saved run display name, exact active folder, and configuration state, with one
+clear **Change** route to **Run folders**. The run index exposes the saved
+display name separately from the filesystem leaf so the two scopes remain
+visible without implying that metadata renames storage.
+
+**Run folders** now leads with the active acquisition, explains the one-folder-
+per-acquisition and multi-object-per-template boundary, provides the new sibling
+folder form, and offers a bounded searchable, root-filterable, sortable chooser
+for existing runs before its detailed storage-management evidence. Existing
+move/delete identity checks and active-run guards remain unchanged. Workflow's
+field is now labeled **Run display name (optional)** and states that leaving it
+blank adopts the folder name.
+
+The detailed **Storage inventory and actions** table has an independent search
+over display names, folders, paths, objects, sensors, and evidence, plus a
+bounded 720 px scrolling region with a sticky column header. The global active-
+run block and its **Change run** control now share an explicit 56 px height and
+are vertically centered inside the 72 px desktop top bar; Playwright asserts
+equal control heights and equal top/bottom spacing at the normal desktop
+viewport.
+
+## 2026-08-06 Bottom-Anchored Single-Frame Static Calibration
+
+The single-frame Sunrise calibration source now resolves only
+`/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle`. It treats that
+taught frame as the minimum local-Z flange endpoint, moves +50 mm to a generated
+pattern center, and retains the ±65 mm X/Y grid, ±50 mm depth results, and ±10°
+A/B/C swivel results around that center. The flange endpoints therefore occupy
+local Z = 0…100 mm instead of extending below the taught anchor. A final -50 mm
+`LIN_REL` returns to the bottom before a short absolute PTP confirmation.
+
+Initialization and per-point guards bind the center offset to the depth
+half-span, reject an endpoint below local Z = 0, retain the 100 mm
+center-relative translation limit, and enforce a separate 110 mm radius around
+the taught bottom-middle frame. The operator contract explicitly requires the
+taught +Z axis to point toward the available workspace; repository checks do
+not establish that physical alignment or replace Workbench simulation and T1
+commissioning.
+
+Validation passed all 27 IIWA source/teaching contracts and the complete
+default non-hardware suite at 692 passed / 17 deselected, plus Ruff on the
+affected tests and `git diff --check`. No camera or robot was opened or
+commanded.
+
 ## 2026-08-04 Research Simplification
 
 The acquisition contract now accepts only `run_config.v3` with exact
@@ -69,8 +168,10 @@ search identifies it, while `fixed_zero` remains a separate explicit policy.
 Candidate ordering uses one deterministic six-decimal ranking tuple without
 tolerance bands.
 
-The external cluster boundary uses one `POSETESTBOT_CLUSTER_ENABLED` switch.
-PoseTestBot retains browser-safe status, pose-job submission/logs/cancellation,
+The external cluster boundary supports the original
+`POSETESTBOT_CLUSTER_ENABLED`/URL/token settings and a server-only mode-0600
+companion-env-file source. PoseTestBot retains browser-safe status, fixed
+user-service lifecycle control, pose-job submission/logs/cancellation,
 immutable result import/download, and archive copy/restore; idempotency keys are
 server-generated. Imported controller evidence is validated and rewritten as a
 compact allowlisted provenance record; raw scheduler accounting, failure text,
@@ -85,6 +186,38 @@ remain ready at 11/11 for `working_data/test20260726_BOPv5` and 3/3 for
 `/mnt/working_data_ssd/calib00_test20260724`. No physical hardware or real
 cluster controller was exercised.
 
+## 2026-08-05 Managed Cluster Controller Lifecycle
+
+The Dashboard now distinguishes the fixed local controller service state from
+authenticated loopback connectivity and full cluster readiness. An explicitly
+configured user-systemd unit can be started or stopped from the browser; both
+actions require a literal confirmation, are queued through `LocalJobRunner` as
+global work with a dedicated resource, and execute only a server-built
+`systemctl --user --no-block` argument vector. A caller cannot choose the unit,
+command, environment, working directory, or scheduler arguments. Stop presents
+an interruption/reconciliation warning and lifecycle progress remains visible
+in Jobs.
+
+`POSETESTBOT_CLUSTER_ENV_FILE` can reuse the companion's absolute mode-0600
+`.env` at web-process startup. Only the shared token and loopback host/port are
+selected; the path and all SSH/cluster settings remain outside browser
+responses. The existing explicit variables take precedence, and browser-side
+credential configuration remains forbidden. The checked-in user-service
+example and installer smoke checks keep this optional deployment contract
+visible without installing the companion or its estimator runtime in
+PoseTestBot.
+
+Validation for this change passed 692 default pytest contracts and all 17
+desktop Playwright journeys, plus Ruff, frontend typecheck/lint, the production
+Vite build, package build, installer check-only, shell syntax, and diff checks.
+The systemd adapter itself was exercised with fixed-command/status fixtures. One
+credential-redacted read-only check against the existing running user service
+verified shared-env authentication and reported both LUIS hosts/quota ready.
+It also confirmed the current companion remains read-only, has no configured
+runtime manifest, exposes no enabled GPU profile, and therefore keeps pose
+estimation disabled. No real service or cluster job was mutated, and no camera
+or robot was opened or commanded.
+
 ## 2026-08-04 Descriptive IIWA Applications and Single-Frame Static Calibration
 
 The repository Sunrise sources now use role-specific Java names:
@@ -95,18 +228,18 @@ The repository Sunrise sources now use role-specific Java names:
 application/background-task metadata and any deployed controller selection
 must be updated and recorded independently.
 
-The new static-camera alternative requires one additional taught frame at the
-operator-specified path
-`/PoseTestBot/PoseTemplateBase/CalibrationStatiCenter`. After an accepted START
-it PTP-anchors there, visits the eight non-center points of a 3 x 3 relative
-grid with ±65 mm center-frame axes, adds independent ±50 mm depth and ±10°
-A/B/C dithers, and returns to the absolute center before sending the terminal
-marker. Every grid point is below the literal 100 mm center-radius limit; the
-corner radius is approximately 92 mm. Before the initial center PTP, a read-only
-pose check rejects START unless the flange is already within 25 mm of the taught
-center. Each generated point is visited from and returned directly to center,
-and runtime envelope checks reject an out-of-range translation before it is
-commanded.
+The new static-camera alternative requires one additional taught frame at
+`/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle`. After an accepted
+START it PTP-anchors there, moves 50 mm in local +Z to a generated pattern
+center, visits the eight non-center points of a 3 x 3 relative grid with ±65 mm
+center-frame X/Y axes, adds independent ±50 mm depth and ±10° A/B/C dithers,
+performs every swivel at that generated center, and returns to the absolute
+taught bottom-middle anchor with a -50 mm `LIN_REL` and final PTP confirmation
+before sending the terminal marker. The generated pattern spans local
+Z = 0…100 mm, individual relative translations remain inside the 100 mm center
+limit, and all endpoints remain inside a separate 110 mm taught-anchor limit.
+Before the initial PTP, a read-only pose check rejects START unless the flange
+is already within 25 mm of the taught anchor.
 
 All motion applications now start by resolving their shared pose-stream
 provider and waiting without robot motion for an accepted UDP START. The former

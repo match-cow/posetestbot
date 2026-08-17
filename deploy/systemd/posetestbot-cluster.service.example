@@ -1,0 +1,19 @@
+[Unit]
+Description=PoseTestBot external cluster controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@CONTROLLER_REPOSITORY@
+ExecStart=@UV_EXECUTABLE@ run posetestbot-cluster --env-file @CONTROLLER_ENV_FILE@
+Restart=always
+RestartSec=5s
+KillMode=control-group
+TimeoutStopSec=45s
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

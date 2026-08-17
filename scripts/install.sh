@@ -358,6 +358,8 @@ build_web_console() {
 verify_web_console() {
   local ui_root="${REPO_ROOT}/posetestbot/web/static/ui"
   local cell_asset="${REPO_ROOT}/posetestbot/web/static/cell/template_HRI_LBR_all_center_v2.svg"
+  local cluster_service_example="${REPO_ROOT}/deploy/systemd/posetestbot-cluster.service.example"
+  local web_service_example="${REPO_ROOT}/deploy/systemd/posetestbot-web.service.example"
   [[ -f "${ui_root}/index.html" ]] || die "Bundled web UI is missing ${ui_root}/index.html. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/*.js" >/dev/null || die "Bundled web UI has no JavaScript asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/*.css" >/dev/null || die "Bundled web UI has no CSS asset. Run scripts/install.sh --with-web-build."
@@ -369,6 +371,8 @@ verify_web_console() {
   compgen -G "${ui_root}/assets/pose-estimation-page-*.js" >/dev/null || die "Bundled web UI has no lazy Pose Estimation asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/run-folders-page-*.js" >/dev/null || die "Bundled web UI has no lazy Run folders asset. Run scripts/install.sh --with-web-build."
   [[ -f "${cell_asset}" ]] || die "Bundled Cell template is missing ${cell_asset}."
+  [[ -f "${cluster_service_example}" ]] || die "Cluster controller user-service example is missing ${cluster_service_example}."
+  [[ -f "${web_service_example}" ]] || die "Web console user-service example is missing ${web_service_example}."
   log "Bundled operator-console assets are present."
 }
 
@@ -406,6 +410,7 @@ modules = [
     "trimesh",
     "posetestbot.web.app",
     "posetestbot.cluster.client",
+    "posetestbot.cluster.controller_service",
 ]
 
 failures = []

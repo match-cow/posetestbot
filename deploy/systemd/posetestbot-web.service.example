@@ -1,0 +1,18 @@
+[Unit]
+Description=PoseTestBot web operator console
+After=network-online.target posetestbot-cluster.service
+Wants=network-online.target posetestbot-cluster.service
+
+[Service]
+Type=simple
+WorkingDirectory=@POSETESTBOT_REPOSITORY@
+EnvironmentFile=@POSETESTBOT_WEB_ENV_FILE@
+ExecStart=@POSETESTBOT_WEB_EXECUTABLE@
+Restart=always
+RestartSec=5s
+KillMode=control-group
+TimeoutStopSec=45s
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

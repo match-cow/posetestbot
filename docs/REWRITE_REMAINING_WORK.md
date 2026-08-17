@@ -14,7 +14,9 @@ synchronization, optional BlenderProc GT/mask generation, pose-template
 provenance, and BOP export are in scope. Estimator execution and standard BOP19
 result generation belong in the separate `match-cow/posetestbot-cluster`
 companion. PoseTestBot contains only its typed loopback client/proxy, storage
-and job presentation, and immutable standard-result import/download. The sole
+and job presentation, fixed server-configured local controller-service
+status/start/stop, and immutable standard-result import/download. Controller
+credentials and arbitrary commands remain unavailable to the browser. The sole
 evaluation exception is
 the Inspect-only, run-scoped official BOP19 validation path: it consumes a
 completed annotation-bearing export and an already compatible standard result
@@ -62,8 +64,9 @@ recommissioned before replacing the accepted controller program.
 The ordinary full-capture Sunrise application is separate from the accepted
 calibration program and remains open under milestone 1.
 The additional `PoseTestBotSingleFrameStaticCameraCalibrationApplication` is a
-repository candidate with one taught center and a bounded relative grid. It
-does not inherit the nine-frame program's historical physical acceptance.
+repository candidate with one taught bottom-middle anchor and a generated
+center for its bounded relative grid and swivel motions. It does not inherit
+the nine-frame program's historical physical acceptance.
 
 ## 1 — IIWA Controller Commissioning and Cadence Rollout
 
@@ -81,11 +84,13 @@ outcome.
   single-frame calibration application revisions against the installed
   Sunrise.OS API.
 - [ ] For the single-frame static-camera alternative, create and read back only
-  `/PoseTestBot/PoseTemplateBase/CalibrationStatiCenter` beyond the existing
-  `/PoseTestBot/PoseTemplateBase`; then simulate and T1-commission every
-  relative grid, depth, orientation, and return path inside its 100 mm center
-  envelope. Verify the read-only 25 mm start-proximity rejection, and record
-  target visibility and swept target/arm/cable clearance.
+  `/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle` beyond the
+  existing `/PoseTestBot/PoseTemplateBase`; verify its +Z axis points from the
+  local minimum-Z position toward the available workspace, then simulate and
+  T1-commission the +50 mm center approach and every relative grid, depth,
+  orientation, and return path. Verify the 100 mm center-relative and 110 mm
+  taught-anchor envelopes, the read-only 25 mm start-proximity rejection, and
+  target visibility plus swept target/arm/cable clearance.
 - [ ] Before replacing the accepted calibration deployment, revalidate its
   unchanged motion/frame contract and retain a supervised cadence report.
   Target at least 50 Hz median host receive rate, no more than 25 ms p95 gap,
@@ -227,11 +232,13 @@ regressions remain supported.
   groups, or export multiview synchronization claims.
 - The retained real BOP v5 dataset and its 11/11 readiness evidence supersede
   any requirement to regenerate the older v4 derived export.
-- External FoundationPose execution, SSH transfer, durable SLURM state, and
-  standard BOP19 result generation belong to `posetestbot-cluster`. The thin
-  controller proxy, pose-job logs/cancellation, archive copy/restore, and
-  immutable standard-result import/download are retained Inspect contracts
-  here, not acquisition-pipeline stages. Remote-source deletion is not exposed.
+- External estimator execution, SSH transfer, durable SLURM state, and standard
+  BOP19 result generation belong to `posetestbot-cluster`. Its archive domain
+  is estimator-independent; FoundationPose and future methods are trusted
+  companion drivers behind a generic manifest/API. The thin controller proxy,
+  estimator-job logs/cancellation, archive copy/restore, and immutable
+  standard-result import/download are retained Inspect contracts here, not
+  acquisition-pipeline stages. Remote-source deletion is not exposed.
 - Production-bundle size tuning is optional engineering work, not a rewrite
   gate.
 - Catalogue JSON portability remains intentionally metadata-only. Managed

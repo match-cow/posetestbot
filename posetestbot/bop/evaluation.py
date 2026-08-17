@@ -49,6 +49,11 @@ GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 PROVENANCE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$")
 RUNTIME_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 SLURM_JOB_ID_RE = re.compile(r"^[0-9]{1,32}$")
+ESTIMATOR_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{2,63}$")
+DRIVER_ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{2,95}$")
+CONTRACT_ID_RE = re.compile(r"^[a-z][a-z0-9._-]{2,127}$")
+RUNTIME_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+RUNTIME_REVISION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$")
 EVALUATION_ROOT = Path("processed") / "bop_evaluation"
 RESULTS_DIR = "results"
 EVALUATIONS_DIR = "evaluations"
@@ -1106,6 +1111,271 @@ def _provenance_hashes(value: Any, *, label: str) -> dict[str, str]:
     return dict(sorted(normalized.items()))
 
 
+def _generic_runtime_artifact(value: Any, *, label: str) -> dict[str, str]:
+    if not isinstance(value, Mapping) or set(value) != {"filename", "sha256"}:
+        raise ValueError(f"{label} must be exact filename/hash evidence")
+    filename = value.get("filename")
+    if (
+        not isinstance(filename, str)
+        or RUNTIME_FILENAME_RE.fullmatch(filename) is None
+    ):
+        raise ValueError(f"{label}.filename is invalid")
+    return {
+        "filename": filename,
+        "sha256": _required_sha256(value.get("sha256"), label=f"{label}.sha256"),
+    }
+
+
+def _generic_external_result_provenance(
+    value: Mapping[str, Any],
+    *,
+    external_job_id: str,
+    expected_dataset_sha256: str,
+    source_provenance_sha256: str,
+    source_path: Path,
+    validation: Mapping[str, Any],
+) -> dict[str, Any]:
+    estimator = value.get("estimator")
+    if not isinstance(estimator, Mapping) or set(estimator) != {
+        "estimator_id",
+        "driver_id",
+        "runtime_id",
+        "input_contracts",
+        "output_contract",
+    }:
+        raise ValueError("Controller provenance has invalid estimator evidence")
+    estimator_id = estimator.get("estimator_id")
+    driver_id = estimator.get("driver_id")
+    runtime_id = estimator.get("runtime_id")
+    input_contracts = estimator.get("input_contracts")
+    output_contract = estimator.get("output_contract")
+    if (
+        not isinstance(estimator_id, str)
+        or ESTIMATOR_ID_RE.fullmatch(estimator_id) is None
+        or not isinstance(driver_id, str)
+        or DRIVER_ID_RE.fullmatch(driver_id) is None
+        or not isinstance(runtime_id, str)
+        or RUNTIME_ID_RE.fullmatch(runtime_id) is None
+        or not isinstance(input_contracts, list)
+        or not input_contracts
+        or len(set(input_contracts)) != len(input_contracts)
+        or any(
+            not isinstance(contract, str)
+            or CONTRACT_ID_RE.fullmatch(contract) is None
+            for contract in input_contracts
+        )
+        or output_contract != "bop19.csv.v1"
+        or validation.get("method") != estimator_id
+    ):
+        raise ValueError("Controller provenance has invalid estimator identity")
+
+    external_job = value.get("external_job")
+    if (
+        not isinstance(external_job, Mapping)
+        or set(external_job)
+        != {
+            "provider",
+            "job_id",
+            "slurm_job_id",
+            "estimator_id",
+            "driver_id",
+            "runtime_id",
+        }
+        or external_job.get("provider") != "posetestbot-cluster"
+        or external_job.get("job_id") != external_job_id
+        or not isinstance(external_job.get("slurm_job_id"), str)
+        or SLURM_JOB_ID_RE.fullmatch(external_job["slurm_job_id"]) is None
+        or external_job.get("estimator_id") != estimator_id
+        or external_job.get("driver_id") != driver_id
+        or external_job.get("runtime_id") != runtime_id
+    ):
+        raise ValueError("Controller provenance has invalid external-job evidence")
+
+    runtime = value.get("runtime")
+    if not isinstance(runtime, Mapping):
+        raise ValueError("Controller provenance has invalid runtime evidence")
+    if (
+        runtime.get("estimator_id") != estimator_id
+        or runtime.get("driver_id") != driver_id
+        or runtime.get("runtime_id") != runtime_id
+        or runtime.get("input_contracts") != input_contracts
+        or runtime.get("output_contract") != output_contract
+        or runtime.get("qualified") is not True
+        or runtime.get("ready") is not True
+    ):
+        raise ValueError("Controller provenance runtime does not match its estimator")
+    container = _generic_runtime_artifact(
+        runtime.get("container"), label="runtime.container"
+    )
+    assets_value = runtime.get("assets")
+    if not isinstance(assets_value, Mapping):
+        raise ValueError("runtime.assets must be an object")
+    assets: dict[str, dict[str, str]] = {}
+    for asset_id, artifact in assets_value.items():
+        if (
+            not isinstance(asset_id, str)
+            or PROVENANCE_KEY_RE.fullmatch(asset_id) is None
+        ):
+            raise ValueError("runtime.assets contains an invalid identifier")
+        assets[asset_id] = _generic_runtime_artifact(
+            artifact, label=f"runtime.assets.{asset_id}"
+        )
+
+    def revisions(field: str, *, required: bool) -> dict[str, str]:
+        source = runtime.get(field)
+        if not isinstance(source, Mapping) or (required and not source):
+            raise ValueError(f"runtime.{field} is invalid")
+        normalized: dict[str, str] = {}
+        for key, revision in source.items():
+            if (
+                not isinstance(key, str)
+                or PROVENANCE_KEY_RE.fullmatch(key) is None
+                or not isinstance(revision, str)
+                or RUNTIME_REVISION_RE.fullmatch(revision) is None
+            ):
+                raise ValueError(f"runtime.{field} contains invalid evidence")
+            normalized[key] = revision
+        return dict(sorted(normalized.items()))
+
+    source_revisions = revisions("source_revisions", required=True)
+    build_provenance = revisions("build_provenance", required=True)
+    licenses_value = runtime.get("licenses")
+    if not isinstance(licenses_value, list) or not licenses_value:
+        raise ValueError("runtime.licenses is invalid")
+    licenses: list[dict[str, str]] = []
+    for index, license_value in enumerate(licenses_value):
+        if not isinstance(license_value, Mapping) or set(license_value) != {
+            "name",
+            "sha256",
+        }:
+            raise ValueError("runtime.licenses contains invalid evidence")
+        name = license_value.get("name")
+        if (
+            not isinstance(name, str)
+            or not 1 <= len(name) <= 160
+            or any(character in name for character in "/\\\r\n\0")
+        ):
+            raise ValueError("runtime.licenses contains an invalid name")
+        licenses.append(
+            {
+                "name": name,
+                "sha256": _required_sha256(
+                    license_value.get("sha256"),
+                    label=f"runtime.licenses.{index}.sha256",
+                ),
+            }
+        )
+    profiles = runtime.get("qualified_resource_profiles")
+    if (
+        not isinstance(profiles, list)
+        or not profiles
+        or len(set(profiles)) != len(profiles)
+        or any(
+            not isinstance(profile, str)
+            or PROVENANCE_KEY_RE.fullmatch(profile) is None
+            for profile in profiles
+        )
+    ):
+        raise ValueError("runtime qualified resource profiles are invalid")
+    qualification_blockers = runtime.get("qualification_blockers")
+    if qualification_blockers not in (None, []):
+        raise ValueError("Controller runtime was not ready at submission")
+    normalized_runtime = {
+        "estimator_id": estimator_id,
+        "driver_id": driver_id,
+        "runtime_id": runtime_id,
+        "container": container,
+        "assets": dict(sorted(assets.items())),
+        "source_revisions": source_revisions,
+        "build_provenance": build_provenance,
+        "licenses": licenses,
+        "input_contracts": list(input_contracts),
+        "output_contract": output_contract,
+        "qualified_resource_profiles": list(profiles),
+        "qualification_manifest_sha256": _required_sha256(
+            runtime.get("qualification_manifest_sha256"),
+            label="runtime.qualification_manifest_sha256",
+        ),
+        "qualified": True,
+        "ready": True,
+    }
+
+    input_hashes = _provenance_hashes(value.get("input_hashes"), label="input_hashes")
+    output_hashes = _provenance_hashes(
+        value.get("output_hashes"), label="output_hashes"
+    )
+    result_provenance = value.get("result")
+    if (
+        not isinstance(result_provenance, Mapping)
+        or result_provenance.get("filename") != source_path.name
+        or result_provenance.get("sha256") != validation["sha256"]
+        or result_provenance.get("size_bytes") != validation["size_bytes"]
+        or output_hashes.get(source_path.name) != validation["sha256"]
+    ):
+        raise ValueError("Controller result bytes do not match its provenance")
+    project_copy = value.get("project_copy")
+    if (
+        not isinstance(project_copy, Mapping)
+        or set(project_copy) != {"state", "artifact_sha256"}
+        or project_copy.get("state") != "verified"
+        or project_copy.get("artifact_sha256") != output_hashes
+    ):
+        raise ValueError("Controller provenance has invalid verified-copy evidence")
+    estimate_count = value.get("estimate_count")
+    failure_count = value.get("failure_count")
+    if (
+        type(estimate_count) is not int
+        or estimate_count != validation["estimate_count"]
+        or type(failure_count) is not int
+        or failure_count < 0
+    ):
+        raise ValueError("Controller provenance has invalid result counts")
+    collected_at = value.get("collected_at")
+    if not isinstance(collected_at, str) or len(collected_at) > 64:
+        raise ValueError("Controller provenance has invalid collection time")
+    try:
+        datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("Controller provenance has invalid collection time") from exc
+
+    return {
+        "schema_version": "posetestbot_external_result_provenance.v1",
+        "source_schema_version": value["schema_version"],
+        "source_provenance_sha256": _required_sha256(
+            source_provenance_sha256,
+            label="source_provenance_sha256",
+        ),
+        "external_job": {
+            "provider": "posetestbot-cluster",
+            "job_id": external_job_id,
+            "slurm_job_id": external_job["slurm_job_id"],
+            "estimator_id": estimator_id,
+            "driver_id": driver_id,
+            "runtime_id": runtime_id,
+        },
+        "method": estimator_id,
+        "estimator": dict(estimator),
+        "runtime": normalized_runtime,
+        "dataset_sha256": expected_dataset_sha256,
+        "bop_content_sha256": _required_sha256(
+            value.get("bop_content_sha256"), label="bop_content_sha256"
+        ),
+        "input_manifest_sha256": _required_sha256(
+            value.get("input_manifest_sha256"),
+            label="input_manifest_sha256",
+        ),
+        "input_hashes": input_hashes,
+        "estimate_count": estimate_count,
+        "failure_count": failure_count,
+        "result": {
+            "filename": source_path.name,
+            "sha256": validation["sha256"],
+            "size_bytes": validation["size_bytes"],
+        },
+        "collected_at": collected_at,
+    }
+
+
 def _external_result_provenance(
     value: Mapping[str, Any],
     *,
@@ -1123,6 +1393,15 @@ def _external_result_provenance(
         raise ValueError("Controller provenance belongs to another job")
     if value.get("dataset_sha256") != expected_dataset_sha256:
         raise ValueError("Controller provenance does not match the staged dataset")
+    if isinstance(value.get("estimator"), Mapping):
+        return _generic_external_result_provenance(
+            value,
+            external_job_id=external_job_id,
+            expected_dataset_sha256=expected_dataset_sha256,
+            source_provenance_sha256=source_provenance_sha256,
+            source_path=source_path,
+            validation=validation,
+        )
     contracts = {
         "method": "foundationpose",
         "oracle_mask_contract": "bop_mask_visib_gt_instance.v1",

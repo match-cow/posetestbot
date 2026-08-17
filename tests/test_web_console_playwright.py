@@ -117,6 +117,141 @@ def run_config(*, plan_only: bool = True, sensors: list[dict] | None = None) -> 
     }
 
 
+def run_folder_inventory() -> dict:
+    def record(
+        *,
+        folder: str,
+        run_name: str,
+        modified_at: str,
+        sequence: str,
+        object_names: list[str],
+        object_count: int,
+        size_bytes: int,
+    ) -> dict:
+        path = f"/tmp/posetestbot-console/{folder}"
+        return {
+            "path": path,
+            "name": folder,
+            "root": "/tmp/posetestbot-console",
+            "modified_at": modified_at,
+            "size_bytes": size_bytes,
+            "allocated_bytes": size_bytes,
+            "file_count": 12,
+            "directory_count": 4,
+            "symlink_count": 0,
+            "scan_complete": True,
+            "scan_error_count": 0,
+            "scan_errors": [],
+            "identity": {"device": 1, "inode": 10 if folder == "new-run" else 11},
+            "config": {
+                "valid": True,
+                "error": None,
+                "run_name": run_name,
+                "sequence": sequence,
+                "plan_only": True,
+            },
+            "contents": {
+                "dataset_mode": "pose_template" if object_count else "objectless",
+                "resolution": "720p",
+                "fps": 6,
+                "synchronization_mode": "timestamp_aligned",
+                "sensor_count": 1,
+                "enabled_sensor_count": 1,
+                "sensors": [
+                    {
+                        "sensor_type": "realsense",
+                        "device_id": "123",
+                        "name": "Front D435",
+                        "mounting_mode": "static",
+                        "enabled": True,
+                    }
+                ],
+                "object_count": object_count,
+                "object_names": object_names,
+                "template_uuid": "template-a" if object_count else None,
+                "evidence": {
+                    "raw_capture": folder == "old-run",
+                    "synchronized": False,
+                    "calibration": folder == "new-run",
+                    "bop_export": False,
+                    "bop_evaluation": False,
+                },
+            },
+            "breakdown": {
+                "other": {
+                    "size_bytes": size_bytes,
+                    "allocated_bytes": size_bytes,
+                    "file_count": 12,
+                }
+            },
+            "relocation": None,
+        }
+
+    gib = 1024**3
+    return {
+        "schema_version": "run_folder_inventory.v1",
+        "generated_at": "2026-08-06T10:00:00Z",
+        "inventory_state": "ready",
+        "stale": False,
+        "roots": [
+            {
+                "path": "/tmp/posetestbot-console",
+                "exists": True,
+                "identity": {"device": 1, "inode": 2},
+                "storage": {
+                    "schema_version": "run_storage.v1",
+                    "run_root": "/tmp/posetestbot-console",
+                    "filesystem_path": "/tmp",
+                    "status": "ready",
+                    "total_bytes": 1000 * gib,
+                    "used_bytes": 200 * gib,
+                    "free_bytes": 800 * gib,
+                    "free_fraction": 0.8,
+                    "thresholds": {
+                        "critical_free_bytes": 100 * gib,
+                        "warning_free_bytes": 150 * gib,
+                        "critical_free_bytes_cap": 100 * gib,
+                        "warning_free_bytes_cap": 500 * gib,
+                        "critical_free_fraction": 0.05,
+                        "warning_free_fraction": 0.15,
+                    },
+                    "error": None,
+                },
+            }
+        ],
+        "runs": [
+            record(
+                folder="new-run",
+                run_name="Calibration baseline",
+                modified_at="2026-08-06T09:00:00Z",
+                sequence="real_full_capture_validation",
+                object_names=[],
+                object_count=0,
+                size_bytes=2 * gib,
+            ),
+            record(
+                folder="old-run",
+                run_name="Object A capture",
+                modified_at="2026-08-05T09:00:00Z",
+                sequence="sync_aruco",
+                object_names=["Object A"],
+                object_count=1,
+                size_bytes=gib,
+            ),
+        ],
+        "refresh_job": None,
+        "operation_job": None,
+        "maintenance": {
+            "schema_version": "run_folder_maintenance.v1",
+            "recovered_count": 0,
+            "transactions": [],
+            "unresolved_count": 0,
+            "journal_fingerprint": "test",
+            "unresolved": [],
+        },
+    }
+
+
 def calibration_selection_artifact(
     *,
     bundle_sha256: str,
@@ -262,8 +397,45 @@ def cluster_pose_setup(*, ready: bool = True) -> dict:
         "message": "The pinned FoundationPose runtime has not been qualified.",
     }
     profile = cluster_profile()
+    runtime = {
+        "estimator_id": "foundationpose",
+        "driver_id": "foundationpose.v1",
+        "runtime_id": "foundationpose-a1b694b8",
+        "container": {"filename": "foundationpose.sif", "sha256": "a" * 64},
+        "assets": {
+            "weights-manifest": {
+                "filename": "weights-manifest.json",
+                "sha256": "b" * 64,
+            }
+        },
+        "source_revisions": {
+            "foundationpose": "a1b694b83e633c2cb6115b9063d940a687759392",
+            "bop_toolkit": "cea62d651c7e395b2e1962b9749e4e89693c6ac4",
+        },
+        "input_contracts": ["posetestbot.bop.v5.pose_and_masks"],
+        "output_contract": "bop19.csv.v1",
+        "qualified_resource_profiles": ["smoke-a100"],
+        "qualification_manifest_sha256": "c" * 64,
+        "qualified": ready,
+        "ready": ready,
+    }
+    estimator = {
+        "estimator_id": "foundationpose",
+        "driver_id": "foundationpose.v1",
+        "display_name": "FoundationPose",
+        "installed": True,
+        "configured": ready,
+        "enabled": ready,
+        "ready": ready,
+        "blockers": [] if ready else [blocker["message"]],
+        "readiness_blockers": [] if ready else [blocker["message"]],
+        "input_contracts": ["posetestbot.bop.v5.pose_and_masks"],
+        "output_contract": "bop19.csv.v1",
+        "runtime": runtime,
+        "profiles": [profile],
+    }
     return {
-        "schema_version": "cluster_pose_estimation_setup.v1",
+        "schema_version": "cluster_estimation_setup.v2",
         "run_root": RUN_ROOT,
         "ready": ready,
         "dataset": {
@@ -293,32 +465,27 @@ def cluster_pose_setup(*, ready: bool = True) -> dict:
             "connection": {"login": "ready", "transfer": "ready"},
             "features": {"pose_estimation": ready},
             "feature_blockers": {},
-            "runtime": {
-                "runtime_id": "foundationpose-a1b694b8",
-                "foundationpose_revision": ("a1b694b83e633c2cb6115b9063d940a687759392"),
-                "bop_toolkit_revision": ("cea62d651c7e395b2e1962b9749e4e89693c6ac4"),
-                "sif_sha256": "a" * 64,
-                "weights_sha256": "b" * 64,
-                "foundationpose_license": "NVIDIA Source Code License",
-                "foundationpose_license_sha256": "c" * 64,
-                "qualified": ready,
+            "domains": {
+                "storage": {
+                    "ready": ready,
+                    "read": True,
+                    "mutation": ready,
+                    "blockers": [],
+                },
+                "scheduler": {"ready": ready, "blockers": []},
             },
+            "estimators": [estimator],
+            "runtime": runtime,
             "profiles": [profile],
             "blockers": [] if ready else [blocker],
             "integration": {
                 "enabled": True,
             },
         },
-        "runtime": {
-            "runtime_id": "foundationpose-a1b694b8",
-            "foundationpose_revision": ("a1b694b83e633c2cb6115b9063d940a687759392"),
-            "bop_toolkit_revision": ("cea62d651c7e395b2e1962b9749e4e89693c6ac4"),
-            "sif_sha256": "a" * 64,
-            "weights_sha256": "b" * 64,
-            "foundationpose_license": "NVIDIA Source Code License",
-            "foundationpose_license_sha256": "c" * 64,
-            "qualified": ready,
-        },
+        "estimator_id": "foundationpose",
+        "estimator": estimator,
+        "estimators": [estimator],
+        "runtime": runtime,
         "profiles": [profile],
         "enabled_profiles": [profile] if ready else [],
         "blockers": [] if ready else [blocker],
@@ -338,6 +505,9 @@ def cluster_pose_job(*, state: str, with_result: bool = False) -> dict:
         "slurm_job_id": "482991",
         "payload": {
             "run_root": RUN_ROOT,
+            "estimator_id": "foundationpose",
+            "driver_id": "foundationpose.v1",
+            "runtime_id": "foundationpose-a1b694b8",
             "dataset_alias": "ptb123456789abc",
             "dataset_sha256": "d" * 64,
             "profile_id": "smoke-a100",
@@ -410,6 +580,7 @@ def install_common_mocks(
                     {
                         "path": RUN_ROOT,
                         "name": "new-run",
+                        "run_name": "Calibration baseline",
                         "sequence": "real_full_capture_validation",
                         "plan_only": True,
                         "config_valid": True,
@@ -419,6 +590,7 @@ def install_common_mocks(
                     {
                         "path": "/tmp/posetestbot-console/old-run",
                         "name": "old-run",
+                        "run_name": "Object A capture",
                         "sequence": "sync_aruco",
                         "plan_only": True,
                         "config_valid": True,
@@ -427,6 +599,17 @@ def install_common_mocks(
                     },
                 ],
             },
+        ),
+    )
+    page.route(
+        "**/ui/run-folders",
+        lambda route: fulfill_json(route, run_folder_inventory()),
+    )
+    page.route(
+        "**/cluster/archives",
+        lambda route: fulfill_json(
+            route,
+            {"archives": [], "integration": {"enabled": False}},
         ),
     )
     page.route(
@@ -501,6 +684,58 @@ def install_common_mocks(
             {
                 "schema_version": "runtime_status.v1",
                 "runtimes": [{"runtime_id": "blenderproc", "available": True}],
+            },
+        ),
+    )
+    page.route(
+        "**/cluster/controller-service",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "posetestbot_cluster_controller_service.v1",
+                "managed": False,
+                "service_unit": None,
+                "unit_installed": False,
+                "state": "unmanaged",
+                "active": False,
+                "can_start": False,
+                "can_stop": False,
+                "load_state": None,
+                "active_state": None,
+                "sub_state": None,
+                "unit_file_state": None,
+                "integration": {
+                    "enabled": False,
+                    "controller_configured": False,
+                    "environment_file_configured": False,
+                },
+                "blockers": [
+                    {
+                        "code": "service_management_not_configured",
+                        "message": "Controller lifecycle management is not configured.",
+                    }
+                ],
+            },
+        ),
+    )
+    page.route(
+        "**/cluster/status",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "posetestbot_cluster_status_proxy.v1",
+                "ready": False,
+                "available": False,
+                "integration": {
+                    "enabled": False,
+                    "controller_configured": False,
+                },
+                "blockers": [
+                    {
+                        "code": "cluster_disabled",
+                        "message": "Cluster integration is disabled on this workstation.",
+                    }
+                ],
             },
         ),
     )
@@ -723,59 +958,95 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     assert page.evaluate("localStorage.getItem('posetestbot.theme')") is None
     assert page.evaluate("localStorage.getItem('posetestbot.selectedRun')") is None
     active_run_context = page.get_by_test_id("active-run-context")
-    expect(active_run_context).to_contain_text("Active run folder")
+    expect(active_run_context).to_contain_text("Active acquisition run")
+    expect(active_run_context.get_by_test_id("active-run-name")).to_have_text(
+        "Calibration baseline"
+    )
+    expect(active_run_context.get_by_test_id("active-run-path")).to_have_text(RUN_ROOT)
+    expect(page.get_by_role("combobox", name="Active run folder")).to_have_count(0)
+    change_run = page.get_by_role("link", name="Change active run folder")
+    expect(change_run).to_have_attribute("href", "#/run-folders")
+    summary_box = active_run_context.locator(":scope > div").bounding_box()
+    change_box = change_run.bounding_box()
+    app_header_box = page.locator("header").first.bounding_box()
+    assert summary_box is not None and change_box is not None and app_header_box is not None
+    assert summary_box["height"] == pytest.approx(change_box["height"], abs=1)
+    assert summary_box["y"] == pytest.approx(change_box["y"], abs=1)
+    top_gap = summary_box["y"] - app_header_box["y"]
+    bottom_gap = (
+        app_header_box["y"]
+        + app_header_box["height"]
+        - summary_box["y"]
+        - summary_box["height"]
+    )
+    assert top_gap == pytest.approx(bottom_gap, abs=1)
+    change_run.click()
+    expect(page).to_have_url(f"{console_server.url}/#/run-folders")
+    expect(page.get_by_role("heading", name="Run folders", exact=True)).to_be_visible()
+    cluster_storage = page.get_by_test_id("cluster-storage-section")
+    expect(cluster_storage.get_by_role("heading", name="Cluster storage")).to_be_visible()
+    expect(cluster_storage).to_contain_text(
+        "independent of every pose-estimator runtime"
+    )
+    active_selection = page.get_by_test_id("active-run-selection")
+    expect(active_selection).to_contain_text("Calibration baseline")
+    expect(active_selection).to_contain_text(RUN_ROOT)
+    cluster_storage_box = cluster_storage.bounding_box()
+    active_selection_box = active_selection.bounding_box()
+    assert cluster_storage_box is not None and active_selection_box is not None
+    assert cluster_storage_box["y"] < active_selection_box["y"]
+    assert cluster_storage_box["y"] < 1080
+    storage_search = page.get_by_role("textbox", name="Search storage inventory")
+    storage_search.fill("Object A")
+    storage_table = page.get_by_test_id("run-folders-table")
+    expect(storage_table.get_by_test_id("run-folder-row")).to_have_count(1)
+    expect(storage_table.get_by_test_id("run-folder-row")).to_contain_text(
+        "Object A capture"
+    )
+    storage_search.fill("")
+    chooser = page.get_by_test_id("run-folder-chooser")
+    expect(chooser.get_by_role("heading", name="Choose an existing run")).to_be_visible()
+    chooser.get_by_role("textbox", name="Search run folders").fill("Object A")
+    expect(chooser.get_by_test_id("run-selection-row")).to_have_count(1)
+    expect(chooser.get_by_test_id("run-selection-row")).to_contain_text(
+        "Object A capture"
+    )
+    chooser.get_by_role("button", name="Use old-run as active run").click()
+    expect(active_run_context).to_contain_text("Object A capture")
     expect(active_run_context).to_contain_text(
-        "All run-owned pages and actions use this folder"
+        "/tmp/posetestbot-console/old-run"
     )
-    expect(
-        page.get_by_role("combobox", name="Active run folder").get_by_text("Change")
-    ).to_be_visible()
-    expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
-        "new-run"
-    )
-    page.get_by_role("combobox", name="Active run folder").click()
-    page.get_by_role("option", name="old-run · sync_aruco").click()
-    expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
-        "old-run"
+    assert (
+        page.evaluate("localStorage.getItem('posetestbot.selectedRun')")
+        == "/tmp/posetestbot-console/old-run"
     )
     page.get_by_role("complementary", name="Application sidebar").get_by_role(
         "link", name="Devices"
     ).click()
     expect(page).to_have_url(f"{console_server.url}/#/devices")
     page.reload(wait_until="networkidle")
-    expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
-        "old-run"
-    )
-    page.get_by_role("combobox", name="Active run folder").click()
-    page.get_by_role("option", name="Create or open a run folder…").click()
+    expect(active_run_context).to_contain_text("Object A capture")
+    page.get_by_role("link", name="Change active run folder").click()
     expect(
-        page.get_by_role("heading", name="Create or open a run folder")
+        page.get_by_text("Use one sibling folder per physical acquisition.")
     ).to_be_visible()
-    expect(
-        page.get_by_text(
-            "Each acquisition run is a separate folder",
-            exact=False,
-        )
-    ).to_be_visible()
-    expect(page.get_by_text("Choose one folder per acquisition run.")).to_be_visible()
-    expect(page.get_by_role("combobox", name="Run storage root")).to_contain_text(
+    expect(page.get_by_role("combobox", name="New run storage root")).to_contain_text(
         "/tmp/posetestbot-console"
     )
-    expect(page.locator("#new-run-name")).to_have_value("")
+    expect(page.locator("#new-run-folder-name")).to_have_value("")
     custom_run = "/tmp/posetestbot-console/unlisted-run"
-    page.locator("#new-run-name").fill("unlisted-run")
+    page.locator("#new-run-folder-name").fill("unlisted-run")
     expect(page.get_by_test_id("new-run-path-preview")).to_have_text(custom_run)
-    page.get_by_role("button", name="Use run folder", exact=True).click()
-    expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
-        custom_run
-    )
+    page.get_by_role("button", name="Use new run folder", exact=True).click()
+    expect(active_run_context).to_contain_text("unlisted-run")
+    expect(active_run_context).to_contain_text(custom_run)
+    expect(active_run_context).to_contain_text("Not configured")
     assert (
         page.evaluate("localStorage.getItem('posetestbot.selectedRun')") == custom_run
     )
     page.reload(wait_until="networkidle")
-    expect(page.get_by_role("combobox", name="Active run folder")).to_contain_text(
-        custom_run
-    )
+    expect(active_run_context).to_contain_text("unlisted-run")
+    expect(active_run_context).to_contain_text(custom_run)
     assert (
         page.evaluate("localStorage.getItem('posetestbot.selectedRun')") == custom_run
     )
@@ -829,6 +1100,195 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     expect(page.get_by_role("img", name="PoseTestBot")).to_have_css("padding", "0px")
 
 
+def test_active_run_header_alignment_and_change_affordance(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
+
+    active_run_context = page.get_by_test_id("active-run-context")
+    change_run = page.get_by_role("link", name="Change active run folder")
+    active_context_box = active_run_context.bounding_box()
+    page_content_box = page.locator("main > div").first.bounding_box()
+
+    assert active_context_box is not None and page_content_box is not None
+    assert active_context_box["x"] == pytest.approx(page_content_box["x"], abs=1)
+    assert (
+        active_context_box["x"] + active_context_box["width"]
+        <= page_content_box["x"] + page_content_box["width"] + 1
+    )
+    expect(change_run).to_have_css("background-color", "rgb(177, 203, 33)")
+    expect(change_run).to_contain_text("Change run")
+
+
+def test_dashboard_starts_and_stops_managed_cluster_controller(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    actions: list[str] = []
+    blocked_estimator = cluster_pose_setup(ready=False)["estimator"]
+    ready_estimator = cluster_pose_setup(ready=True)["estimator"]
+    service = {
+        "schema_version": "posetestbot_cluster_controller_service.v1",
+        "managed": True,
+        "service_unit": "posetestbot-cluster.service",
+        "unit_installed": True,
+        "state": "stopped",
+        "active": False,
+        "can_start": True,
+        "can_stop": False,
+        "load_state": "loaded",
+        "active_state": "inactive",
+        "sub_state": "dead",
+        "unit_file_state": "disabled",
+        "integration": {
+            "enabled": True,
+            "controller_configured": True,
+            "environment_file_configured": True,
+        },
+        "blockers": [],
+    }
+    controller = {
+        "schema_version": "posetestbot_cluster_status_proxy.v1",
+        "ready": False,
+        "available": False,
+        "integration": {"enabled": True, "controller_configured": True},
+        "features": {"pose_estimation": False},
+        "feature_blockers": {
+            "estimation": ["Controller is in status-only mode."]
+        },
+        "domains": {
+            "storage": {
+                "ready": False,
+                "read": True,
+                "mutation": False,
+                "blockers": ["Controller is stopped."],
+            },
+            "scheduler": {
+                "ready": False,
+                "blockers": ["Controller is stopped."],
+            },
+        },
+        "estimators": [blocked_estimator],
+        "profiles": [],
+        "blockers": [
+            {
+                "code": "controller_unavailable",
+                "message": "Cluster controller is unavailable",
+            }
+        ],
+    }
+
+    page.route(
+        "**/cluster/controller-service",
+        lambda route: fulfill_json(route, service),
+    )
+    page.route("**/cluster/status", lambda route: fulfill_json(route, controller))
+
+    def action_handler(route) -> None:
+        action = route.request.url.rsplit("/", 1)[-1]
+        assert route.request.post_data_json == {"confirm": True}
+        actions.append(action)
+        running = action == "start"
+        service.update(
+            {
+                "state": "running" if running else "stopped",
+                "active": running,
+                "can_start": not running,
+                "can_stop": running,
+                "active_state": "active" if running else "inactive",
+                "sub_state": "running" if running else "dead",
+            }
+        )
+        controller.update(
+            {
+                "ready": running,
+                "available": running,
+                "features": {"pose_estimation": False},
+                "feature_blockers": {
+                    "estimation": [
+                        "Runtime manifest is not configured."
+                        if running
+                        else "Controller is stopped."
+                    ]
+                },
+                "domains": {
+                    "storage": {
+                        "ready": running,
+                        "read": True,
+                        "mutation": running,
+                        "blockers": [] if running else ["Controller is stopped."],
+                    },
+                    "scheduler": {
+                        "ready": running,
+                        "blockers": [] if running else ["Controller is stopped."],
+                    },
+                },
+                "estimators": [blocked_estimator],
+                "profiles": [],
+                "blockers": [],
+            }
+        )
+        fulfill_json(
+            route,
+            {
+                "accepted": True,
+                "action": action,
+                "job_id": f"cluster-{action}-1",
+                "job": {"id": f"cluster-{action}-1", "status": "queued"},
+                "service": service,
+            },
+            status=202,
+        )
+
+    page.route("**/cluster/controller-service/*", action_handler)
+    page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
+
+    card = page.get_by_test_id("cluster-controller-control")
+    expect(card).to_contain_text("posetestbot-cluster.service")
+    expect(card).to_contain_text("stopped")
+    expect(card.get_by_role("link", name="Cluster storage")).to_have_attribute(
+        "href", "#/run-folders"
+    )
+    card_box = card.bounding_box()
+    room_monitor_box = page.get_by_test_id("dashboard-room-monitor").bounding_box()
+    assert card_box is not None and room_monitor_box is not None
+    assert card_box["y"] < room_monitor_box["y"]
+    assert card_box["y"] + card_box["height"] <= 1080
+    card.get_by_role("button", name="Start").click()
+    expect(card).to_contain_text("Ready")
+    expect(card).to_contain_text("Cluster storage/archive is ready independently")
+    expect(card).to_contain_text("None ready")
+
+    controller.update(
+        {
+            "features": {"pose_estimation": True},
+            "feature_blockers": {"estimation": []},
+            "estimators": [ready_estimator],
+            "profiles": [cluster_profile()],
+        }
+    )
+    page.get_by_role("button", name="Refresh", exact=True).click()
+    expect(card).to_contain_text("Ready")
+    expect(card).to_contain_text("1 ready")
+    expect(page.get_by_text("Controller start queued")).to_be_visible()
+
+    card.get_by_role("button", name="Stop").click()
+    dialog = page.get_by_test_id("cluster-controller-stop-dialog")
+    expect(dialog).to_contain_text("Remote SLURM identity is durable")
+    dialog.get_by_test_id("cluster-controller-stop-confirmation").click()
+    dialog.get_by_role("button", name="Confirm stop").click()
+
+    expect(card).to_contain_text("stopped")
+    expect(page.get_by_text("Controller stop queued")).to_be_visible()
+    assert actions == ["start", "stop"]
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
 def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
     console_server,
     page,
@@ -839,14 +1299,38 @@ def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
     jobs: list[dict] = []
     submissions: list[dict] = []
 
-    page.route(
-        "**/cluster/pose-estimation/setup?**",
-        lambda route: fulfill_json(route, setup),
-    )
+    def setup_handler(route) -> None:
+        response = json.loads(json.dumps(setup))
+        if "estimator_id=megapose" in route.request.url:
+            selected = next(
+                estimator
+                for estimator in response["estimators"]
+                if estimator["estimator_id"] == "megapose"
+            )
+            response.update(
+                {
+                    "estimator_id": "megapose",
+                    "estimator": selected,
+                    "runtime": selected["runtime"],
+                    "profiles": selected["profiles"],
+                    "enabled_profiles": selected["profiles"],
+                }
+            )
+        fulfill_json(route, response)
+
+    page.route("**/cluster/pose-estimation/setup?**", setup_handler)
 
     def submit_handler(route) -> None:
-        submissions.append(route.request.post_data_json)
+        submission = route.request.post_data_json
+        submissions.append(submission)
         job = cluster_pose_job(state="running")
+        job["payload"].update(
+            {
+                "estimator_id": submission["estimator_id"],
+                "driver_id": f"{submission['estimator_id']}.v1",
+                "runtime_id": f"{submission['estimator_id']}-fixture",
+            }
+        )
         jobs[:] = [job]
         fulfill_json(route, {"job": job}, status=202)
 
@@ -873,6 +1357,9 @@ def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
 
     pose_page = page.get_by_test_id("pose-estimation-page")
     expect(page.get_by_role("heading", name="Pose Estimation")).to_be_visible()
+    expect(page.get_by_role("link", name="Cluster storage")).to_have_attribute(
+        "href", "#/run-folders"
+    )
     expect(pose_page).to_contain_text("1 blocker")
     expect(pose_page).to_contain_text(
         "The pinned FoundationPose runtime has not been qualified."
@@ -883,16 +1370,39 @@ def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
         page.get_by_role("button", name="Submit FoundationPose job")
     ).to_be_disabled()
 
+    ready_setup = cluster_pose_setup(ready=True)
+    megapose = json.loads(json.dumps(ready_setup["estimator"]))
+    megapose.update(
+        {
+            "estimator_id": "megapose",
+            "driver_id": "megapose.v1",
+            "display_name": "MegaPose",
+        }
+    )
+    megapose["runtime"].update(
+        {
+            "estimator_id": "megapose",
+            "driver_id": "megapose.v1",
+            "runtime_id": "megapose-fixture",
+            "container": {"filename": "megapose.sif", "sha256": "f" * 64},
+            "source_revisions": {"megapose": "abcdef0123456789"},
+        }
+    )
+    ready_setup["estimators"].append(megapose)
+    ready_setup["controller"]["estimators"].append(megapose)
     setup.clear()
-    setup.update(cluster_pose_setup(ready=True))
+    setup.update(ready_setup)
     page.get_by_role("button", name="Refresh evidence").click()
     expect(pose_page).to_contain_text("Ready to submit")
     expect(pose_page).to_contain_text("foundationpose-a1b694b8")
     expect(pose_page).to_contain_text("gpu:a100:1")
+    page.get_by_label("Estimator method").click()
+    page.get_by_role("option", name="MegaPose · ready").click()
+    expect(page.get_by_role("button", name="Submit MegaPose job")).to_be_visible()
     page.get_by_label("Operator / submitter").fill("Test Operator")
-    page.get_by_role("button", name="Submit FoundationPose job").click()
+    page.get_by_role("button", name="Submit MegaPose job").click()
 
-    expect(page.get_by_text("FoundationPose job accepted")).to_be_visible()
+    expect(page.get_by_text("MegaPose job accepted")).to_be_visible()
     current = page.get_by_test_id("pose-estimation-current-job")
     expect(current).to_contain_text("running")
     expect(current).to_contain_text("482991")
@@ -900,6 +1410,7 @@ def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
     assert submissions == [
         {
             "run_root": RUN_ROOT,
+            "estimator_id": "megapose",
             "profile_id": "smoke-a100",
             "operator": "Test Operator",
         }
@@ -908,7 +1419,7 @@ def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
     current.get_by_role("link", name="View logs and all cluster jobs").click()
     expect(page).to_have_url(f"{console_server.url}/#/jobs")
     cluster_section = page.get_by_test_id("cluster-jobs-section")
-    expect(cluster_section).to_contain_text("Durable FoundationPose and SLURM state")
+    expect(cluster_section).to_contain_text("Durable estimator and SLURM state")
     expect(cluster_section).to_contain_text("482991")
     cluster_section.get_by_role("button", name="Log").click()
     expect(page.get_by_text("Cluster job log")).to_be_visible()

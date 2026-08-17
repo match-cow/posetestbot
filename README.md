@@ -90,14 +90,27 @@ an acquisition-pipeline stage.
 The optional **Inspect → Pose Estimation** page is a thin integration with the
 separate [`match-cow/posetestbot-cluster`](https://github.com/match-cow/posetestbot-cluster)
 companion. That loopback-only controller owns SSH credentials, immutable run
-archives, BIGWORK staging, durable SLURM state, the pinned FoundationPose SIF,
-and standard BOP19 CSV generation. PoseTestBot revalidates the active run,
+archives, BIGWORK staging, durable SLURM state, an estimator-driver registry,
+qualified private runtimes, and standard BOP19 CSV generation. Archive and
+restore remain usable without any pose method; FoundationPose is the first
+registered estimator and future methods use the same external boundary.
+PoseTestBot revalidates the active run,
 proxies browser-safe requests, imports a completed CSV through its existing
 BOP19 validator, and retains external-job/container/input/output provenance.
 It never becomes a pipeline stage. The browser never receives a controller
 token or cluster credential. The private SIF is built with Apptainer on a LUIS
 login node and retained on BIGWORK; the exact pinned upstream FoundationPose
 license is bundled as runtime provenance, with no PoseTestBot approval gate.
+The Dashboard reports storage/archive readiness separately from qualified
+estimator readiness. It may also inspect, start, and stop one fixed server-configured
+user-systemd controller unit. Those lifecycle actions are queued local jobs;
+the browser cannot provide a command, unit name, environment value, or
+credential. The controller card links to the **Run folders** page's top-level
+**Cluster storage** archive/restore panel, and **Pose Estimation** provides the
+same return handoff.
+
+The single deployment and qualification runbook is the companion's
+[FoundationPose cluster setup](https://github.com/match-cow/posetestbot-cluster/blob/main/docs/FOUNDATIONPOSE_CLUSTER_SETUP.md).
 
 ## Lab Context and Safety
 

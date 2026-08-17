@@ -117,15 +117,21 @@ normal checkout enables both:
 - `<repository>/working_data`; and
 - `/mnt/working_data_ssd`, the lab acquisition SSD.
 
-The run chooser lists direct run folders from both roots. To create or open a
-run, choose an approved storage root and one folder name; the console derives
-the direct child `<root>/<run-folder>`, and Workflow writes its
-`run_config.json` when setup is saved. Use a different sibling folder for each
-acquisition (`<root>/run-a`, `<root>/run-b`, and so on). The editable **Run
-name** inside setup is metadata and does not select or rename that folder. The
-**Inspect → Run folders** page inventories runs across these exact roots,
-including recursively measured size, saved sensor/object setup, and evidence.
-It never opens cameras or contacts the robot.
+The top bar always shows the active acquisition's display name and exact folder
+path; it does not contain the potentially long run list. Choose **Change** to
+open **Inspect → Run folders**, where the active context, new-acquisition form,
+and searchable/sortable existing-run chooser appear before the detailed storage
+inventory. That detailed inventory has its own search and a bounded scrolling
+table so storage actions remain usable as the run count grows. To start a run,
+choose an approved storage root and one folder name;
+the console derives the direct child `<root>/<run-folder>`, and Workflow writes
+its `run_config.json` when setup is saved. Use a different sibling folder for
+each acquisition (`<root>/run-a`, `<root>/run-b`, and so on). The optional
+**Run display name** inside setup is human-readable metadata, defaults to the
+folder name, and does not select or rename that folder. The Run folders page
+also reports recursively measured size, saved sensor/object setup, and evidence
+across both roots. Selection and inventory never open cameras or contact the
+robot.
 
 Inventory/recovery, confirmed deletion, and cross-root moves run as background
 disk jobs and remain visible in **Jobs** after navigation. They cannot be
@@ -326,33 +332,77 @@ EGL/OpenGL implementation.
 
 ### Optional external cluster controller
 
-FoundationPose and cluster storage live in the separate
-`match-cow/posetestbot-cluster` repository; do not install its estimator
-runtime or SSH credentials into PoseTestBot. Deploy that controller as a
-loopback-only workstation service. PoseTestBot exposes only status, pose-job
+Cluster storage and every pose-estimator runtime live in the separate
+`match-cow/posetestbot-cluster` repository; do not install its drivers,
+runtimes, or SSH credentials into PoseTestBot. Deploy that controller as a
+loopback-only workstation service. Its archive capability is independently
+gated from estimator execution, and FoundationPose is the first driver behind
+its estimator registry. PoseTestBot exposes only service and capability
+status, fixed-service start/stop, estimator-job
 submission/logs/cancellation, immutable result import/download, and archive
-copy/restore. It needs one enable switch plus the shared bearer token and URL
-in the web process environment:
+copy/restore.
+
+Use the companion's canonical
+[FoundationPose cluster setup](https://github.com/match-cow/posetestbot-cluster/blob/main/docs/FOUNDATIONPOSE_CLUSTER_SETUP.md)
+for the complete controller, archive-first, user-systemd, private SIF,
+qualification, manifest, and acceptance workflow. Those deployment
+instructions are intentionally not duplicated here.
+
+At the PoseTestBot boundary, point the web process at the companion's existing
+mode-0600 `.env` and name the fixed user-systemd unit:
 
 ```bash
-POSETESTBOT_CLUSTER_URL=http://127.0.0.1:8765
-POSETESTBOT_CLUSTER_API_TOKEN=<32-or-more-random-characters>
-POSETESTBOT_CLUSTER_ENABLED=true
+POSETESTBOT_CLUSTER_ENV_FILE=/absolute/path/to/posetestbot-cluster/.env
+POSETESTBOT_CLUSTER_SERVICE_UNIT=posetestbot-cluster.service
+uv run posetestbot-web
 ```
 
-Enable the integration only after the companion reports both LUIS hosts,
-`checkquota`, the pinned SIF/weights/manifest hashes, and an enabled qualified
-GPU profile as ready. FoundationPose's exact upstream license is bundled into the private
-SIF as runtime provenance; PoseTestBot has no license-approval flag. Build the
-SIF on a LUIS login node with Apptainer `--fakeroot`, retain it only below the
-companion's BIGWORK runtime root, and follow the companion repository's LUIS
-SIF runbook. Verify archive copy and restore before operational use. PoseTestBot
-does not request remote-source deletion or expose remote paths. The web server
-forwards the token only to loopback; no `/cluster/*` response includes it. A controller result is
-imported only when the local dataset identity still matches its staged
-snapshot. An intact historical CSV remains downloadable after dataset drift,
-but evaluation remains blocked until the matching snapshot is selected or
-restored.
+`POSETESTBOT_CLUSTER_ENV_FILE` must be an absolute regular non-symlink file
+with mode 0600. When it is present, cluster integration is enabled and the URL
+defaults to the companion's `POSETESTBOT_CLUSTER_HOST` and
+`POSETESTBOT_CLUSTER_PORT`. The web process must run as the same user that owns
+the fixed service. It reads only the loopback host/port and API token; changing
+them requires a web-process restart. SSH credentials, cluster paths, runtime
+manifests, estimator settings, and service commands cannot be entered in the
+browser or returned by `/cluster/*` responses.
+
+The Dashboard reports service, connection, archive readiness, and estimator
+readiness as distinct states. Lifecycle actions are fixed server-owned
+`systemctl --user --no-block` jobs. Stopping requires confirmation because it
+can interrupt archive transfer, estimator staging, or result collection.
+Remote SLURM identity remains durable and is reconciled after restart.
+
+For a persistent workstation deployment, instantiate both examples in
+`deploy/systemd/` below `~/.config/systemd/user/`, replacing every `@...@`
+placeholder with an absolute path. Point the web unit's mode-0600 environment
+file at the two settings above, then enable both units:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now posetestbot-cluster.service posetestbot-web.service
+systemctl --user status posetestbot-cluster.service posetestbot-web.service
+```
+
+Both examples use `Restart=always`; an unexpected process exit is restarted,
+while an explicit `systemctl --user stop` remains stopped. On a headless lab
+workstation, user lingering must also be enabled by the workstation
+administrator so the user manager starts at boot without an interactive
+login. After rebuilding frontend assets or changing the web environment,
+deploy with a controlled `systemctl --user restart posetestbot-web.service`.
+Do not attach a source-file watcher to the production service: a restart can
+interrupt process-owned local jobs and must happen at an intentional deploy
+boundary.
+
+In the console, the fixed **Cluster controller** card is in the Dashboard's
+first readiness row. **Start** launches the configured companion; **Cluster
+storage** opens the archive/restore panel directly below the **Run folders**
+page header. **Pose Estimation** also links back to that storage panel, so
+archive transfer does not depend on estimator readiness.
+
+A controller result is imported only when the local dataset identity still
+matches its staged snapshot. An intact historical CSV remains downloadable
+after dataset drift, but evaluation remains blocked until the matching
+snapshot is selected or restored.
 
 Imported results must already use the BOP filename convention and the exact
 `scene_id,im_id,obj_id,score,R,t,time` header. Each result is copied and
@@ -464,8 +514,9 @@ and its objects. `/PoseTestBot/TemplateBase` remains only the parent of the
 nine-frame calibration application's taught motion waypoints; it is not the
 pose-stream reference or static-calibration result frame. The single-frame
 static-camera alternative instead teaches
-`/PoseTestBot/PoseTemplateBase/CalibrationStatiCenter` and generates its
-bounded grid relative to that one anchor. See
+`/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle`, moves 50 mm in
+its local +Z direction to the generated center, and keeps the calibration
+pattern at or above that taught bottom anchor. See
 [the controller contract](docs/IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md).
 The same setting is available from the CLI:
 

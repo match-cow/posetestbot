@@ -71,12 +71,16 @@ def _modified_at(path: Path) -> tuple[float, str]:
 
 
 def _run_record(path: Path) -> dict[str, Any]:
+    run_name = None
     sequence = None
     plan_only = None
     config_valid = False
     config_error = None
     try:
         config = load_run_config_for_run_root(path)
+        raw_run_name = config.get("run_name")
+        if isinstance(raw_run_name, str) and raw_run_name.strip():
+            run_name = raw_run_name.strip()
         pipeline = config.get("pipeline", {})
         if isinstance(pipeline, dict):
             raw_sequence = pipeline.get("sequence_id")
@@ -91,6 +95,7 @@ def _run_record(path: Path) -> dict[str, Any]:
     return {
         "path": path.as_posix(),
         "name": path.name,
+        "run_name": run_name,
         "sequence": sequence,
         "plan_only": plan_only,
         "config_valid": config_valid,

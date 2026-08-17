@@ -11,9 +11,10 @@ a deterministic test-only GT perturbation), invokes the pinned official BOP
 Toolkit, and writes derived evidence only below `processed/bop_evaluation/`.
 It is not an estimator, converter, or acquisition-pipeline stage.
 The separate `match-cow/posetestbot-cluster` companion may own SSH transfer,
-durable SLURM orchestration, a pinned FoundationPose runtime, and canonical
-BOP19 CSV generation. PoseTestBot may expose only a loopback controller client,
-browser-safe proxy APIs, cluster/archive status, immutable standard-result
+durable SLURM orchestration, an estimator-driver registry with pinned runtimes
+(FoundationPose first), and canonical BOP19 CSV generation. PoseTestBot may
+expose only a loopback controller client, browser-safe proxy APIs,
+cluster/archive and advertised-estimator status, immutable standard-result
 import/download, and Inspect-page handoffs. Cluster credentials, estimator
 code, estimator-specific conversion, remote paths, and arbitrary scheduler
 arguments must never enter this repository or a browser response.
@@ -186,7 +187,7 @@ Do not expand the Inspect-only exception into downstream behavior:
 
 - No FoundationPose/MegaPose/SAM6D estimator code, runtime, stages, or direct
   SSH/SLURM wrappers in PoseTestBot. The typed external-controller client is
-  the only FoundationPose orchestration boundary.
+  the only estimator-orchestration boundary.
 - No BOP19 result CSV conversion stage.
 - No general evaluator bridge or evaluation pipeline stage beyond the
   run-scoped official BOP19 metrics described above.

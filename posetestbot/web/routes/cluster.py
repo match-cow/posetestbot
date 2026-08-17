@@ -24,7 +24,12 @@ from posetestbot.run_folders import (
     resolve_direct_run_folder,
     validate_expected_identity,
 )
-from posetestbot.web.runtime import get_cluster_client, get_job_runner, get_web_runtime
+from posetestbot.web.runtime import (
+    get_cluster_client,
+    get_cluster_service_manager,
+    get_job_runner,
+    get_web_runtime,
+)
 from posetestbot.web.security import resolve_web_run_root, web_run_roots
 
 
@@ -54,11 +59,43 @@ PUBLIC_PROFILE_FIELDS = {
     "walltime",
     "max_targets",
 }
+PUBLIC_ESTIMATOR_FIELDS = {
+    "estimator_id",
+    "driver_id",
+    "display_name",
+    "installed",
+    "configured",
+    "enabled",
+    "ready",
+    "input_contracts",
+    "output_contract",
+}
+PUBLIC_SERVICE_FIELDS = {
+    "managed",
+    "service_unit",
+    "unit_installed",
+    "state",
+    "active",
+    "can_start",
+    "can_stop",
+    "load_state",
+    "active_state",
+    "sub_state",
+    "unit_file_state",
+}
 CONTROLLER_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])/(?:[^\s'\"<>|,;)\]}]+)")
 CONTROLLER_BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 CONTROLLER_SECRET_LINE_RE = re.compile(
     r"(?im)^.*\b(?:authorization|api[_ -]?token|password|private key|secret)\b\s*[:=].*$"
 )
+PUBLIC_ESTIMATOR_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{2,63}$")
+PUBLIC_DRIVER_ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{2,95}$")
+PUBLIC_RUNTIME_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,95}$")
+PUBLIC_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+PUBLIC_COMPONENT_RE = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
+PUBLIC_CONTRACT_RE = re.compile(r"^[a-z][a-z0-9._-]{2,127}$")
+PUBLIC_REVISION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$")
+PUBLIC_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _json_object() -> dict[str, Any]:
@@ -111,13 +148,165 @@ def _selected_mapping(value: Any, fields: set[str]) -> dict[str, Any]:
     return {field: value[field] for field in fields if field in value}
 
 
+def _safe_public_string(value: Any, pattern: re.Pattern[str]) -> str | None:
+    return value if isinstance(value, str) and pattern.fullmatch(value) else None
+
+
+def _public_runtime_artifact(value: Any) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    filename = _safe_public_string(value.get("filename"), PUBLIC_FILENAME_RE)
+    digest = _safe_public_string(value.get("sha256"), PUBLIC_SHA256_RE)
+    return (
+        {"filename": filename, "sha256": digest}
+        if filename is not None and digest is not None
+        else {}
+    )
+
+
+def _public_estimator_runtime(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    container = _public_runtime_artifact(value.get("container"))
+    assets = {
+        artifact_id: public_artifact
+        for artifact_id, artifact in (
+            value.get("assets", {}).items()
+            if isinstance(value.get("assets"), Mapping)
+            else []
+        )
+        if _safe_public_string(artifact_id, PUBLIC_COMPONENT_RE) is not None
+        and (public_artifact := _public_runtime_artifact(artifact))
+    }
+    source_revisions = {
+        source_id: revision
+        for source_id, revision in (
+            value.get("source_revisions", {}).items()
+            if isinstance(value.get("source_revisions"), Mapping)
+            else []
+        )
+        if _safe_public_string(source_id, PUBLIC_COMPONENT_RE) is not None
+        and _safe_public_string(revision, PUBLIC_REVISION_RE) is not None
+    }
+    licenses = []
+    for item in value.get("licenses", []):
+        if not isinstance(item, Mapping):
+            continue
+        name = _public_controller_text(item.get("name"))
+        digest = _safe_public_string(item.get("sha256"), PUBLIC_SHA256_RE)
+        if name and digest and len(name) <= 160:
+            licenses.append({"name": name, "sha256": digest})
+    public: dict[str, Any] = {
+        "container": container,
+        "assets": assets,
+        "source_revisions": source_revisions,
+        "licenses": licenses,
+        "input_contracts": [
+            item
+            for item in value.get("input_contracts", [])
+            if _safe_public_string(item, PUBLIC_CONTRACT_RE) is not None
+        ],
+        "qualified_resource_profiles": [
+            item
+            for item in value.get("qualified_resource_profiles", [])
+            if _safe_public_string(item, PUBLIC_COMPONENT_RE) is not None
+        ],
+        "qualification_blockers": [
+            _public_controller_text(item) or "Estimator runtime is not ready."
+            for item in value.get("qualification_blockers", [])
+        ],
+    }
+    for field, pattern in (
+        ("estimator_id", PUBLIC_ESTIMATOR_ID_RE),
+        ("driver_id", PUBLIC_DRIVER_ID_RE),
+        ("runtime_id", PUBLIC_RUNTIME_ID_RE),
+        ("output_contract", PUBLIC_CONTRACT_RE),
+        ("qualification_manifest_sha256", PUBLIC_SHA256_RE),
+    ):
+        selected = _safe_public_string(value.get(field), pattern)
+        if selected is not None:
+            public[field] = selected
+    for field in ("qualified", "ready"):
+        if isinstance(value.get(field), bool):
+            public[field] = value[field]
+    return public
+
+
+def _public_estimator(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise RuntimeError("The controller returned an invalid estimator")
+    estimator_id = _safe_public_string(value.get("estimator_id"), PUBLIC_ESTIMATOR_ID_RE)
+    if estimator_id is None:
+        raise RuntimeError("The controller returned an invalid estimator identifier")
+    public = _selected_mapping(value, PUBLIC_ESTIMATOR_FIELDS)
+    public["estimator_id"] = estimator_id
+    public["display_name"] = (
+        _public_controller_text(value.get("display_name")) or estimator_id
+    )[:120]
+    driver_id = _safe_public_string(value.get("driver_id"), PUBLIC_DRIVER_ID_RE)
+    if driver_id is None:
+        public.pop("driver_id", None)
+    else:
+        public["driver_id"] = driver_id
+    public["input_contracts"] = [
+        item
+        for item in value.get("input_contracts", [])
+        if _safe_public_string(item, PUBLIC_CONTRACT_RE) is not None
+    ]
+    output_contract = _safe_public_string(
+        value.get("output_contract"), PUBLIC_CONTRACT_RE
+    )
+    if output_contract is None:
+        public.pop("output_contract", None)
+    else:
+        public["output_contract"] = output_contract
+    return {
+        **public,
+        "blockers": [
+            _public_controller_text(item) or "Estimator submission is blocked."
+            for item in value.get("blockers", [])
+        ],
+        "readiness_blockers": [
+            _public_controller_text(item) or "Estimator is not ready."
+            for item in value.get("readiness_blockers", [])
+        ],
+        "runtime": _public_estimator_runtime(value.get("runtime")),
+        "profiles": [
+            _selected_mapping(item, PUBLIC_PROFILE_FIELDS)
+            for item in value.get("profiles", [])
+            if isinstance(item, Mapping)
+        ],
+    }
+
+
+def _public_domain(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {"ready": False, "blockers": []}
+    return {
+        **_selected_mapping(value, {"ready", "read", "mutation"}),
+        "blockers": [
+            _public_controller_text(item) or "Cluster capability is not ready."
+            for item in value.get("blockers", [])
+        ],
+    }
+
+
 def _public_job(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise RuntimeError("The controller returned an invalid job")
     job_id = _require_id(value.get("job_id"))
     payload = _selected_mapping(
         value.get("payload"),
-        {"run_root", "dataset_alias", "dataset_sha256", "profile_id", "operator"},
+        {
+            "run_root",
+            "estimator_id",
+            "driver_id",
+            "runtime_id",
+            "dataset_alias",
+            "dataset_sha256",
+            "profile_id",
+            "operator",
+        },
     )
     result = _selected_mapping(
         value.get("result"),
@@ -125,6 +314,9 @@ def _public_job(value: Any) -> dict[str, Any]:
             "filename",
             "sha256",
             "dataset_sha256",
+            "estimator_id",
+            "runtime_id",
+            "provenance_sha256",
             "estimate_count",
             "failure_count",
         },
@@ -241,7 +433,14 @@ def _controller_status() -> dict[str, Any]:
     ]
     runtime = _selected_mapping(status.get("runtime"), PUBLIC_RUNTIME_FIELDS)
     features = _selected_mapping(
-        status.get("features"), {"pose_estimation", "archive_read", "archive_mutation"}
+        status.get("features"),
+        {
+            "pose_estimation",
+            "estimation_submission",
+            "archive_read",
+            "archive_mutation",
+            "archive_move",
+        },
     )
     raw_feature_blockers = status.get("feature_blockers")
     feature_blockers = {
@@ -254,8 +453,61 @@ def _controller_status() -> dict[str, Any]:
             if isinstance(raw_feature_blockers, Mapping)
             else []
         )
-        if key in {"estimation", "archive"} and isinstance(messages, list)
+        if key in {"estimation", "estimation_submission", "archive", "archive_move"}
+        and isinstance(messages, list)
     }
+    raw_domains = status.get("domains")
+    domains = {
+        key: _public_domain(value)
+        for key, value in (
+            raw_domains.items() if isinstance(raw_domains, Mapping) else []
+        )
+        if key in {"storage", "scheduler"}
+    }
+    estimators = [
+        _public_estimator(item)
+        for item in status.get("estimators", [])
+        if isinstance(item, Mapping)
+    ]
+    configuration_blockers = [
+        _public_controller_text(item) or "Controller configuration is invalid."
+        for item in status.get("configuration_blockers", [])
+    ]
+    if not estimators:
+        legacy_estimation_blockers = feature_blockers.get("estimation", [])
+        estimators = [
+            {
+                "estimator_id": "foundationpose",
+                "driver_id": "foundationpose.v1",
+                "display_name": "FoundationPose",
+                "installed": True,
+                "configured": runtime.get("qualified") is True,
+                "enabled": features.get("pose_estimation") is True,
+                "ready": (
+                    status.get("ready") is True
+                    and features.get("pose_estimation") is True
+                ),
+                "blockers": legacy_estimation_blockers,
+                "readiness_blockers": legacy_estimation_blockers,
+                "input_contracts": ["posetestbot.bop.v5.pose_and_masks"],
+                "output_contract": "bop19.csv.v1",
+                "runtime": runtime,
+                "profiles": profiles,
+            }
+        ]
+    if not domains:
+        domains = {
+            "storage": {
+                "ready": status.get("ready") is True,
+                "read": features.get("archive_read") is True,
+                "mutation": features.get("archive_mutation") is True,
+                "blockers": feature_blockers.get("archive", []),
+            },
+            "scheduler": {
+                "ready": status.get("ready") is True,
+                "blockers": [item["message"] for item in blockers],
+            },
+        }
     return {
         "schema_version": "posetestbot_cluster_status_proxy.v1",
         "ready": status.get("ready") is True,
@@ -263,8 +515,66 @@ def _controller_status() -> dict[str, Any]:
         "mode": status.get("mode"),
         "features": features,
         "feature_blockers": feature_blockers,
+        "domains": domains,
+        "estimators": estimators,
+        "configuration_blockers": configuration_blockers,
         "runtime": runtime,
         "profiles": profiles,
+        "integration": integration,
+        "blockers": blockers,
+    }
+
+
+def _controller_service_status() -> dict[str, Any]:
+    runtime = get_web_runtime()
+    settings = runtime.settings
+    integration = {
+        "enabled": settings.cluster_enabled,
+        "controller_configured": runtime.cluster_client is not None,
+        "environment_file_configured": settings.cluster_env_file is not None,
+    }
+    manager = runtime.cluster_service_manager
+    if manager is None:
+        return {
+            "schema_version": "posetestbot_cluster_controller_service.v1",
+            "managed": False,
+            "service_unit": None,
+            "unit_installed": False,
+            "state": "unmanaged",
+            "active": False,
+            "can_start": False,
+            "can_stop": False,
+            "load_state": None,
+            "active_state": None,
+            "sub_state": None,
+            "unit_file_state": None,
+            "integration": integration,
+            "blockers": [
+                {
+                    "code": "service_management_not_configured",
+                    "message": (
+                        "Controller lifecycle management is not configured for "
+                        "this web process."
+                    ),
+                }
+            ],
+        }
+    raw = manager.status()
+    selected = _selected_mapping(raw, PUBLIC_SERVICE_FIELDS)
+    blockers = []
+    for index, item in enumerate(raw.get("blockers") or []):
+        if isinstance(item, Mapping):
+            blockers.append(
+                {
+                    "code": str(item.get("code") or f"service_blocker_{index + 1}"),
+                    "message": str(
+                        item.get("message") or "Controller service is unavailable."
+                    ),
+                }
+            )
+    return {
+        "schema_version": "posetestbot_cluster_controller_service.v1",
+        **selected,
         "integration": integration,
         "blockers": blockers,
     }
@@ -280,7 +590,9 @@ def _load_bop_manifest(run_root: Path) -> Mapping[str, Any]:
     return value
 
 
-def _build_pose_setup(run_root: Path) -> dict[str, Any]:
+def _build_pose_setup(
+    run_root: Path, *, estimator_id: str | None = None
+) -> dict[str, Any]:
     # Readiness stays request-bounded: the companion hashes every staged file
     # in its background worker before submission, while this identity binds the
     # existing BOP metadata and semantic content without synchronously reading
@@ -288,31 +600,82 @@ def _build_pose_setup(run_root: Path) -> dict[str, Any]:
     dataset = inspect_dataset(run_root)
     manifest = _load_bop_manifest(run_root)
     status = _controller_status()
+    estimators = (
+        status.get("estimators")
+        if isinstance(status.get("estimators"), list)
+        else []
+    )
+    available_ids = {
+        item.get("estimator_id")
+        for item in estimators
+        if isinstance(item, Mapping) and isinstance(item.get("estimator_id"), str)
+    }
+    selected_id = estimator_id
+    if selected_id is None:
+        selected_id = (
+            "foundationpose"
+            if "foundationpose" in available_ids
+            else next(iter(sorted(available_ids)), None)
+        )
+    selected = next(
+        (
+            item
+            for item in estimators
+            if isinstance(item, Mapping)
+            and item.get("estimator_id") == selected_id
+        ),
+        None,
+    )
     blockers = [
         {"code": f"dataset_{index + 1}", "message": str(message)}
         for index, message in enumerate(dataset.get("blockers", []))
     ]
-    if manifest.get("annotation_mode") != "pose_and_masks":
+    if selected is None:
+        blockers.append(
+            {
+                "code": "estimator_unavailable",
+                "message": (
+                    "The selected estimator is not installed on the cluster controller."
+                ),
+            }
+        )
+        blockers.extend(
+            {
+                "code": "controller_configuration",
+                "message": str(message),
+            }
+            for message in status.get("configuration_blockers", [])
+        )
+    input_contracts = (
+        selected.get("input_contracts", [])
+        if isinstance(selected, Mapping)
+        else []
+    )
+    oracle_masks_required = "posetestbot.bop.v5.pose_and_masks" in input_contracts
+    if oracle_masks_required and manifest.get("annotation_mode") != "pose_and_masks":
         blockers.append(
             {
                 "code": "pose_and_masks_required",
                 "message": (
-                    "FoundationPose v1 requires a complete BOP v5 pose_and_masks "
-                    "export with visible GT instance masks."
+                    "The selected estimator requires a complete BOP v5 "
+                    "pose_and_masks export with visible GT instance masks."
                 ),
             }
         )
-    if dataset.get("split") != "test":
+    if oracle_masks_required and dataset.get("split") != "test":
         blockers.append(
             {
                 "code": "test_split_required",
-                "message": "FoundationPose v1 requires the exported test split.",
+                "message": "The selected estimator requires the exported test split.",
             }
         )
     capabilities = manifest.get("capabilities")
     if (
-        not isinstance(capabilities, Mapping)
-        or capabilities.get("gt_masks_visible") is not True
+        oracle_masks_required
+        and (
+            not isinstance(capabilities, Mapping)
+            or capabilities.get("gt_masks_visible") is not True
+        )
     ):
         blockers.append(
             {
@@ -320,24 +683,15 @@ def _build_pose_setup(run_root: Path) -> dict[str, Any]:
                 "message": "The BOP export does not declare complete visible GT masks.",
             }
         )
-    if not status.get("available") or not status.get("ready"):
+    if not status.get("available"):
         blockers.extend(status.get("blockers") or [])
-        if status.get("available") and not status.get("ready"):
-            blockers.append(
-                {
-                    "code": "cluster_connection_not_ready",
-                    "message": "The controller cannot currently verify both LUIS hosts.",
-                }
-            )
-    features = (
-        status.get("features") if isinstance(status.get("features"), Mapping) else {}
-    )
-    if status.get("available") and features.get("pose_estimation") is not True:
-        remote = status.get("feature_blockers")
-        messages = remote.get("estimation", []) if isinstance(remote, Mapping) else []
+    elif status.get("ready") is not True:
+        blockers.extend(status.get("blockers") or [])
+    if isinstance(selected, Mapping) and selected.get("ready") is not True:
+        messages = selected.get("readiness_blockers")
         blockers.extend(
             {"code": "controller_estimation_blocked", "message": str(message)}
-            for message in messages
+            for message in (messages if isinstance(messages, list) else [])
         )
     if not _settings().cluster_enabled:
         blockers.append(
@@ -347,7 +701,10 @@ def _build_pose_setup(run_root: Path) -> dict[str, Any]:
             }
         )
     profiles = (
-        status.get("profiles") if isinstance(status.get("profiles"), list) else []
+        selected.get("profiles", [])
+        if isinstance(selected, Mapping)
+        and isinstance(selected.get("profiles"), list)
+        else []
     )
     enabled_profiles = [
         profile
@@ -358,7 +715,10 @@ def _build_pose_setup(run_root: Path) -> dict[str, Any]:
         blockers.append(
             {
                 "code": "no_qualified_profile",
-                "message": "No server-owned GPU resource profile is qualified and enabled.",
+                "message": (
+                    "No server-owned GPU resource profile is qualified and enabled "
+                    "for the selected estimator."
+                ),
             }
         )
     unique_blockers = list(
@@ -372,28 +732,47 @@ def _build_pose_setup(run_root: Path) -> dict[str, Any]:
         }.values()
     )
     return {
-        "schema_version": "cluster_pose_estimation_setup.v1",
+        "schema_version": "cluster_estimation_setup.v2",
         "run_root": run_root.as_posix(),
         "dataset": public_dataset_descriptor(dataset),
         "annotation_mode": manifest.get("annotation_mode"),
-        "oracle_mask_contract": "bop_mask_visib_gt_instance.v1",
-        "score_contract": "constant_1.0_no_detection_confidence",
-        "execution_contract": "independent_register_per_target_no_tracking.v1",
+        "estimator_id": selected_id,
+        "estimator": selected,
+        "estimators": estimators,
+        "oracle_mask_contract": (
+            "bop_mask_visib_gt_instance.v1" if oracle_masks_required else None
+        ),
+        "score_contract": (
+            "constant_1.0_no_detection_confidence" if oracle_masks_required else None
+        ),
+        "execution_contract": (
+            "independent_register_per_target_no_tracking.v1"
+            if oracle_masks_required
+            else None
+        ),
         "controller": status,
-        "runtime": status.get("runtime") if status.get("available") else None,
+        "runtime": (
+            selected.get("runtime")
+            if status.get("available") and isinstance(selected, Mapping)
+            else None
+        ),
         "profiles": profiles,
         "enabled_profiles": enabled_profiles,
         "ready": not unique_blockers,
         "blockers": unique_blockers,
-        "warnings": [
-            {
-                "code": "oracle_gt_masks",
-                "message": (
-                    "Every estimate is conditioned on a BOP GT-visible instance mask; "
-                    "this is pose estimation, not detection or segmentation."
-                ),
-            }
-        ],
+        "warnings": (
+            [
+                {
+                    "code": "oracle_gt_masks",
+                    "message": (
+                        "Every estimate is conditioned on a BOP GT-visible instance "
+                        "mask; this is pose estimation, not detection or segmentation."
+                    ),
+                }
+            ]
+            if oracle_masks_required
+            else []
+        ),
     }
 
 
@@ -427,11 +806,76 @@ def cluster_status():
     return jsonify(_controller_status())
 
 
+@cluster_bp.get("/cluster/controller-service")
+def cluster_controller_service_status():
+    try:
+        return jsonify(_controller_service_status())
+    except Exception as exc:
+        return _error(exc)
+
+
+@cluster_bp.post("/cluster/controller-service/<action>")
+def control_cluster_controller_service(action: str):
+    try:
+        if action not in {"start", "stop"}:
+            raise ValueError("Controller service action must be start or stop")
+        value = _json_object()
+        if set(value) != {"confirm"}:
+            raise ValueError("Controller service action contains unsupported fields")
+        if value.get("confirm") is not True:
+            raise ValueError("Controller service action requires explicit confirmation")
+        service = _controller_service_status()
+        if not service.get("managed"):
+            raise RuntimeError("Cluster controller service management is not configured")
+        if not service.get("unit_installed"):
+            raise RuntimeError("The configured cluster controller service is not installed")
+        allowed = service.get("can_start") if action == "start" else service.get("can_stop")
+        if not allowed:
+            desired_state = "running" if action == "start" else "stopped"
+            if service.get("state") == desired_state:
+                return jsonify({"accepted": False, "service": service})
+            raise RuntimeError(
+                f"Cluster controller service cannot {action} while its state is "
+                f"{service.get('state') or 'unknown'}"
+            )
+        manager = get_cluster_service_manager()
+        job = get_job_runner().submit(
+            name=f"cluster_controller_{action}",
+            command=manager.command(action),
+            resources=["cluster_controller_service"],
+            parameters={
+                "cluster_controller_service": True,
+                "action": action,
+                "service_unit": service.get("service_unit"),
+            },
+            scope_kind="global",
+        )
+        return (
+            jsonify(
+                {
+                    "accepted": True,
+                    "action": action,
+                    "job_id": job.id,
+                    "job": job.to_dict(),
+                    "service": service,
+                }
+            ),
+            202,
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
 @cluster_bp.get("/cluster/pose-estimation/setup")
 def cluster_pose_setup():
     try:
         run_root = resolve_web_run_root(request.args.get("run_root"))
-        return jsonify(_build_pose_setup(run_root))
+        estimator_id = request.args.get("estimator_id")
+        if estimator_id is not None and re.fullmatch(
+            r"[a-z][a-z0-9_-]{2,63}", estimator_id
+        ) is None:
+            raise ValueError("estimator_id is invalid")
+        return jsonify(_build_pose_setup(run_root, estimator_id=estimator_id))
     except Exception as exc:
         return _error(exc)
 
@@ -442,7 +886,12 @@ def submit_cluster_pose_job():
         _require_cluster_enabled()
         value = _json_object()
         run_root = resolve_web_run_root(value.get("run_root"))
-        setup = _build_pose_setup(run_root)
+        estimator_id = value.get("estimator_id", "foundationpose")
+        if not isinstance(estimator_id, str) or re.fullmatch(
+            r"[a-z][a-z0-9_-]{2,63}", estimator_id
+        ) is None:
+            raise ValueError("estimator_id is required")
+        setup = _build_pose_setup(run_root, estimator_id=estimator_id)
         if not setup["ready"]:
             raise RuntimeError(
                 "Pose estimation is blocked: "
@@ -460,16 +909,33 @@ def submit_cluster_pose_job():
         if not isinstance(operator, str) or not operator.strip():
             raise ValueError("operator is required")
         dataset = inspect_dataset(run_root)
-        response = get_cluster_client().create_pose_job(
-            {
-                "run_root": run_root.as_posix(),
-                "dataset_alias": dataset["dataset_alias"],
-                "dataset_sha256": dataset["dataset_sha256"],
-                "profile_id": profile_id,
-                "operator": operator.strip(),
-            },
-            idempotency_key=new_idempotency_key("pose-submit"),
-        )
+        submission = {
+            "estimator_id": estimator_id,
+            "run_root": run_root.as_posix(),
+            "dataset_alias": dataset["dataset_alias"],
+            "dataset_sha256": dataset["dataset_sha256"],
+            "profile_id": profile_id,
+            "operator": operator.strip(),
+        }
+        controller = get_cluster_client()
+        if hasattr(controller, "create_estimation_job"):
+            response = controller.create_estimation_job(
+                submission,
+                idempotency_key=new_idempotency_key("estimation-submit"),
+            )
+        elif estimator_id == "foundationpose":
+            response = controller.create_pose_job(
+                {
+                    key: item
+                    for key, item in submission.items()
+                    if key != "estimator_id"
+                },
+                idempotency_key=new_idempotency_key("pose-submit"),
+            )
+        else:
+            raise RuntimeError(
+                "The cluster controller does not support generic estimators."
+            )
         return jsonify(_public_job_response(response)), 202
     except Exception as exc:
         return _error(exc)
@@ -482,11 +948,19 @@ def list_cluster_jobs():
         limit = request.args.get("limit", default=50, type=int)
         if limit is None or not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
-        response = get_cluster_client().pose_jobs(
-            limit=limit,
-            before=request.args.get("before"),
-            state=request.args.get("state"),
-        )
+        try:
+            response = get_cluster_client().estimation_jobs(
+                limit=limit,
+                state=request.args.get("state"),
+            )
+        except ClusterClientError as exc:
+            if exc.status != 404:
+                raise
+            response = get_cluster_client().pose_jobs(
+                limit=limit,
+                before=request.args.get("before"),
+                state=request.args.get("state"),
+            )
         jobs = response.get("jobs") if isinstance(response, Mapping) else None
         if not isinstance(jobs, list):
             raise RuntimeError("The controller returned an invalid job list")
@@ -594,6 +1068,31 @@ def import_cluster_result(job_id: str):
         provenance = json.loads(provenance_path.read_text())
         if not isinstance(provenance, Mapping):
             raise ValueError("Controller provenance must be a JSON object")
+        payload_estimator_id = payload.get("estimator_id")
+        result_estimator_id = result.get("estimator_id")
+        if (
+            payload_estimator_id is not None
+            and result_estimator_id is not None
+            and payload_estimator_id != result_estimator_id
+        ):
+            raise RuntimeError("The cluster result estimator identity changed")
+        estimator_id = result_estimator_id or payload_estimator_id
+        if estimator_id is None:
+            method_name = "FoundationPose (oracle GT masks)"
+        elif not isinstance(estimator_id, str) or re.fullmatch(
+            r"[a-z][a-z0-9_-]{2,63}", estimator_id
+        ) is None:
+            raise RuntimeError("The cluster result has an invalid estimator identity")
+        elif estimator_id == "foundationpose":
+            method_name = "FoundationPose (oracle GT masks)"
+        else:
+            method_name = f"{estimator_id.replace('_', ' ').title()} (cluster)"
+        provenance_estimator = provenance.get("estimator")
+        if (
+            isinstance(provenance_estimator, Mapping)
+            and provenance_estimator.get("estimator_id") != estimator_id
+        ):
+            raise RuntimeError("Controller provenance names another estimator")
         registered, created = import_external_bop_result(
             run_root,
             result_path,
@@ -601,6 +1100,7 @@ def import_cluster_result(job_id: str):
             expected_dataset_sha256=expected_dataset,
             source_provenance_sha256=result["provenance_sha256"],
             controller_provenance=provenance,
+            method_name=method_name,
         )
         result_id = registered["result_id"]
         return (
@@ -632,10 +1132,27 @@ def list_cluster_archives():
         archives = response.get("archives") if isinstance(response, Mapping) else None
         if not isinstance(archives, list):
             raise RuntimeError("The controller returned an invalid archive list")
+        status = _controller_status()
+        domains = status.get("domains")
+        storage = (
+            domains.get("storage")
+            if isinstance(domains, Mapping)
+            and isinstance(domains.get("storage"), Mapping)
+            else {
+                "ready": status.get("ready") is True,
+                "read": True,
+                "mutation": bool(
+                    isinstance(status.get("features"), Mapping)
+                    and status["features"].get("archive_mutation") is True
+                ),
+                "blockers": [],
+            }
+        )
         return jsonify(
             {
                 "archives": [_public_archive(archive) for archive in archives],
                 "integration": {"enabled": _settings().cluster_enabled},
+                "storage": storage,
             }
         )
     except Exception as exc:

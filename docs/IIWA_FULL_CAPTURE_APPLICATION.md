@@ -22,7 +22,7 @@ ambiguously retaught frame.
 | Use | Persistent Sunrise frame | Repository frame role |
 | --- | --- | --- |
 | Nine-frame calibration motion waypoints | `/PoseTestBot/TemplateBase` | Motion planning only; not a run transform endpoint |
-| Single-frame static-calibration anchor | `/PoseTestBot/PoseTemplateBase/CalibrationStatiCenter` | Motion anchor for the bounded relative grid |
+| Single-frame static-calibration bottom anchor | `/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle` | Minimum local-Z motion anchor; generated center is +50 mm in its Z axis |
 | Static-calibration and ordinary-capture pose stream | `/PoseTestBot/PoseTemplateBase` | Run `template_base` and static `camera → template_base` result |
 | Calibration board geometry, static cameras | Target bundle `aruco_grid` | Unknown rigid `aruco_grid → robot_flange`, estimated as support evidence |
 | Calibration board geometry, eye-in-hand cameras | Target bundle `aruco_grid` | Explicit or estimated `aruco_grid → template_base` placement |
