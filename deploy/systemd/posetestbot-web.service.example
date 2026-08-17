@@ -7,6 +7,7 @@ Wants=network-online.target posetestbot-cluster.service
 Type=simple
 WorkingDirectory=@POSETESTBOT_REPOSITORY@
 EnvironmentFile=@POSETESTBOT_WEB_ENV_FILE@
+Environment="PATH=@POSETESTBOT_UV_BIN_DIRECTORY@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStart=@POSETESTBOT_WEB_EXECUTABLE@
 Restart=always
 RestartSec=5s

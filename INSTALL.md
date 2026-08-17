@@ -374,8 +374,11 @@ Remote SLURM identity remains durable and is reconciled after restart.
 
 For a persistent workstation deployment, instantiate both examples in
 `deploy/systemd/` below `~/.config/systemd/user/`, replacing every `@...@`
-placeholder with an absolute path. Point the web unit's mode-0600 environment
-file at the two settings above, then enable both units:
+placeholder with an absolute path. Set `@POSETESTBOT_UV_BIN_DIRECTORY@` to the
+absolute directory reported by `dirname "$(command -v uv)"`; queued workers
+need that directory even when the web executable itself is an absolute path.
+Point the web unit's mode-0600 environment file at the two settings above, then
+enable both units:
 
 ```bash
 systemctl --user daemon-reload

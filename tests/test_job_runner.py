@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from posetestbot.jobs import runner as runner_module
 from posetestbot.jobs.runner import (
     CANCELED,
     CANCELING,
@@ -26,6 +27,26 @@ from posetestbot.jobs.runner import (
     ResourceBusyError,
     SERVICE_VISIBILITY,
 )
+
+
+def test_uv_job_resolves_supported_user_install_when_service_path_omits_uv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    uv_executable = tmp_path / ".local" / "bin" / "uv"
+    uv_executable.parent.mkdir(parents=True)
+    uv_executable.write_text("#!/bin/sh\n")
+    uv_executable.chmod(0o700)
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: None)
+
+    command = ["uv", "run", "python", "worker.py"]
+
+    assert runner_module._resolve_supervised_command(command, home=tmp_path) == [
+        uv_executable.as_posix(),
+        "run",
+        "python",
+        "worker.py",
+    ]
+    assert command == ["uv", "run", "python", "worker.py"]
 
 
 def _write_terminal_job(

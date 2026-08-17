@@ -373,6 +373,7 @@ verify_web_console() {
   [[ -f "${cell_asset}" ]] || die "Bundled Cell template is missing ${cell_asset}."
   [[ -f "${cluster_service_example}" ]] || die "Cluster controller user-service example is missing ${cluster_service_example}."
   [[ -f "${web_service_example}" ]] || die "Web console user-service example is missing ${web_service_example}."
+  grep -Fq 'Environment="PATH=@POSETESTBOT_UV_BIN_DIRECTORY@:' "${web_service_example}" || die "Web console user-service example must put the uv binary directory on PATH for queued jobs."
   log "Bundled operator-console assets are present."
 }
 

@@ -1,6 +1,6 @@
 # Rewrite Progress
 
-Last updated: 2026-08-06
+Last updated: 2026-08-17
 
 PoseTestBot is acquisition-first. Its repository boundary is real capture,
 calibration, non-destructive synchronization, optional GT/mask generation,
@@ -42,6 +42,15 @@ The code rewrite is implemented across:
   `processed/bop_evaluation/`; and
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
+
+## 2026-08-17 Durable User-Service Worker Resolution
+
+Queued `uv run` workers now resolve the supported per-user uv installation even
+when a systemd user manager supplies only its default system PATH. The web
+service example also requires the absolute uv binary directory on PATH, and the
+installer rejects a packaged service example that loses that requirement. This
+prevents host or user-service restarts from disabling the Dashboard UGREEN
+monitor and other managed jobs before their worker process starts.
 
 ## 2026-08-06 Cluster Operations Discoverability and Durable Web Service
 

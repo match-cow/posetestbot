@@ -8,6 +8,7 @@ import json
 import os
 import signal
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -47,6 +48,25 @@ DEFAULT_JOB_PAGE_LIMIT = 50
 MAX_JOB_PAGE_LIMIT = 100
 JOB_INDEX_FILENAME = "index.sqlite3"
 JOB_INDEX_SCHEMA_VERSION = 1
+
+
+def _resolve_supervised_command(
+    command: list[str],
+    *,
+    home: Path | None = None,
+) -> list[str]:
+    """Resolve uv from its supported user installs when a service PATH omits it."""
+    resolved = list(command)
+    if not resolved or resolved[0] != "uv" or shutil.which("uv") is not None:
+        return resolved
+
+    user_home = home if home is not None else Path.home()
+    for relative_path in (Path(".local/bin/uv"), Path(".cargo/bin/uv")):
+        candidate = user_home / relative_path
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            resolved[0] = candidate.as_posix()
+            break
+    return resolved
 
 
 @dataclass
@@ -484,6 +504,12 @@ class LocalJobRunner:
             write_log(f"$ {self._format_command(job.command)}\n")
             try:
                 identity_path = Path(job.log_path).parent / "supervisor.json"
+                supervised_command = _resolve_supervised_command(job.command)
+                if supervised_command != job.command:
+                    write_log(
+                        "[PoseTestBot] Resolved uv outside the service PATH: "
+                        f"{supervised_command[0]}\n"
+                    )
                 supervisor_command = [
                     sys.executable,
                     "-m",
@@ -497,7 +523,7 @@ class LocalJobRunner:
                     "--termination-timeout",
                     "5",
                     "--",
-                    *job.command,
+                    *supervised_command,
                 ]
                 process = subprocess.Popen(
                     supervisor_command,
