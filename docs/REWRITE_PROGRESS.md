@@ -1,6 +1,6 @@
 # Rewrite Progress
 
-Last updated: 2026-08-17
+Last updated: 2026-08-18
 
 PoseTestBot is acquisition-first. Its repository boundary is real capture,
 calibration, non-destructive synchronization, optional GT/mask generation,
@@ -42,6 +42,35 @@ The code rewrite is implemented across:
   `processed/bop_evaluation/`; and
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
+
+## 2026-08-18 Accessible Public Project Guide
+
+The repository now includes a dependency-free GitHub Pages site that explains
+PoseTestBot to new researchers and lab operators before sending them into the
+full technical manuals. The page presents the two guided outcomes, a
+loopback-only software first look, the distinction between readiness and
+physical authorization, retained raw/derived/BOP evidence, the acquisition-only
+repository boundary, current lab hardware, research publications and datasets,
+and task-oriented links to the authoritative guides. It also states the
+research-system maturity and links directly to the remaining physical
+milestones instead of implying turnkey production readiness.
+
+The static source below `site/` uses semantic HTML and local assets, keeps its
+core content available without JavaScript, and adds keyboard skip navigation,
+visible focus, light/dark preference handling, reduced-motion and
+high-contrast styles, responsive reachability, print styling, and an accessible
+command-copy status. The public artifact is self-contained and does not expose
+the repository source tree. `.github/workflows/pages.yml` deploys only that
+directory through the protected `github-pages` environment, while
+`docs/GITHUB_PAGES.md` records preview, maintenance, and publication contracts.
+
+Validation passed all 721 default non-Playwright tests, seven focused static
+site contract tests, three dedicated Chromium regressions, Ruff on both new
+Python test modules, and `git diff --check`. The browser checks covered keyboard
+focus, loaded assets, theme persistence, command copying, expandable content,
+and document-width containment at 1440×900 and 390×844. Separate screenshots
+were visually reviewed at 1920×1080 in light mode and 390×844 in dark mode. No
+camera or robot command was executed.
 
 ## 2026-08-18 Complete Static-Calibration Change Review
 
