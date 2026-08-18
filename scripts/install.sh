@@ -6,6 +6,7 @@ WITH_SYSTEM_PACKAGES=false
 WITH_BLENDERPROC=false
 WITH_PLAYWRIGHT_BROWSERS=false
 WITH_WEB_BUILD=false
+WITH_DOCS_BUILD=false
 WITH_POSEGRIDGEN=false
 WITH_POSETEMPLATECREATOR=false
 WITH_BOP_TOOLKIT=false
@@ -28,6 +29,7 @@ Options:
   --with-playwright-browsers
                            Install Chromium for Playwright browser UI tests.
   --with-web-build         Reinstall locked Bun packages and rebuild the bundled UI.
+  --with-docs-build        Build the MkDocs technical site with strict link checks.
   --with-posegridgen       Initialize and verify the pinned PoseGridGen submodule.
   --with-posetemplatecreator
                            Initialize and verify the pinned PoseTemplateCreator submodule.
@@ -96,6 +98,9 @@ parse_args() {
         ;;
       --with-web-build)
         WITH_WEB_BUILD=true
+        ;;
+      --with-docs-build)
+        WITH_DOCS_BUILD=true
         ;;
       --with-posegridgen)
         WITH_POSEGRIDGEN=true
@@ -355,6 +360,21 @@ build_web_console() {
   run bun run --cwd frontend build
 }
 
+build_documentation() {
+  if [[ "${WITH_DOCS_BUILD}" != true ]]; then
+    return 0
+  fi
+  [[ -f "${REPO_ROOT}/mkdocs.yml" ]] || die "mkdocs.yml is missing."
+  if [[ "${CHECK_ONLY}" == true ]]; then
+    local docs_check_root="${TMPDIR:-/tmp}/posetestbot-docs-check"
+    log "Checking the technical documentation without changing the environment."
+    run uv run --no-sync mkdocs build --strict --site-dir "${docs_check_root}"
+    return 0
+  fi
+  log "Building the technical documentation with strict link checks."
+  run uv run --frozen mkdocs build --strict
+}
+
 verify_web_console() {
   local ui_root="${REPO_ROOT}/posetestbot/web/static/ui"
   local cell_asset="${REPO_ROOT}/posetestbot/web/static/cell/template_HRI_LBR_all_center_v2.svg"
@@ -505,6 +525,7 @@ main() {
   install_bop_toolkit
   build_web_console
   verify_web_console
+  build_documentation
   install_blenderproc
   install_playwright_browsers
   run_readiness_checks

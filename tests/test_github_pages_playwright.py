@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+import subprocess
+import sys
 import threading
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -14,7 +17,7 @@ from playwright.sync_api import expect, sync_playwright
 
 pytestmark = pytest.mark.playwright
 
-SITE_ROOT = Path(__file__).resolve().parents[1] / "site"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class QuietStaticHandler(SimpleHTTPRequestHandler):
@@ -23,8 +26,8 @@ class QuietStaticHandler(SimpleHTTPRequestHandler):
 
 
 class DocumentationServer:
-    def __init__(self) -> None:
-        handler = partial(QuietStaticHandler, directory=str(SITE_ROOT))
+    def __init__(self, site_root: Path) -> None:
+        handler = partial(QuietStaticHandler, directory=str(site_root))
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
@@ -42,8 +45,26 @@ class DocumentationServer:
 
 
 @pytest.fixture(scope="module")
-def docs_server():
-    server = DocumentationServer()
+def docs_server(tmp_path_factory: pytest.TempPathFactory):
+    site_root = tmp_path_factory.mktemp("mkdocs-browser-site")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mkdocs",
+            "build",
+            "--strict",
+            "--site-dir",
+            str(site_root),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    server = DocumentationServer(site_root)
     server.start()
     try:
         yield server
@@ -64,7 +85,6 @@ def page():
             )
         context = browser.new_context(
             viewport={"width": 1440, "height": 900},
-            permissions=["clipboard-read", "clipboard-write"],
             color_scheme="light",
         )
         page = context.new_page()
@@ -75,85 +95,74 @@ def page():
             browser.close()
 
 
-def test_documentation_site_is_keyboard_reachable_and_complete(page, docs_server) -> None:
+def test_desktop_sidebar_uses_persistent_pages_and_browser_history(
+    page, docs_server
+) -> None:
     errors: list[str] = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto(docs_server.url, wait_until="networkidle")
 
-    expect(page).to_have_title("PoseTestBot — traceable RGB-D datasets")
+    expect(page).to_have_title(re.compile("PoseTestBot Technical Documentation"))
     expect(
-        page.get_by_role(
-            "heading",
-            name="From supervised capture to a dataset you can explain.",
-        )
+        page.get_by_role("heading", name="PoseTestBot technical documentation")
     ).to_be_visible()
-    expect(page.get_by_role("heading", name="Calibrate cameras")).to_be_visible()
+    sidebar = page.locator(".md-sidebar--primary")
+    expect(sidebar).to_be_visible()
+    expect(sidebar.get_by_role("link", name="System overview", exact=True)).to_be_visible()
+    expect(sidebar.get_by_role("link", name="API conventions", exact=True)).to_be_visible()
+
+    sidebar.get_by_role("link", name="API conventions", exact=True).click()
+    expect(page).to_have_url(re.compile(r"/reference/http-api/$"))
+    expect(page.get_by_role("heading", name="HTTP API conventions")).to_be_visible()
+
+    page.get_by_role("link", name="Complete route index", exact=True).first.click()
+    expect(page).to_have_url(re.compile(r"/reference/http-api-routes/$"))
+    expect(page.get_by_role("heading", name="Complete HTTP route index")).to_be_visible()
+    expect(page.get_by_text("137", exact=False).first).to_be_visible()
+
+    page.go_back(wait_until="networkidle")
+    expect(page.get_by_role("heading", name="HTTP API conventions")).to_be_visible()
+    page.go_back(wait_until="networkidle")
     expect(
-        page.get_by_role("heading", name="Record an object dataset")
+        page.get_by_role("heading", name="PoseTestBot technical documentation")
     ).to_be_visible()
-    expect(
-        page.get_by_role(
-            "heading",
-            name="A green check is not permission to move.",
-        )
-    ).to_be_visible()
-    expect(page.locator("img")).to_have_count(2)
-    assert page.locator("img").evaluate_all(
-        "images => images.every(image => image.complete && image.naturalWidth > 0)"
-    )
+
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     assert errors == []
 
+
+def test_search_indexes_technical_contracts_and_opens_result(page, docs_server) -> None:
+    page.goto(docs_server.url, wait_until="networkidle")
+    search = page.get_by_role("textbox", name="Search")
+    expect(search).to_be_visible()
+    search.fill("State meanings")
+
+    results = page.locator("[data-md-component='search-result'] a")
+    expect(results.first).to_be_visible(timeout=10_000)
+    assert results.count() > 0
+    results.filter(has_text="Safety and authorization").first.click()
+    expect(page).to_have_url(re.compile(r"/concepts/safety/"))
+    expect(page.get_by_role("heading", name="Safety and authorization")).to_be_visible()
+
+
+def test_keyboard_skip_link_and_narrow_navigation_drawer_work(page, docs_server) -> None:
+    page.goto(docs_server.url, wait_until="networkidle")
     page.keyboard.press("Home")
     page.keyboard.press("Tab")
-    expect(page.get_by_role("link", name="Skip to main content")).to_be_focused()
-    page.keyboard.press("Enter")
-    assert page.evaluate("document.activeElement.id") == "main-content"
+    expect(page.get_by_role("link", name="Skip to content")).to_be_focused()
 
-
-def test_theme_and_copy_controls_work_without_hiding_content(page, docs_server) -> None:
+    page.set_viewport_size({"width": 900, "height": 900})
     page.goto(docs_server.url, wait_until="networkidle")
+    navigation_toggle = page.locator("label.md-header__button[for='__drawer']")
+    expect(navigation_toggle).to_be_visible()
+    navigation_toggle.click()
 
-    theme = page.get_by_role("button", name="Switch to dark theme")
-    expect(theme).to_be_visible()
-    theme.click()
-    expect(page.locator("html")).to_have_attribute("data-theme", "dark")
+    drawer = page.locator(".md-sidebar--primary")
+    expect(drawer).to_be_visible()
+    drawer.locator("label.md-nav__link", has_text="File and command reference").click()
+    drawer.get_by_role("link", name="Run configuration", exact=True).click()
+    expect(page).to_have_url(re.compile(r"/reference/run-config/$"))
     expect(
-        page.get_by_role("button", name="Switch to light theme")
-    ).to_have_attribute("aria-pressed", "true")
-
-    page.reload(wait_until="networkidle")
-    expect(page.locator("html")).to_have_attribute("data-theme", "dark")
-    copy = page.locator(".copy-button")
-    copy.click()
-    expect(copy).to_have_text("Copied")
-    expect(page.locator("#copy-status")).to_have_text(
-        "Quick-start commands copied."
-    )
-    assert "POSETESTBOT_WEB_HOST=127.0.0.1" in page.evaluate(
-        "navigator.clipboard.readText()"
-    )
-
-
-def test_public_layout_remains_reachable_at_narrow_width(page, docs_server) -> None:
-    page.set_viewport_size({"width": 390, "height": 844})
-    page.goto(docs_server.url, wait_until="networkidle")
-
-    expect(
-        page.get_by_role(
-            "heading",
-            name="From supervised capture to a dataset you can explain.",
-        )
+        page.get_by_role("heading", name=re.compile(r"Run configuration"))
     ).to_be_visible()
-    expect(page.get_by_role("link", name="See the two workflows")).to_be_visible()
-    expect(page.get_by_role("button", name="Switch to dark theme")).to_be_visible()
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-
-    page.get_by_role("link", name="See the two workflows").click()
-    expect(
-        page.get_by_role("heading", name="Start with the result you need.")
-    ).to_be_in_viewport()
-    page.get_by_text("What is BOP?").click()
-    expect(
-        page.get_by_text("BOP is a standard dataset and benchmark format")
-    ).to_be_visible()

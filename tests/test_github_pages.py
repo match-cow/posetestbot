@@ -1,28 +1,34 @@
 from __future__ import annotations
 
+import re
+import subprocess
+import sys
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree
 
+import pytest
+import yaml
+
+from posetestbot.web.app import app
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SITE_ROOT = ROOT / "site"
-INDEX_PATH = SITE_ROOT / "index.html"
+DOCS_ROOT = ROOT / "docs"
+MKDOCS_CONFIG = ROOT / "mkdocs.yml"
 PAGES_WORKFLOW = ROOT / ".github" / "workflows" / "pages.yml"
+ROUTE_REFERENCE = DOCS_ROOT / "reference" / "http-api-routes.md"
 PUBLIC_URL = "https://match-cow.github.io/posetestbot/"
 
 
-class SiteParser(HTMLParser):
+class DocumentParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
-        self.ids: set[str] = set()
+        self.html_attributes: dict[str, str | None] = {}
         self.links: list[str] = []
         self.sources: list[str] = []
-        self.images: list[dict[str, str | None]] = []
-        self.html_attributes: dict[str, str | None] = {}
         self.h1_count = 0
-        self.nav_labels: list[str | None] = []
 
     def handle_starttag(
         self,
@@ -30,154 +36,196 @@ class SiteParser(HTMLParser):
         attributes: list[tuple[str, str | None]],
     ) -> None:
         attrs = dict(attributes)
-        if element_id := attrs.get("id"):
-            self.ids.add(element_id)
         if tag == "html":
             self.html_attributes = attrs
-        elif tag == "a" and (href := attrs.get("href")):
-            self.links.append(href)
-        elif tag in {"img", "script"} and (source := attrs.get("src")):
-            self.sources.append(source)
-        elif tag == "link" and (source := attrs.get("href")):
-            if attrs.get("rel") in {"icon", "stylesheet"}:
-                self.sources.append(source)
-        if tag == "img":
-            self.images.append(attrs)
-        elif tag == "h1":
+        if tag == "a" and attrs.get("href"):
+            self.links.append(str(attrs["href"]))
+        if tag in {"img", "script"} and attrs.get("src"):
+            self.sources.append(str(attrs["src"]))
+        if tag == "link" and attrs.get("href"):
+            self.sources.append(str(attrs["href"]))
+        if tag == "h1":
             self.h1_count += 1
-        elif tag == "nav":
-            self.nav_labels.append(attrs.get("aria-label"))
 
 
-def _parse_site() -> tuple[str, SiteParser]:
-    html = INDEX_PATH.read_text(encoding="utf-8")
-    parser = SiteParser()
-    parser.feed(html)
-    return html, parser
-
-
-def _local_path(reference: str) -> Path | None:
-    parsed = urlparse(reference)
-    if parsed.scheme or parsed.netloc or reference.startswith("#"):
-        return None
-    return SITE_ROOT / unquote(parsed.path)
-
-
-def test_site_entrypoint_has_accessible_document_structure() -> None:
-    html, parser = _parse_site()
-
-    assert parser.html_attributes.get("lang") == "en"
-    assert parser.h1_count == 1
-    assert "main-content" in parser.ids
-    assert '<a class="skip-link" href="#main-content">' in html
-    assert '<main id="main-content" tabindex="-1">' in html
-    assert {"Primary navigation", "Footer navigation"} <= set(parser.nav_labels)
-    assert all("alt" in image for image in parser.images)
-    assert 'id="copy-status" role="status" aria-live="polite"' in html
-    assert 'id="theme-toggle"' in html
-    assert 'aria-pressed="false"' in html
-    assert 'target="_blank"' not in html
-
-
-def test_all_local_assets_and_fragment_links_resolve() -> None:
-    _, parser = _parse_site()
-
-    missing_assets = [
-        reference
-        for reference in parser.sources
-        if (path := _local_path(reference)) is not None and not path.is_file()
-    ]
-    missing_fragments = [
-        reference
-        for reference in parser.links
-        if reference.startswith("#") and reference[1:] not in parser.ids
-    ]
-
-    assert not missing_assets
-    assert not missing_fragments
-    assert all(not reference.startswith("/") for reference in parser.sources)
-
-
-def test_plain_language_site_preserves_project_and_safety_boundaries() -> None:
-    html, _ = _parse_site()
-    normalized_html = " ".join(html.split())
-
-    required_phrases = (
-        "Journey 1",
-        "Calibrate cameras",
-        "Journey 2",
-        "Record an object dataset",
-        "Raw data stays untouched",
-        "both fresh execution safety gates",
-        "A green check is not permission to move",
-        "KUKA LBR iiwa",
-        "PoseTestBot builds the dataset. Estimators consume it elsewhere",
-        "processed/synchronized/",
-        "test_targets_bop19.json",
-        "POSETESTBOT_WEB_HOST=127.0.0.1 uv run posetestbot-web",
+@pytest.fixture(scope="module")
+def built_site(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    destination = tmp_path_factory.mktemp("mkdocs-site")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mkdocs",
+            "build",
+            "--strict",
+            "--site-dir",
+            str(destination),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
     )
-    for phrase in required_phrases:
-        assert phrase in normalized_html
+    assert result.returncode == 0, result.stdout + result.stderr
+    return destination
 
 
-def test_public_document_links_target_authoritative_main_branch_guides() -> None:
-    _, parser = _parse_site()
-    github_docs = {
-        link
-        for link in parser.links
-        if link.startswith("https://github.com/match-cow/PoseTestBot/blob/")
+def _flatten_nav(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [path for item in value for path in _flatten_nav(item)]
+    if isinstance(value, dict):
+        return [path for item in value.values() for path in _flatten_nav(item)]
+    return []
+
+
+def _local_target(site_root: Path, page: Path, reference: str) -> Path | None:
+    parsed = urlparse(reference)
+    if parsed.scheme or parsed.netloc or reference.startswith(("#", "mailto:")):
+        return None
+    path = unquote(parsed.path)
+    if not path:
+        return None
+    public_prefix = urlparse(PUBLIC_URL).path
+    if path.startswith(public_prefix):
+        target = site_root / path.removeprefix(public_prefix)
+    elif path.startswith("/"):
+        return None
+    else:
+        target = page.parent / path
+    if path.endswith("/"):
+        target /= "index.html"
+    return target.resolve()
+
+
+def test_mkdocs_navigation_covers_every_markdown_source() -> None:
+    config = yaml.safe_load(MKDOCS_CONFIG.read_text(encoding="utf-8"))
+    nav_paths = _flatten_nav(config["nav"])
+    source_paths = sorted(
+        path.relative_to(DOCS_ROOT).as_posix()
+        for path in DOCS_ROOT.rglob("*.md")
+    )
+
+    assert sorted(nav_paths) == source_paths
+    assert config["site_url"] == PUBLIC_URL
+    assert config["docs_dir"] == "docs"
+    assert config["site_dir"] == "site"
+    assert config["strict"] is True
+    assert "search" in [
+        item if isinstance(item, str) else next(iter(item))
+        for item in config["plugins"]
+    ]
+    features = config["theme"]["features"]
+    assert "navigation.instant" not in features
+    assert "navigation.sections" in features
+    assert "search.suggest" in features
+
+
+def test_generated_route_reference_matches_every_flask_rule() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/generate_http_api_reference.py",
+            "--check",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    reference = ROUTE_REFERENCE.read_text(encoding="utf-8")
+    rules = [rule for rule in app.url_map.iter_rules() if rule.endpoint != "static"]
+    assert f"all **{len(rules)}** non-static Flask rules" in reference
+    for rule in rules:
+        assert f"`{rule.rule}`" in reference
+        assert f"`{rule.endpoint}`" in reference
+
+
+def test_strict_build_has_search_persistent_pages_and_resolved_links(
+    built_site: Path,
+) -> None:
+    expected_pages = {
+        "index.html",
+        "getting-started/overview/index.html",
+        "concepts/architecture/index.html",
+        "reference/http-api/index.html",
+        "reference/http-api-routes/index.html",
+        "reference/api/capture-pipeline/index.html",
+        "reference/run-config/index.html",
+        "OPERATOR_WORKFLOWS/index.html",
+        "REWRITE_REMAINING_WORK/index.html",
     }
+    for relative in expected_pages:
+        assert (built_site / relative).is_file(), relative
+    assert (built_site / "search" / "search_index.json").is_file()
+    assert (built_site / "sitemap.xml").is_file()
 
-    assert any(link.endswith("/docs/OPERATOR_WORKFLOWS.md") for link in github_docs)
-    assert any(link.endswith("/INSTALL.md") for link in github_docs)
-    assert any(link.endswith("/docs/REWRITE_REMAINING_WORK.md") for link in github_docs)
-    assert all("/blob/main/" in link for link in github_docs)
+    missing: list[tuple[str, str]] = []
+    for page in built_site.rglob("*.html"):
+        parser = DocumentParser()
+        parser.feed(page.read_text(encoding="utf-8"))
+        assert parser.html_attributes.get("lang") == "en"
+        if page.name == "index.html" and "404" not in page.parts:
+            assert parser.h1_count == 1
+        for reference in [*parser.links, *parser.sources]:
+            target = _local_target(built_site, page, reference)
+            if target is not None and not target.exists():
+                missing.append((page.relative_to(built_site).as_posix(), reference))
+    assert missing == []
 
-    for link in github_docs:
-        repository_path = (
-            link.split("/blob/main/", maxsplit=1)[1]
-            .split("#", maxsplit=1)[0]
+    home = (built_site / "index.html").read_text(encoding="utf-8")
+    assert f'<link rel="canonical" href="{PUBLIC_URL}">' in home
+    assert "PoseTestBot technical documentation" in home
+    assert "Repository boundary" in home
+    assert "From supervised capture to a dataset you can explain" not in home
+
+    sitemap = ElementTree.parse(built_site / "sitemap.xml")
+    locations = [
+        item.text
+        for item in sitemap.findall(
+            "sitemap:url/sitemap:loc",
+            {"sitemap": "http://www.sitemaps.org/schemas/sitemap/0.9"},
         )
-        assert (ROOT / repository_path).is_file(), link
+    ]
+    assert PUBLIC_URL in locations
+    assert f"{PUBLIC_URL}reference/http-api/" in locations
 
 
-def test_pages_workflow_deploys_only_the_static_site() -> None:
+def test_pages_workflow_builds_source_before_uploading_generated_site() -> None:
     workflow = PAGES_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "actions/checkout@v6" in workflow
+    assert "actions/checkout@v7" in workflow
+    assert "astral-sh/setup-uv@" in workflow
+    assert "uv run --frozen --only-group docs mkdocs build --strict" in workflow
     assert "actions/configure-pages@v5" in workflow
     assert "actions/upload-pages-artifact@v4" in workflow
     assert "actions/deploy-pages@v4" in workflow
     assert "pages: write" in workflow
     assert "id-token: write" in workflow
-    assert "name: github-pages" in workflow
     assert "path: site" in workflow
-    assert "path: '.'" not in workflow
-    assert 'path: "."' not in workflow
+    assert workflow.index("mkdocs build --strict") < workflow.index(
+        "actions/upload-pages-artifact"
+    )
+    for trigger in ('"docs/**"', '"mkdocs.yml"', '"pyproject.toml"', '"uv.lock"'):
+        assert trigger in workflow
 
 
-def test_public_url_is_consistent_across_repository_entrypoints() -> None:
-    index = INDEX_PATH.read_text(encoding="utf-8")
+def test_documentation_dependency_and_generated_output_contract() -> None:
+    project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    robots = (SITE_ROOT / "robots.txt").read_text(encoding="utf-8")
-    sitemap = ElementTree.parse(SITE_ROOT / "sitemap.xml")
-    namespace = {"sitemap": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-    locations = [
-        element.text
-        for element in sitemap.findall("sitemap:url/sitemap:loc", namespace)
-    ]
+    maintenance = (DOCS_ROOT / "GITHUB_PAGES.md").read_text(encoding="utf-8")
 
-    assert f'<link rel="canonical" href="{PUBLIC_URL}">' in index
+    assert re.search(r"(?ms)^docs = \[.*mkdocs-material>=9\.7\.7.*^\]", project)
+    assert re.search(r"(?m)^site/$", ignore)
+    assert "Technical documentation" in readme
     assert PUBLIC_URL in readme
-    assert f"Sitemap: {PUBLIC_URL}sitemap.xml" in robots
-    assert locations == [PUBLIC_URL]
-    assert (SITE_ROOT / ".nojekyll").is_file()
-
-
-def test_research_links_use_resolvable_persistent_identifiers() -> None:
-    html = INDEX_PATH.read_text(encoding="utf-8")
-
-    assert "https://doi.org/10.1016/j.procir.2025.02.251" in html
-    assert "https://doi.org/10.1109/HRI61500.2025.10974140" in html
-    assert "https://doi.org/10.5281/zenodo.14132641" in html
-    assert "https://doi.org/10.5281/zenodo.14261013" in html
+    assert (
+        "generated `site/` directory is a disposable ignored build artifact"
+        in " ".join(maintenance.split())
+    )
+    assert not (ROOT / "site" / "app.js").exists()
+    assert not (ROOT / "site" / "styles.css").exists()
