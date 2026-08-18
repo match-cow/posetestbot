@@ -61,6 +61,19 @@ grid provides calibration observations; static cameras are not used for robot
 hand tracking after calibration. This does not require PoseGridGen to be
 available and does not initiate physical capture.
 
+After promotion, **Cell View** keeps a static-camera calibration scene in the
+same `PoseTemplateBase` frame used by the printed object template. It renders
+each fixed `camera -> template_base` profile directly in that frame and derives
+the moving board path by composing the promoted
+`aruco_grid -> robot_flange` attachment with every exact recorded
+`robot_flange -> template_base` pose. It does not re-anchor the scene or its
+display ground plane to the first moving target pose. Fixed-target,
+eye-in-hand calibration may still use a target-front presentation because that
+target is stationary in `template_base`. If the web frontend is updated before
+the serving process is restarted, Cell View preserves the older flange-path
+preview and shows a restart notice until the backend supplies the target-path
+metadata; this mixed-version state must not crash the view.
+
 `posegridgen_board_to_base` is available only when the source records that
 pose. Selection cross-checks PoseGridGen's matrix, translation, and quaternion,
 converts metres to millimetres and XYZW to WXYZ, and explicitly treats the base

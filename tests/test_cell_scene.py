@@ -367,6 +367,59 @@ def test_scene_composes_frames_sensors_and_exact_timelines(tmp_path: Path) -> No
     assert timeline["poses"][0]["transform"]["translation_mm"] == [1.0, 2.0, 3.0]
 
 
+def test_static_camera_scene_stays_in_pose_template_base_and_tracks_target(
+    tmp_path: Path,
+) -> None:
+    run_root = make_scene_run(tmp_path)
+    config_path = run_root / "run_config.json"
+    config = json.loads(config_path.read_text())
+    config["capture"]["sensors"] = [
+        sensor
+        for sensor in config["capture"]["sensors"]
+        if sensor["device_id"] == "222"
+    ]
+    config_path.write_text(json.dumps(config))
+    target_path = run_root / "calibration_target.json"
+    target = json.loads(target_path.read_text())
+    target.pop("placement", None)
+    target_path.write_text(json.dumps(target))
+
+    scene = build_cell_scene(run_root)
+    entities = {entity["id"]: entity for entity in scene["entities"]}
+
+    assert scene["coordinate_system"]["reference_frame"] == "template_base"
+    assert scene["coordinate_system"]["reference_frame_label"] == "PoseTemplateBase"
+    assert scene["coordinate_system"]["sunrise_reference_frame_path"] == (
+        POSE_TEMPLATE_BASE_SUNRISE_PATH
+    )
+    assert scene["coordinate_system"]["up_axis"] == "+Z"
+    assert scene["coordinate_system"]["presentation"]["mode"] == "reference_z_up"
+    assert scene["coordinate_system"]["presentation"]["matrix"] == np.eye(4).tolist()
+    assert entities["camera:realsense_222"]["transform"]["parent_frame"] == (
+        "template_base"
+    )
+    assert entities["calibration_target"]["transform"]["parent_frame"] == (
+        "robot_flange"
+    )
+    assert scene["trajectory"] == {
+        "entity_id": "calibration_target",
+        "label": "Calibration target",
+        "reference_frame": "template_base",
+        "reference_frame_label": "PoseTemplateBase",
+        "source_timeline_id": "sensor:realsense_222",
+        "derivation": (
+            "promoted_calibration_target_to_robot_flange_composed_with_"
+            "recorded_robot_flange_to_template_base"
+        ),
+    }
+    assert [
+        pose["transform"]["translation_mm"] for pose in scene["trajectory_preview"]
+    ] == [[1.0, 4.0, 6.0], [2.0, 4.0, 6.0], [3.0, 4.0, 6.0]]
+
+    timeline = cell_timeline_page(run_root, scene["default_timeline_id"])
+    assert timeline["poses"][0]["transform"]["translation_mm"] == [0.0, 2.0, 3.0]
+
+
 def test_scene_omits_disabled_camera_even_when_a_valid_profile_exists(
     tmp_path: Path,
 ) -> None:

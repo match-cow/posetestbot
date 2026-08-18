@@ -34,6 +34,61 @@ function SummaryCard({ icon: Icon, label, value, status, tone, detail }: { icon:
   )
 }
 
+function CompactStatusItem({ icon: Icon, label, value, status, tone, detail, className, testId }: { icon: typeof Bot; label: string; value: string; status?: string; tone: StatusTone; detail: string; className?: string; testId: string }) {
+  return <div className={`flex min-w-0 items-center gap-3 ${className ?? ""}`} data-testid={testId}>
+    <div className="grid size-8 shrink-0 place-items-center rounded-md bg-muted"><Icon className="size-3.5 text-primary-strong" /></div>
+    <div className="min-w-0 flex-1">
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</div>
+      <p className="mt-0.5 truncate text-[11px] text-muted-foreground" title={detail}>{detail}</p>
+    </div>
+    <StatusBadge status={status ?? value} tone={tone}>{value}</StatusBadge>
+  </div>
+}
+
+function SupportingStatusStrip({ preflightStatus, runtimeItems, runtimePending, runtimeFailed }: { preflightStatus?: string; runtimeItems: Array<{ available?: boolean }>; runtimePending: boolean; runtimeFailed: boolean }) {
+  const availableRuntimes = runtimeItems.filter((item) => item.available).length
+  const allRuntimesAvailable = runtimeItems.length > 0 && availableRuntimes === runtimeItems.length
+  const runtimeValue = runtimePending
+    ? "Checking"
+    : runtimeFailed
+      ? "Unavailable"
+      : runtimeItems.length > 0
+        ? `${availableRuntimes}/${runtimeItems.length} available`
+        : "None reported"
+  const runtimeTone: StatusTone = runtimeFailed
+    ? "destructive"
+    : runtimePending || runtimeItems.length === 0
+      ? "neutral"
+      : allRuntimesAvailable
+        ? "success"
+        : "warning"
+
+  return <Card data-testid="dashboard-supporting-status">
+    <CardContent className="grid gap-3 p-3 sm:grid-cols-2 sm:gap-0">
+      <CompactStatusItem
+        icon={ShieldCheck}
+        label="Readiness check"
+        value={titleCase(preflightStatus ?? "pending")}
+        status={preflightStatus}
+        tone={preflightStatus === "complete" ? "success" : preflightStatus === "blocked" ? "destructive" : "neutral"}
+        detail={preflightStatus === "complete" ? "Artifact-backed preflight evidence is present." : "Refresh preflight evidence before recording."}
+        className="sm:pr-4"
+        testId="dashboard-readiness-status"
+      />
+      <CompactStatusItem
+        icon={Cpu}
+        label="Optional runtimes"
+        value={runtimeValue}
+        status={runtimePending ? "checking" : runtimeFailed ? "unavailable" : allRuntimesAvailable ? "ready" : "warning"}
+        tone={runtimeTone}
+        detail={runtimeFailed ? "Runtime visibility could not be loaded." : "BlenderProc and Stereolabs SDK visibility."}
+        className="border-t pt-3 sm:border-l sm:border-t-0 sm:pl-4 sm:pt-0"
+        testId="dashboard-runtime-status"
+      />
+    </CardContent>
+  </Card>
+}
+
 const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "canceling"])
 const COMPLETE_EVIDENCE_STATUSES = new Set(["complete", "succeeded", "ok", "warning", "valid", "ready"])
 
@@ -331,7 +386,6 @@ export function DashboardPage() {
   const sections = overview.data?.sidebar ?? []
   const preflight = sections.find((item) => item.id === "preflight")
   const runtimeItems = Array.isArray(runtime.data?.runtimes) ? runtime.data.runtimes as Array<{ available?: boolean }> : []
-  const availableRuntimes = runtimeItems.filter((item) => item.available).length
   const workflowEvidence = dashboardWorkflowEvidence(overview.data, Boolean(annotationSetup.data?.current_output?.verified))
 
   const refresh = () => queryClient.invalidateQueries({ predicate: (item) => ["overview", "storage", "sensors", "robot", "runtime", "capture-jobs", "jobs", "bop-annotations", "cluster-controller-service", "cluster-status"].includes(String(item.queryKey[0])) })
@@ -353,13 +407,22 @@ export function DashboardPage() {
       {statusErrors.length > 0 && <div role="alert" className="flex flex-col gap-3 rounded-xl border border-destructive/35 bg-destructive/5 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-start gap-3"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="text-sm font-semibold">Some dashboard status is unavailable</div><p className="mt-1 text-xs text-muted-foreground">Could not load {statusErrors.join(", ")}. Missing responses are not treated as ready; refresh before relying on this overview.</p></div></div><Button variant="outline" size="sm" onClick={refresh}><RefreshCw />Refresh status</Button></div>}
       {activeCapture && <div className="flex flex-col items-start justify-between gap-4 rounded-xl border border-primary/35 bg-primary/10 px-5 py-4 sm:flex-row sm:items-center"><div className="flex items-center gap-3"><span className="relative flex size-3"><span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-60" /><span className="relative inline-flex size-3 rounded-full bg-primary" /></span><div><div className="font-semibold">Capture is {activeCapture.status}</div><div className="text-xs text-muted-foreground">{activeCapture.name} · continues after navigation; use Jobs for live logs and stop controls</div></div></div><div className="flex flex-wrap gap-2"><Button variant="destructive" size="sm" onClick={() => stopCapture.mutate(activeCapture.id)} disabled={stopCapture.isPending || activeCapture.status === "canceling"}><Square />{stopCapture.isPending || activeCapture.status === "canceling" ? "Stopping…" : "Stop capture"}</Button><Button asChild size="sm"><Link to="/jobs">Open controls <ArrowRight /></Link></Button></div></div>}
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
-        {overview.isPending || storage.isPending || sensors.isPending ? Array.from({ length: 6 }).map((_, index) => <Skeleton className="h-40" key={index} />) : <>
-          <StorageSummaryCard storage={storage.data} />
-          <SummaryCard icon={ShieldCheck} label="Readiness check" value={titleCase(preflight?.status ?? "pending")} status={preflight?.status} tone={preflight?.status === "complete" ? "success" : preflight?.status === "blocked" ? "destructive" : "neutral"} detail={preflight?.status === "complete" ? "Artifact-backed readiness evidence is present." : "Check or refresh readiness before recording."} />
-          <SummaryCard icon={Camera} label="Sensors" value={`${sensors.data?.total_connected ?? 0} connected`} status={sensors.data?.all_expected_connected ? "connected" : "warning"} tone={sensors.data?.all_expected_connected ? "informational" : "warning"} detail="RealSense, OAK-D Pro, and ZED discovery." />
-          <IiwaQuickControls profileStatus={robotProfileStatus} />
-          <SummaryCard icon={Cpu} label="Optional runtimes" value={`${availableRuntimes}/${runtimeItems.length} available`} status={availableRuntimes === runtimeItems.length ? "ready" : "warning"} tone={availableRuntimes === runtimeItems.length ? "success" : "warning"} detail="BlenderProc and Stereolabs SDK visibility." />
+      <div data-testid="dashboard-status-overview" className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(360px,1fr)]">
+        {overview.isPending || storage.isPending || sensors.isPending ? <>
+          <div className="grid min-w-0 grid-rows-[1fr_auto] gap-4">
+            <div className="grid gap-4 md:grid-cols-3">{Array.from({ length: 3 }).map((_, index) => <Skeleton className="h-48" key={index} />)}</div>
+            <Skeleton className="h-16" />
+          </div>
+          <Skeleton className="min-h-72" />
+        </> : <>
+          <div className="grid min-w-0 grid-rows-[1fr_auto] gap-4">
+            <div className="grid gap-4 md:grid-cols-3">
+              <StorageSummaryCard storage={storage.data} />
+              <SummaryCard icon={Camera} label="Sensors" value={`${sensors.data?.total_connected ?? 0} connected`} status={sensors.data?.all_expected_connected ? "connected" : "warning"} tone={sensors.data?.all_expected_connected ? "informational" : "warning"} detail="RealSense, OAK-D Pro, and ZED discovery." />
+              <IiwaQuickControls profileStatus={robotProfileStatus} />
+            </div>
+            <SupportingStatusStrip preflightStatus={preflight?.status} runtimeItems={runtimeItems} runtimePending={runtime.isPending} runtimeFailed={runtime.isError} />
+          </div>
           <ClusterControllerControl />
         </>}
       </div>

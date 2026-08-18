@@ -43,6 +43,56 @@ The code rewrite is implemented across:
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
 
+## 2026-08-18 Static-Calibration Cell Reference Frame
+
+Cell View now keeps robot-carried calibration targets in the run's
+`PoseTemplateBase` reference presentation. A promoted static-camera profile is
+rendered as the fixed `camera -> template_base` transform, while the visible
+target path is derived from the promoted `aruco_grid -> robot_flange`
+attachment composed with each exact recorded
+`robot_flange -> template_base` pose. The scene no longer treats the first
+moving target pose as its display ground plane. Fixed targets used for
+eye-in-hand calibration retain the target-front presentation.
+
+The scene response identifies the trajectory entity, derivation, source
+timeline, and reference-frame label. Cell View shows that scope next to the
+trajectory control and names `PoseTemplateBase` in the coordinate convention.
+The frontend remains compatible with an already-running backend that still
+returns the earlier `cell_scene.v1` shape: it keeps the view usable, labels the
+legacy preview truthfully as the robot-flange path, and displays a service
+restart notice instead of crashing. After the backend restarts, the explicit
+calibration-target trajectory metadata and composed target path take effect.
+Focused backend coverage checks the transform composition independently from
+the exact flange playback timeline, and desktop Playwright coverage checks the
+reference presentation, target-trajectory scope, static-camera transform
+label, and mixed-version fallback. No camera or robot was opened or commanded.
+
+Validation passed all 720 default non-Playwright tests, all 21 desktop console
+and preview Playwright regressions, the strict frontend type check and lint,
+the production Vite build, Ruff, the strict MkDocs build, all five published
+page-contract tests, all five documentation Playwright regressions, and
+`git diff --check`.
+
+## 2026-08-18 Dashboard Status Density
+
+The Dashboard's acquisition-status region now gives the cluster controller a
+deliberate wider control panel instead of placing it in one of six equal-width
+summary cells. Run storage, sensor visibility, and the manual IIWA controls
+form a balanced three-card group beside it. The duplicated **Readiness check**
+and secondary **Optional runtimes** summaries are reduced to one compact
+two-column strip below that group, while their explicit status and supporting
+context remain visible.
+
+The controller's archive and pose-estimation handoffs now share one secondary
+action row. Its panel and the grouped acquisition statuses retain aligned top
+and bottom edges both while the controller is stopped and while running-state
+storage/estimator capability evidence is visible. The focused desktop
+Playwright contract asserts the hierarchy, compact-strip height, wider
+controller width, aligned edges in both states, and absence of document-wide
+overflow. Frontend type checking, lint, the production Vite build, Ruff, and
+the focused browser regression passed; the result was visually inspected at
+1920 × 1080 and 1440 × 900. No camera or robot was opened or commanded.
+
 ## 2026-08-18 Technical Documentation and HTTP Reference
 
 The earlier single-page public guide was replaced by a Material for MkDocs
@@ -67,12 +117,20 @@ uses ordinary static document links, with browser coverage for desktop sidebar,
 narrow-width drawer, history, direct routes, and client-side search. No camera
 or robot command is involved in documentation validation.
 
+The Firefox typography follow-up keeps remote fonts disabled but replaces
+Material's browser-dependent Helvetica fallback with the platform `system-ui`
+face, requests weight 500 for H1/H2 instead of the theme's thin weight 300, and
+uses a compact `#` permanent-link marker with an independently centered inline
+box. Firefox 153 at 1920 x 1080 resolved both heading levels to the intended
+font/weight; their marker centers were within 0.5 px of the text centers.
+
 Validation passed all 719 default non-Playwright tests (including five focused
-documentation source/build contracts), three dedicated Chromium navigation and
-search regressions, a strict MkDocs build, the installer's docs-only check path,
-Ruff on the generator/tests, and `git diff --check`. The final 1920×1080 site
-was visually reviewed with the full technical navigation, content table, and
-table of contents visible. No camera or robot command was executed.
+documentation source/build contracts), five dedicated Chromium navigation,
+search, and typography regressions, a strict MkDocs build, the installer's
+docs-only check path, Ruff on the generator/tests, and `git diff --check`. The
+final 1920×1080 site was visually reviewed in Chromium and Firefox with the full
+technical navigation, content table, and table of contents visible. No camera
+or robot command was executed.
 
 ## 2026-08-18 Complete Static-Calibration Change Review
 

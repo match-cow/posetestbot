@@ -17,6 +17,7 @@ from posetestbot.web.app import app
 ROOT = Path(__file__).resolve().parents[1]
 DOCS_ROOT = ROOT / "docs"
 MKDOCS_CONFIG = ROOT / "mkdocs.yml"
+TECHNICAL_STYLESHEET = DOCS_ROOT / "stylesheets" / "technical.css"
 PAGES_WORKFLOW = ROOT / ".github" / "workflows" / "pages.yml"
 ROUTE_REFERENCE = DOCS_ROOT / "reference" / "http-api-routes.md"
 PUBLIC_URL = "https://match-cow.github.io/posetestbot/"
@@ -112,6 +113,8 @@ def test_mkdocs_navigation_covers_every_markdown_source() -> None:
     assert config["docs_dir"] == "docs"
     assert config["site_dir"] == "site"
     assert config["strict"] is True
+    assert config["extra_css"] == ["stylesheets/technical.css"]
+    assert {"toc": {"permalink": "#"}} in config["markdown_extensions"]
     assert "search" in [
         item if isinstance(item, str) else next(iter(item))
         for item in config["plugins"]
@@ -178,6 +181,7 @@ def test_strict_build_has_search_persistent_pages_and_resolved_links(
 
     home = (built_site / "index.html").read_text(encoding="utf-8")
     assert f'<link rel="canonical" href="{PUBLIC_URL}">' in home
+    assert 'href="stylesheets/technical.css"' in home
     assert "PoseTestBot technical documentation" in home
     assert "Repository boundary" in home
     assert "From supervised capture to a dataset you can explain" not in home
@@ -218,11 +222,16 @@ def test_documentation_dependency_and_generated_output_contract() -> None:
     ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     maintenance = (DOCS_ROOT / "GITHUB_PAGES.md").read_text(encoding="utf-8")
+    typography = TECHNICAL_STYLESHEET.read_text(encoding="utf-8")
 
     assert re.search(r"(?ms)^docs = \[.*mkdocs-material>=9\.7\.7.*^\]", project)
     assert re.search(r"(?m)^site/$", ignore)
     assert "Technical documentation" in readme
     assert PUBLIC_URL in readme
+    assert "--md-text-font: system-ui" in typography
+    assert ".md-typeset h1" in typography
+    assert "font-weight: 500" in typography
+    assert ".md-typeset .headerlink" in typography
     assert (
         "generated `site/` directory is a disposable ignored build artifact"
         in " ".join(maintenance.split())

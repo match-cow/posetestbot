@@ -131,6 +131,43 @@ def test_desktop_sidebar_uses_persistent_pages_and_browser_history(
     assert errors == []
 
 
+@pytest.mark.parametrize(
+    ("level", "name"),
+    [
+        ("h1", "PoseTestBot technical documentation"),
+        ("h2", "Repository boundary"),
+    ],
+)
+def test_heading_typography_and_permalink_share_a_stable_line_box(
+    page, docs_server, level: str, name: str
+) -> None:
+    page.goto(docs_server.url, wait_until="networkidle")
+
+    heading = page.locator(f".md-typeset {level}", has_text=name).first
+    expect(heading).to_be_visible()
+    permalink = heading.locator(".headerlink")
+    expect(permalink).to_have_text("#")
+
+    metrics = heading.evaluate(
+        """element => {
+            const text = document.createRange();
+            text.selectNodeContents(element.firstChild);
+            const textRect = text.getBoundingClientRect();
+            const linkRect = element.querySelector('.headerlink').getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return {
+                fontFamily: style.fontFamily,
+                fontWeight: style.fontWeight,
+                textCenter: textRect.top + textRect.height / 2,
+                linkCenter: linkRect.top + linkRect.height / 2,
+            };
+        }"""
+    )
+    assert "system-ui" in metrics["fontFamily"]
+    assert metrics["fontWeight"] == "500"
+    assert abs(metrics["textCenter"] - metrics["linkCenter"]) <= 2
+
+
 def test_search_indexes_technical_contracts_and_opens_result(page, docs_server) -> None:
     page.goto(docs_server.url, wait_until="networkidle")
     search = page.get_by_role("textbox", name="Search")

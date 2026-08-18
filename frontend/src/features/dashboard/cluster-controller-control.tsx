@@ -115,28 +115,30 @@ export function ClusterControllerControl() {
     setStopDialogOpen(true)
   }
 
-  return <Card data-testid="cluster-controller-control">
+  return <Card data-testid="cluster-controller-control" className="h-full">
     <CardContent className="pt-5">
       <div className="flex items-start justify-between">
         <div className="grid size-9 place-items-center rounded-lg bg-muted"><Server className="size-4 text-primary-strong" /></div>
         <StatusBadge status={service.data?.state ?? (failed ? "unavailable" : "checking")} tone={tone}>{value}</StatusBadge>
       </div>
-      <div className="mt-5 flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+      <div className="mt-4 flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
         Cluster controller
         <HelpTip label="cluster controller status">Running describes the local user-systemd service. Connected means its loopback API answered. Ready means the independent cluster storage/archive capability is available; estimator readiness is reported separately.</HelpTip>
       </div>
       <div className="mt-1 truncate font-display text-lg font-semibold" title={service.data?.service_unit ?? "External companion"}>{service.data?.service_unit ?? "External companion"}</div>
-      <p className="mt-1 min-h-10 text-xs text-muted-foreground">{serviceDetail(service.data, controller.data, failed)}</p>
+      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{serviceDetail(service.data, controller.data, failed)}</p>
       {service.data?.state === "running" && controller.data?.available ? <div className="mt-3 grid grid-cols-2 gap-2 text-[11px]" data-testid="cluster-capability-status">
         <div className="rounded-md border bg-muted/30 px-2 py-1.5"><span className="text-muted-foreground">Storage</span><div className="font-semibold">{storageReady(controller.data) ? "Ready" : "Blocked"}</div></div>
         <div className="rounded-md border bg-muted/30 px-2 py-1.5"><span className="text-muted-foreground">Estimators</span><div className="font-semibold">{estimatorsReady.length > 0 ? `${estimatorsReady.length} ready` : "None ready"}</div></div>
       </div> : null}
-      <div className="mt-4 grid grid-cols-2 gap-2">
+      <div className="mt-3 grid grid-cols-2 gap-2">
         <Button size="sm" onClick={() => action.mutate("start")} disabled={!service.data?.can_start || action.isPending}>{action.isPending && action.variables === "start" ? <LoaderCircle className="animate-spin" /> : <Power />}Start</Button>
         <Button size="sm" variant="destructive" onClick={openStopDialog} disabled={!service.data?.can_stop || action.isPending}><Square />Stop</Button>
       </div>
-      <Button asChild size="sm" variant="outline" className="mt-2 w-full"><Link to="/run-folders"><Archive />Cluster storage <ArrowRight /></Link></Button>
-      <Button asChild size="sm" variant="ghost" className="mt-1 w-full"><Link to="/pose-estimation">Pose Estimation <ArrowRight /></Link></Button>
+      <div className="mt-2 grid grid-cols-2 gap-2">
+        <Button asChild size="sm" variant="outline"><Link to="/run-folders"><Archive />Cluster storage <ArrowRight /></Link></Button>
+        <Button asChild size="sm" variant="outline"><Link to="/pose-estimation">Pose Estimation <ArrowRight /></Link></Button>
+      </div>
     </CardContent>
     <Dialog open={stopDialogOpen} onOpenChange={(open) => { if (!action.isPending) { setStopDialogOpen(open); if (!open) setStopConfirmed(false) } }}>
       <DialogContent data-testid="cluster-controller-stop-dialog">

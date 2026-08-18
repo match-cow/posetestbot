@@ -11,6 +11,9 @@ site_dir: site
 use_directory_urls: true
 strict: true
 
+extra_css:
+  - stylesheets/technical.css
+
 theme:
   name: material
   language: en
@@ -52,7 +55,7 @@ markdown_extensions:
   - md_in_html
   - tables
   - toc:
-      permalink: true
+      permalink: "#"
   - pymdownx.details
   - pymdownx.highlight:
       anchor_linenums: true

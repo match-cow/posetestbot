@@ -994,7 +994,11 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     summary_box = active_run_context.locator(":scope > div").bounding_box()
     change_box = change_run.bounding_box()
     app_header_box = page.locator("header").first.bounding_box()
-    assert summary_box is not None and change_box is not None and app_header_box is not None
+    assert (
+        summary_box is not None
+        and change_box is not None
+        and app_header_box is not None
+    )
     assert summary_box["height"] == pytest.approx(change_box["height"], abs=1)
     assert summary_box["y"] == pytest.approx(change_box["y"], abs=1)
     top_gap = summary_box["y"] - app_header_box["y"]
@@ -1009,7 +1013,9 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     expect(page).to_have_url(f"{console_server.url}/#/run-folders")
     expect(page.get_by_role("heading", name="Run folders", exact=True)).to_be_visible()
     cluster_storage = page.get_by_test_id("cluster-storage-section")
-    expect(cluster_storage.get_by_role("heading", name="Cluster storage")).to_be_visible()
+    expect(
+        cluster_storage.get_by_role("heading", name="Cluster storage")
+    ).to_be_visible()
     expect(cluster_storage).to_contain_text(
         "independent of every pose-estimator runtime"
     )
@@ -1030,7 +1036,9 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     )
     storage_search.fill("")
     chooser = page.get_by_test_id("run-folder-chooser")
-    expect(chooser.get_by_role("heading", name="Choose an existing run")).to_be_visible()
+    expect(
+        chooser.get_by_role("heading", name="Choose an existing run")
+    ).to_be_visible()
     chooser.get_by_role("textbox", name="Search run folders").fill("Object A")
     expect(chooser.get_by_test_id("run-selection-row")).to_have_count(1)
     expect(chooser.get_by_test_id("run-selection-row")).to_contain_text(
@@ -1038,9 +1046,7 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     )
     chooser.get_by_role("button", name="Use old-run as active run").click()
     expect(active_run_context).to_contain_text("Object A capture")
-    expect(active_run_context).to_contain_text(
-        "/tmp/posetestbot-console/old-run"
-    )
+    expect(active_run_context).to_contain_text("/tmp/posetestbot-console/old-run")
     assert (
         page.evaluate("localStorage.getItem('posetestbot.selectedRun')")
         == "/tmp/posetestbot-console/old-run"
@@ -1205,7 +1211,9 @@ def test_top_right_restart_controls_reload_frontend_backend_or_both(
     expect(restart_control).to_contain_text("Restart")
     restart_control.click()
     dialog = page.get_by_test_id("restart-controls-dialog")
-    expect(dialog.get_by_role("heading", name="Restart operator console")).to_be_visible()
+    expect(
+        dialog.get_by_role("heading", name="Restart operator console")
+    ).to_be_visible()
     expect(dialog.get_by_test_id("restart-frontend")).to_be_visible()
     expect(dialog.get_by_test_id("restart-backend")).to_be_disabled()
     expect(dialog.get_by_test_id("restart-both")).to_be_disabled()
@@ -1276,9 +1284,7 @@ def test_dashboard_starts_and_stops_managed_cluster_controller(
         "available": False,
         "integration": {"enabled": True, "controller_configured": True},
         "features": {"pose_estimation": False},
-        "feature_blockers": {
-            "estimation": ["Controller is in status-only mode."]
-        },
+        "feature_blockers": {"estimation": ["Controller is in status-only mode."]},
         "domains": {
             "storage": {
                 "ready": False,
@@ -1373,14 +1379,57 @@ def test_dashboard_starts_and_stops_managed_cluster_controller(
         "href", "#/run-folders"
     )
     card_box = card.bounding_box()
+    status_overview_box = page.get_by_test_id(
+        "dashboard-status-overview"
+    ).bounding_box()
+    storage_box = page.get_by_test_id("dashboard-storage").bounding_box()
+    supporting_status = page.get_by_test_id("dashboard-supporting-status")
+    supporting_status_box = supporting_status.bounding_box()
     room_monitor_box = page.get_by_test_id("dashboard-room-monitor").bounding_box()
-    assert card_box is not None and room_monitor_box is not None
+    assert (
+        card_box is not None
+        and status_overview_box is not None
+        and storage_box is not None
+        and supporting_status_box is not None
+        and room_monitor_box is not None
+    )
+    expect(
+        supporting_status.get_by_test_id("dashboard-readiness-status")
+    ).to_contain_text("Readiness check")
+    expect(
+        supporting_status.get_by_test_id("dashboard-runtime-status")
+    ).to_contain_text("Optional runtimes")
+    assert card_box["x"] > storage_box["x"] + storage_box["width"]
+    assert card_box["width"] > storage_box["width"]
+    assert supporting_status_box["height"] < card_box["height"] / 2
+    assert abs(card_box["y"] - status_overview_box["y"]) <= 1
+    assert (
+        abs(
+            card_box["y"]
+            + card_box["height"]
+            - supporting_status_box["y"]
+            - supporting_status_box["height"]
+        )
+        <= 1
+    )
     assert card_box["y"] < room_monitor_box["y"]
     assert card_box["y"] + card_box["height"] <= 1080
     card.get_by_role("button", name="Start").click()
     expect(card).to_contain_text("Ready")
     expect(card).to_contain_text("Cluster storage/archive is ready independently")
     expect(card).to_contain_text("None ready")
+    running_card_box = card.bounding_box()
+    running_supporting_status_box = supporting_status.bounding_box()
+    assert running_card_box is not None and running_supporting_status_box is not None
+    assert (
+        abs(
+            running_card_box["y"]
+            + running_card_box["height"]
+            - running_supporting_status_box["y"]
+            - running_supporting_status_box["height"]
+        )
+        <= 1
+    )
 
     controller.update(
         {
@@ -4212,7 +4261,9 @@ def test_fixed_zero_policy_is_submitted_and_reported(
     expect(page.get_by_test_id("calibration-attempt-job-status")).to_contain_text(
         "Recorded timing policy: captured timestamps (0 ms)"
     )
-    expect(page.get_by_role("heading", name="Captured timestamp pairing")).to_be_visible()
+    expect(
+        page.get_by_role("heading", name="Captured timestamp pairing")
+    ).to_be_visible()
     expect(page.get_by_test_id("calibration-time-alignment")).to_contain_text(
         "Offset estimation was explicitly skipped. This attempt uses the recorded camera/robot pairing at 0 ms."
     )
@@ -4467,3 +4518,276 @@ def pose_template_orientation_thumbnail(
             "source_to_placed": orientation["source_to_placed"],
         },
     }
+
+
+def test_cell_static_calibration_uses_pose_template_base_and_target_trajectory(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    identity = {
+        "semantics": "entity_to_parent",
+        "parent_frame": "template_base",
+        "translation_mm": [0, 0, 0],
+        "rotation_quaternion_wxyz": [1, 0, 0, 0],
+    }
+    timeline = {
+        "id": "raw:robot",
+        "label": "Raw robot poses",
+        "kind": "raw",
+        "frame_count": 2,
+        "default": True,
+        "exact": True,
+        "interpolation": "none",
+        "page_limit": 2000,
+        "source": f"{RUN_ROOT}/raw_robot_ee_poses.json",
+        "camera": None,
+        "camera_frames": {
+            "available": False,
+            "rgb": {
+                "available": False,
+                "kind": "rgb",
+                "media_type": "image/png",
+                "source": None,
+            },
+            "depth": {
+                "available": False,
+                "kind": "depth",
+                "media_type": "image/png",
+                "source": None,
+                "depth_scale_to_mm": None,
+                "visualization": "turbo_near_warm_fixed_range",
+                "preview_min_depth_mm": 200,
+                "preview_max_depth_mm": 3000,
+                "invalid_depth_value": 0,
+            },
+        },
+    }
+    poses = [
+        {
+            "index": index,
+            "frame_index": index,
+            "frame_id": str(index),
+            "timestamp_ns": 1000 + index,
+            "motion": "grid_bottom_to_top",
+            "transform": {
+                **identity,
+                "translation_mm": [100 + index * 65, 20, 200 + index * 50],
+            },
+        }
+        for index in range(2)
+    ]
+    calibration = {
+        "profile_id": "static-profile",
+        "schema_version": "calibration.v2",
+        "status": "valid",
+        "mounting_mode": "static",
+        "rig_position": "static",
+        "extrinsics": {
+            "from": "camera",
+            "to": "template_base",
+            "matrix": [
+                [1, 0, 0, 230],
+                [0, 1, 0, 550],
+                [0, 0, 1, 275],
+                [0, 0, 0, 1],
+            ],
+            "rotation_quaternion_wxyz": [1, 0, 0, 0],
+            "translation_mm": [230, 550, 275],
+        },
+        "companion_transform": {
+            "from": "aruco_grid",
+            "to": "robot_flange",
+            "matrix": [
+                [1, 0, 0, 25],
+                [0, 1, 0, -64],
+                [0, 0, 1, 38],
+                [0, 0, 0, 1],
+            ],
+            "rotation_quaternion_wxyz": [1, 0, 0, 0],
+            "translation_mm": [25, -64, 38],
+        },
+        "quality": {
+            "num_observations": 20,
+            "num_inliers": 20,
+            "mean_reprojection_error_px": 0.5,
+            "max_reprojection_error_px": 1.0,
+            "residual_translation_mm": 0.8,
+            "residual_rotation_deg": 0.4,
+            "outlier_count": 0,
+            "outlier_ratio": 0,
+            "held_out_residuals": None,
+            "notes": None,
+        },
+        "evidence": {
+            "profile_source": f"{RUN_ROOT}/calibration_profiles.json",
+            "method": "auto_compare:IPPE+shah",
+            "calibration_dataset_id": "attempt-1",
+            "target_type": "aruco_grid",
+            "target_id": "target-1",
+            "calibrated_at": "2026-08-18T12:00:00Z",
+            "operator": "operator",
+            "sync_delta_ms": 0,
+            "promotion_attempt_id": "attempt-1",
+            "promotion_candidate_id": "candidate-1",
+            "promotion_multi_camera_bundle_id": None,
+            "promotion_solver_provenance": {
+                "pnp_method": "IPPE",
+                "extrinsic_method": "shah",
+            },
+            "promoted_at": "2026-08-18T12:00:00Z",
+            "promoted_by": "operator",
+            "intrinsic_profile_id": "intrinsic-1",
+        },
+    }
+    scene = {
+        "schema_version": "cell_scene.v1",
+        "coordinate_system": {
+            "units": "millimetres",
+            "handedness": "right",
+            "up_axis": "+Z",
+            "reference_frame": "template_base",
+            "reference_frame_label": "PoseTemplateBase",
+            "sunrise_reference_frame_path": "/PoseTestBot/PoseTemplateBase",
+            "transform_semantics": "entity_to_parent",
+            "presentation": {
+                "mode": "reference_z_up",
+                "transform": {
+                    **identity,
+                    "parent_frame": "display",
+                },
+            },
+        },
+        "run_root": RUN_ROOT,
+        "entities": [
+            {
+                "id": "template_base",
+                "type": "reference_frame",
+                "label": "PoseTemplateBase",
+                "status": "reference",
+                "transform": {**identity, "parent_frame": None},
+                "unresolved_reason": None,
+                "geometry": {"kind": "axes", "size_mm": 100},
+                "provenance": {},
+            },
+            {
+                "id": "robot_flange",
+                "type": "robot_flange",
+                "label": "Robot flange",
+                "status": "recorded",
+                "transform": identity,
+                "unresolved_reason": None,
+                "geometry": {"kind": "flange_proxy"},
+                "provenance": {},
+            },
+            {
+                "id": "camera:static",
+                "type": "camera",
+                "label": "Static calibration camera",
+                "status": "planned",
+                "transform": {
+                    **identity,
+                    "translation_mm": [230, 550, 275],
+                },
+                "unresolved_reason": None,
+                "geometry": {"kind": "camera_frustum"},
+                "provenance": {},
+                "calibration": calibration,
+            },
+            {
+                "id": "calibration_target",
+                "type": "calibration_target",
+                "label": "Moving calibration target",
+                "status": "planned",
+                "transform": {
+                    **identity,
+                    "parent_frame": "robot_flange",
+                    "translation_mm": [25, -64, 38],
+                },
+                "unresolved_reason": None,
+                "geometry": {"kind": "calibration_target"},
+                "provenance": {},
+            },
+        ],
+        "warnings": [],
+        "timelines": [timeline],
+        "default_timeline_id": "raw:robot",
+        "trajectory": {
+            "entity_id": "calibration_target",
+            "label": "Calibration target",
+            "reference_frame": "template_base",
+            "reference_frame_label": "PoseTemplateBase",
+            "source_timeline_id": "raw:robot",
+            "derivation": (
+                "promoted_calibration_target_to_robot_flange_composed_with_"
+                "recorded_robot_flange_to_template_base"
+            ),
+        },
+        "trajectory_preview": poses,
+        "object_selection": {
+            "objectless": True,
+            "dataset_mode": "objectless",
+            "instance_count": 0,
+            "pose_template": None,
+            "bop_export": {"status": "not_exported"},
+        },
+    }
+
+    def cell_handler(route) -> None:
+        if urlparse(route.request.url).path.endswith("/timeline"):
+            fulfill_json(
+                route,
+                {
+                    "schema_version": "cell_timeline.v1",
+                    "timeline": timeline,
+                    "offset": 0,
+                    "limit": 2000,
+                    "total": 2,
+                    "next_offset": None,
+                    "previous_offset": None,
+                    "poses": poses,
+                },
+            )
+        else:
+            fulfill_json(route, scene)
+
+    page.route("**/ui/cell-scene**", cell_handler)
+    page.goto(f"{console_server.url}/#/cell", wait_until="networkidle")
+
+    coordinate = page.get_by_test_id("cell-coordinate-convention")
+    expect(coordinate).to_contain_text(
+        "PoseTemplateBase · right-handed · +Z up · millimetres"
+    )
+    expect(coordinate).not_to_contain_text("Target-aligned")
+    trajectory_control = page.get_by_test_id("cell-trajectory-control")
+    expect(trajectory_control).to_contain_text(
+        "Calibration target trajectory · PoseTemplateBase"
+    )
+    canvas = page.get_by_test_id("cell-webgl-canvas")
+    expect(canvas).to_have_attribute("data-presentation-mode", "reference_z_up")
+    expect(canvas).to_have_attribute("data-trajectory-entity-id", "calibration_target")
+    expect(canvas).to_have_attribute("data-trajectory-reference-frame", "template_base")
+
+    page.get_by_role("button").filter(has_text="Static calibration camera").click()
+    expect(page.get_by_test_id("cell-calibration-transform-frames")).to_have_text(
+        "camera → PoseTemplateBase"
+    )
+
+    scene.pop("trajectory")
+    scene["coordinate_system"].pop("reference_frame_label")
+    page.reload(wait_until="networkidle")
+
+    expect(page.get_by_role("heading", name="Cell View", exact=True)).to_be_visible()
+    expect(page.get_by_test_id("cell-scene-version-warning")).to_contain_text(
+        "Cell backend restart required"
+    )
+    legacy_trajectory_control = page.get_by_test_id("cell-trajectory-control")
+    expect(legacy_trajectory_control).to_contain_text(
+        "Robot flange trajectory · PoseTemplateBase"
+    )
+    legacy_canvas = page.get_by_test_id("cell-webgl-canvas")
+    expect(legacy_canvas).to_have_attribute(
+        "data-trajectory-entity-id", "robot_flange"
+    )
+    expect(legacy_canvas).to_have_attribute(
+        "data-trajectory-reference-frame", "template_base"
+    )

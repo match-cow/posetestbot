@@ -1,0 +1,40 @@
+/*
+ * Keep documentation typography local and deterministic. Material's default
+ * no-web-font fallback reaches Helvetica in Firefox, which fontconfig maps to
+ * Nimbus Sans on this host. Browser-native UI faces provide platform-tuned
+ * metrics without adding a remote font dependency.
+ */
+:root {
+  --md-text-font: system-ui;
+  --md-code-font: ui-monospace;
+}
+
+/* Material defaults H1 and H2 to 300. Not every platform stack contains that
+ * face, so its fallback matching and rasterization vary between browsers. */
+.md-typeset h1,
+.md-typeset h2 {
+  font-weight: 500;
+}
+
+/* The permanent-link marker participates in the heading's line box. Give it
+ * its own centered box so its glyph metrics cannot shift the text baseline. */
+.md-typeset .headerlink {
+  align-items: center;
+  display: inline-flex;
+  font-family: var(--md-code-font-family);
+  font-size: 0.65rem;
+  font-weight: 600;
+  height: 1em;
+  justify-content: center;
+  line-height: 1;
+  vertical-align: 0.2em;
+  width: 1em;
+}
+
+.md-typeset h1 > .headerlink {
+  vertical-align: 0.62em;
+}
+
+.md-typeset h2 > .headerlink {
+  vertical-align: 0.42em;
+}

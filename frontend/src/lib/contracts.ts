@@ -909,6 +909,15 @@ export interface CellPose {
   transform: CellTransform
 }
 
+export interface CellTrajectoryMetadata {
+  entity_id: string
+  label: string
+  reference_frame: string
+  reference_frame_label: string
+  source_timeline_id: string | null
+  derivation: string
+}
+
 export interface CellScene {
   schema_version: "cell_scene.v1"
   coordinate_system: Record<string, JsonValue>
@@ -917,6 +926,7 @@ export interface CellScene {
   warnings: Array<{ code: string; message: string }>
   timelines: CellTimelineMetadata[]
   default_timeline_id: string | null
+  trajectory?: CellTrajectoryMetadata
   trajectory_preview: CellPose[]
   object_selection: {
     objectless: boolean

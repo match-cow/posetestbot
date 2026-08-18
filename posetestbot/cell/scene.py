@@ -415,9 +415,7 @@ def _camera_frame_path(
     raw_directories = source.get("frame_directories")
     raw_run_root = source.get("run_root")
     raw_directory = (
-        raw_directories.get(modality)
-        if isinstance(raw_directories, Mapping)
-        else None
+        raw_directories.get(modality) if isinstance(raw_directories, Mapping) else None
     )
     if not isinstance(raw_directory, Path) or not isinstance(raw_run_root, Path):
         raise FileNotFoundError(
@@ -455,21 +453,14 @@ def _timeline_camera_frame_path(
     )
 
 
-def _modality_metadata(
-    source: Mapping[str, Any], modality: str
-) -> dict[str, Any]:
+def _modality_metadata(source: Mapping[str, Any], modality: str) -> dict[str, Any]:
     directories = source.get("frame_directories")
-    directory = (
-        directories.get(modality) if isinstance(directories, Mapping) else None
-    )
+    directory = directories.get(modality) if isinstance(directories, Mapping) else None
     available = False
     if (
         isinstance(directory, Path)
         and directory.is_dir()
-        and (
-            modality != "depth"
-            or isinstance(source.get("depth_scale_to_mm"), float)
-        )
+        and (modality != "depth" or isinstance(source.get("depth_scale_to_mm"), float))
     ):
         for pose in source["poses"]:
             try:
@@ -524,18 +515,30 @@ def _timeline_metadata(source: Mapping[str, Any], *, default: bool) -> dict[str,
     }
 
 
-def _pose_payload(item: Mapping[str, Any], index: int) -> dict[str, Any]:
+def _pose_payload(
+    item: Mapping[str, Any],
+    index: int,
+    *,
+    entity_to_robot_flange: np.ndarray | None = None,
+) -> dict[str, Any]:
+    matrix = item["matrix"]
+    if entity_to_robot_flange is not None:
+        matrix = pt.concat(entity_to_robot_flange, matrix)
     return {
         "index": index,
         "frame_index": item["frame_index"],
         "frame_id": item["frame_id"],
         "timestamp_ns": item["timestamp_ns"],
         "motion": item["motion"],
-        "transform": _transform_dict(item["matrix"], "template_base"),
+        "transform": _transform_dict(matrix, "template_base"),
     }
 
 
-def _preview(poses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _preview(
+    poses: list[dict[str, Any]],
+    *,
+    entity_to_robot_flange: np.ndarray | None = None,
+) -> list[dict[str, Any]]:
     if len(poses) <= MAX_PREVIEW_POSES:
         indices = list(range(len(poses)))
     else:
@@ -545,7 +548,14 @@ def _preview(poses: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 for i in range(MAX_PREVIEW_POSES)
             }
         )
-    return [_pose_payload(poses[index], index) for index in indices]
+    return [
+        _pose_payload(
+            poses[index],
+            index,
+            entity_to_robot_flange=entity_to_robot_flange,
+        )
+        for index in indices
+    ]
 
 
 def _profiles(
@@ -901,6 +911,7 @@ def _calibration_attempt_target(run_root: Path) -> dict[str, Any] | None:
                 "target": target,
                 "target_path": target_path,
                 "pdf_path": attempt_root / "target_bundle" / "calibration_target.pdf",
+                "mounting_frame": request_value.get("target_mounting", {}).get("to"),
                 "provenance": {
                     "source": target_path.as_posix(),
                     "selection_source": "latest_run_calibration_attempt",
@@ -928,6 +939,7 @@ def _calibration_target_context(
             "selection_source": "promoted_run_artifact",
         }
         placement = target.get("placement")
+        mounting_frame = None
         if isinstance(configured, Mapping):
             bundle_path = Path(str(configured.get("bundle_path", "")))
             if not bundle_path.is_absolute() and ".." not in bundle_path.parts:
@@ -935,6 +947,8 @@ def _calibration_target_context(
                 if candidate.is_file():
                     pdf_path = candidate
             configured_placement = configured.get("placement")
+            if isinstance(configured_placement, Mapping):
+                mounting_frame = configured_placement.get("mounting_frame")
             if not isinstance(placement, Mapping) and isinstance(
                 configured_placement, Mapping
             ):
@@ -947,6 +961,7 @@ def _calibration_target_context(
             "target_path": target_path,
             "pdf_path": pdf_path,
             "placement": placement,
+            "mounting_frame": mounting_frame,
             "provenance": provenance,
         }
     return _calibration_attempt_target(run_root)
@@ -984,7 +999,9 @@ def _profile_target_placement(
     return None, None
 
 
-def _target_geometry(target: Mapping[str, Any], *, pdf_url: str | None) -> dict[str, Any]:
+def _target_geometry(
+    target: Mapping[str, Any], *, pdf_url: str | None
+) -> dict[str, Any]:
     board = target.get("posegridgen", {}).get("configuration", {}).get("board", {})
     marker_length = target.get("marker_length") or board.get("marker_size_mm")
     marker_separation = target.get("marker_separation") or board.get("separation_mm")
@@ -1050,6 +1067,10 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
     warnings: list[dict[str, str]] = []
     manager = TransformManager()
     presentation = _reference_presentation("template_base")
+    trajectory_entity_id = "robot_flange"
+    trajectory_label = "Robot flange"
+    trajectory_derivation = "recorded_robot_flange_to_template_base"
+    trajectory_entity_to_robot_flange: np.ndarray | None = None
     fixed_sources: dict[str, Mapping[str, Any]] = {}
     for edge in config.get("frames", {}).get("fixed_transforms", []):
         try:
@@ -1069,7 +1090,7 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
         _entity(
             "template_base",
             "reference_frame",
-            "Template base",
+            "PoseTemplateBase",
             transform=_identity(None),
             status="planned",
             provenance={"source": "run_config.frames.dataset_reference_frame"},
@@ -1093,7 +1114,9 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
                     label,
                     transform=None,
                     status=(
-                        "unresolved" if frame in configured_fixed_frames else "not_configured"
+                        "unresolved"
+                        if frame in configured_fixed_frames
+                        else "not_configured"
                     ),
                     reason=(
                         f"No fixed transform resolves {frame} to {parent}"
@@ -1276,7 +1299,8 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
                     provenance={
                         **template_provenance,
                         "source": (
-                            root / str(pose_selection["bundle_snapshot"])
+                            root
+                            / str(pose_selection["bundle_snapshot"])
                             / POSE_TEMPLATE_PREVIEW
                         ).as_posix(),
                         "placement_confirmed": pose_selection.get(
@@ -1362,10 +1386,15 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
                 placement["rotation_quaternion_wxyz"], placement["translation_mm"]
             )
             parent = str(placement.get("to", "template_base"))
+            moving_target_intent = (
+                parent == "robot_flange"
+                or target_context.get("mounting_frame") == "robot_flange"
+            )
+            moving_target_resolved = placement_known and parent == "robot_flange"
             manager.add_transform("calibration_target", parent, matrix)
             matrix = manager.get_transform("calibration_target", parent)
             target_frame = _canonical_grid_frame(target)
-            if target_frame is not None:
+            if target_frame is not None and not moving_target_intent:
                 try:
                     target_to_reference = manager.get_transform(
                         "calibration_target", "template_base"
@@ -1386,6 +1415,14 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
                         reference_frame="template_base",
                         target_frame=target_frame,
                     )
+            if moving_target_resolved:
+                trajectory_entity_id = "calibration_target"
+                trajectory_label = "Calibration target"
+                trajectory_derivation = (
+                    "promoted_calibration_target_to_robot_flange_composed_with_"
+                    "recorded_robot_flange_to_template_base"
+                )
+                trajectory_entity_to_robot_flange = matrix
             pdf_path = target_context.get("pdf_path")
             geometry = _target_geometry(
                 target,
@@ -1466,6 +1503,10 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
                 else "+Z"
             ),
             "reference_frame": "template_base",
+            "reference_frame_label": "PoseTemplateBase",
+            "sunrise_reference_frame_path": config.get("frames", {})
+            .get("robot_pose", {})
+            .get("sunrise_reference_frame_path"),
             "transform_semantics": "entity_to_parent",
             "presentation": presentation,
         },
@@ -1474,7 +1515,22 @@ def build_cell_scene(run_root: str | Path) -> dict[str, Any]:
         "warnings": warnings,
         "timelines": timeline_meta,
         "default_timeline_id": timeline_meta[0]["id"] if timeline_meta else None,
-        "trajectory_preview": _preview(timelines[0]["poses"]) if timelines else [],
+        "trajectory": {
+            "entity_id": trajectory_entity_id,
+            "label": trajectory_label,
+            "reference_frame": "template_base",
+            "reference_frame_label": "PoseTemplateBase",
+            "source_timeline_id": timeline_meta[0]["id"] if timeline_meta else None,
+            "derivation": trajectory_derivation,
+        },
+        "trajectory_preview": (
+            _preview(
+                timelines[0]["poses"],
+                entity_to_robot_flange=trajectory_entity_to_robot_flange,
+            )
+            if timelines
+            else []
+        ),
         "object_selection": {
             "objectless": config.get("dataset_mode") == "objectless",
             "dataset_mode": config.get("dataset_mode", "objectless"),
@@ -1621,9 +1677,7 @@ def cell_depth_frame_preview_png(
     )
     scale_to_mm = source.get("depth_scale_to_mm")
     if not isinstance(scale_to_mm, float):
-        raise FileNotFoundError(
-            "Depth scale is unavailable for this camera timeline"
-        )
+        raise FileNotFoundError("Depth scale is unavailable for this camera timeline")
     depth = cv2.imread(path.as_posix(), cv2.IMREAD_UNCHANGED)
     if depth is None or depth.dtype != np.uint16 or depth.ndim != 2:
         raise ValueError(f"Depth frame must be a single-channel uint16 PNG: {path}")

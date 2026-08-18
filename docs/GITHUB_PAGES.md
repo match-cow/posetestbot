@@ -16,6 +16,13 @@ and client-side full-text search.
 document requests, which keeps URLs, browser history, direct links, and static
 hosting behavior simple and testable.
 
+The local `stylesheets/technical.css` defines the cross-browser typography
+contract. It uses the browser's platform-tuned UI and monospace faces, gives
+primary headings a stable medium-weight request instead of Material's thin
+cross-platform fallback, and centers the compact heading permalink
+independently of the text baseline. Keep this stylesheet self-contained: the
+published reference must not depend on a third-party font request.
+
 ## Information architecture
 
 The navigation is technical and task-oriented:

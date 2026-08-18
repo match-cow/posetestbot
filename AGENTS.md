@@ -44,6 +44,14 @@ arguments must never enter this repository or a browser response.
   external network services, camera or robot access, or physical capture.
 - Keep `INSTALL.md` and `scripts/install.sh` current when dependency lists,
   SDK/runtime expectations, setup commands, or validation checks change.
+- Treat `docs/` and `mkdocs.yml` as the source of the published technical
+  documentation. Update the relevant pages in the same change whenever a
+  repository boundary, architecture, operator workflow, HTTP API contract,
+  run-config field, artifact, CLI, setup/runtime requirement, or other
+  documented behavior changes. When the Flask route map changes, regenerate
+  `docs/reference/http-api-routes.md` with
+  `uv run python scripts/generate_http_api_reference.py --write` and verify it
+  with the corresponding `--check` command.
 - Prefer running or checking `scripts/install.sh` before adding ad hoc setup
   instructions.
 - The lab KUKA iiwa is the sole robot profile. Never execute physical capture
@@ -409,6 +417,15 @@ git diff --check
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest -m playwright \
   tests/test_web_console_playwright.py tests/test_web_preview_playwright.py
 UV_CACHE_DIR=/tmp/uv-cache uv run playwright install chromium  # only if browser binaries are missing
+```
+
+When published documentation is affected, also run:
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run python -m mkdocs build --strict
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_github_pages.py
+UV_CACHE_DIR=/tmp/uv-cache uv run pytest -m playwright \
+  tests/test_github_pages_playwright.py
 ```
 
 The default pytest selection excludes the explicitly marked Playwright modules
