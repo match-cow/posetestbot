@@ -16,6 +16,11 @@
   <strong>From supervised multi-camera capture to traceable BOP datasets.</strong>
 </p>
 
+<p align="center">
+  <a href="https://match-cow.github.io/posetestbot/"><strong>Explore the visual project guide →</strong></a><br>
+  <sub>A plain-language tour of the workflows, safety boundary, outputs, and documentation.</sub>
+</p>
+
 PoseTestBot is an acquisition-first system for building 6D object-pose
 datasets from robot-mounted and static RGB-D cameras. It brings camera
 calibration, robot-aware capture, synchronization, optional ground-truth
@@ -137,6 +142,8 @@ it only on the trusted lab network, or bind it to localhost for local use.
 
 ## Documentation
 
+- [Visual project guide](https://match-cow.github.io/posetestbot/)
+- [GitHub Pages maintenance](docs/GITHUB_PAGES.md)
 - [Operator workflows](docs/OPERATOR_WORKFLOWS.md)
 - [Installation and runtime requirements](INSTALL.md)
 - [Workpiece Catalogue](docs/WORKPIECE_CATALOGUE.md)

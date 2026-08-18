@@ -140,8 +140,7 @@ venv.bak/
 # Rope project settings
 .ropeproject
 
-# mkdocs documentation
-/site
+# `site/` is the tracked, dependency-free GitHub Pages source.
 
 # mypy
 .mypy_cache/
