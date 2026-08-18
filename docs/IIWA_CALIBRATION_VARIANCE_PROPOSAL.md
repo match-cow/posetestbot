@@ -51,7 +51,7 @@ relative to the taught center. The depth phase and its two frames are removed.
 
 The repository owns three related commissioning artifacts:
 
-- the versioned [machine-readable teaching plan](../iiwa/calibration_teaching_plan.v2.json),
+- the versioned [machine-readable teaching plan](https://github.com/match-cow/PoseTestBot/blob/main/iiwa/calibration_teaching_plan.v2.json),
   containing the nine seeds, center-anchored raster route, relative deltas,
   documented result offsets, and capture labels;
 - the printable [Workbench teaching and commissioning checklist](IIWA_CALIBRATION_TEACHING_CHECKLIST.md);

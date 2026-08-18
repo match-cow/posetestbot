@@ -3,7 +3,7 @@
 Print this checklist for Sunrise.Workbench teaching and physical commissioning
 of `iiwa/PoseTestBotNineFrameCalibrationApplication.java`. The complete frame
 and relative-motion contract is in
-[`iiwa/calibration_teaching_plan.v2.json`](../iiwa/calibration_teaching_plan.v2.json).
+[`iiwa/calibration_teaching_plan.v2.json`](https://github.com/match-cow/PoseTestBot/blob/main/iiwa/calibration_teaching_plan.v2.json).
 This checklist is only for the nine-frame application. The
 [single-frame static-camera alternative](IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md)
 has a separate anchor and relative-motion contract.

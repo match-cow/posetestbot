@@ -43,34 +43,36 @@ The code rewrite is implemented across:
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
 
-## 2026-08-18 Accessible Public Project Guide
+## 2026-08-18 Technical Documentation and HTTP Reference
 
-The repository now includes a dependency-free GitHub Pages site that explains
-PoseTestBot to new researchers and lab operators before sending them into the
-full technical manuals. The page presents the two guided outcomes, a
-loopback-only software first look, the distinction between readiness and
-physical authorization, retained raw/derived/BOP evidence, the acquisition-only
-repository boundary, current lab hardware, research publications and datasets,
-and task-oriented links to the authoritative guides. It also states the
-research-system maturity and links directly to the remaining physical
-milestones instead of implying turnkey production readiness.
+The earlier single-page public guide was replaced by a Material for MkDocs
+technical site built from the authoritative `docs/` tree. The new hierarchy
+documents process and credential boundaries, run/artifact lineage, safety and
+execution authorization, `run_config.v3`, canonical artifacts, CLI entry
+points, and domain-specific HTTP behavior. It keeps all existing operator,
+calibration, workpiece, template, IIWA, validation, and project-status guides
+reachable through persistent multi-page navigation and full-text search.
 
-The static source below `site/` uses semantic HTML and local assets, keeps its
-core content available without JavaScript, and adds keyboard skip navigation,
-visible focus, light/dark preference handling, reduced-motion and
-high-contrast styles, responsive reachability, print styling, and an accessible
-command-copy status. The public artifact is self-contained and does not expose
-the repository source tree. `.github/workflows/pages.yml` deploys only that
-directory through the protected `github-pages` environment, while
-`docs/GITHUB_PAGES.md` records preview, maintenance, and publication contracts.
+`scripts/generate_http_api_reference.py` now renders every non-static Flask
+rule into `docs/reference/http-api-routes.md`. Its check mode prevents route-map
+changes from silently leaving the published reference stale. Hand-authored API
+pages explain trust/containment, JSON and multipart conventions, job semantics,
+errors, physical capture gates, calibration state, catalogue lifecycle, BOP
+evaluation, and the browser-safe external-controller boundary.
 
-Validation passed all 721 default non-Playwright tests, seven focused static
-site contract tests, three dedicated Chromium regressions, Ruff on both new
-Python test modules, and `git diff --check`. The browser checks covered keyboard
-focus, loaded assets, theme persistence, command copying, expandable content,
-and document-width containment at 1440×900 and 390×844. Separate screenshots
-were visually reviewed at 1920×1080 in light mode and 390×844 in dark mode. No
-camera or robot command was executed.
+The Pages workflow builds with the locked docs-only uv dependency group and
+strict MkDocs validation before uploading generated `site/`. The generated
+directory is ignored rather than maintained by hand. Navigation deliberately
+uses ordinary static document links, with browser coverage for desktop sidebar,
+narrow-width drawer, history, direct routes, and client-side search. No camera
+or robot command is involved in documentation validation.
+
+Validation passed all 719 default non-Playwright tests (including five focused
+documentation source/build contracts), three dedicated Chromium navigation and
+search regressions, a strict MkDocs build, the installer's docs-only check path,
+Ruff on the generator/tests, and `git diff --check`. The final 1920×1080 site
+was visually reviewed with the full technical navigation, content table, and
+table of contents visible. No camera or robot command was executed.
 
 ## 2026-08-18 Complete Static-Calibration Change Review
 

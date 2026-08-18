@@ -1,34 +1,68 @@
-# Public GitHub Pages Site
+# Documentation site maintenance
 
-The plain-language project guide is published at
-<https://match-cow.github.io/posetestbot/>. Its tracked source lives in
-`site/`; it is separate from both the Flask operator console and the detailed
-Markdown manuals in `docs/`.
+The technical documentation is published at
+<https://match-cow.github.io/posetestbot/>. Authoritative source is Markdown
+below `docs/`, organized by `mkdocs.yml`. The generated `site/` directory is a
+disposable ignored build artifact.
 
-## Why it is separate
+## Framework contract
 
-The public page introduces the project before asking a reader to navigate its
-technical contracts. It explains the two guided outcomes, a safe software-only
-first launch, physical-execution boundaries, retained evidence, repository
-scope, current lab hardware, research outputs, and the next detailed guide for
-each task.
+The site uses Material for MkDocs from the locked `docs` dependency group. It
+provides persistent multi-page URLs, hierarchical desktop navigation, a
+keyboard-accessible drawer at narrower widths, table-of-contents navigation,
+and client-side full-text search.
 
-The site uses semantic HTML, system fonts, and local assets only. Its core
-content remains available without JavaScript. JavaScript adds the remembered
-light/dark theme and the quick-start copy button. Keyboard focus, reduced-motion
-preferences, high-contrast preferences, narrow-view reachability, and print
-output have explicit styles.
+`navigation.instant` is intentionally not enabled. Navigation uses ordinary
+document requests, which keeps URLs, browser history, direct links, and static
+hosting behavior simple and testable.
+
+## Information architecture
+
+The navigation is technical and task-oriented:
+
+1. system overview, installation, and canonical operator workflows;
+2. architecture, filesystem boundaries, artifact lineage, and safety;
+3. HTTP conventions, generated complete route inventory, and domain API
+   contracts;
+4. run-config, artifact, and CLI reference;
+5. specialist calibration, workpiece, template, and IIWA guides; and
+6. retained validation evidence and current remaining work.
+
+Add every Markdown page to `nav` in `mkdocs.yml`. Strict builds fail when a
+navigation target or internal documentation link is missing.
+
+## HTTP route inventory
+
+`docs/reference/http-api-routes.md` is generated from Flask's registered URL
+map. Do not edit it directly.
+
+```bash
+uv run python scripts/generate_http_api_reference.py --write
+uv run python scripts/generate_http_api_reference.py --check
+```
+
+The focused repository test runs `--check`, so a route change without a
+matching regenerated index fails validation. Behavioral request/response and
+safety semantics belong in the appropriate `docs/reference/api/` domain page.
 
 ## Preview and validate locally
 
-From the repository root, start a loopback-only static server:
+Build exactly as CI does:
 
 ```bash
-uv run python -m http.server 8000 --bind 127.0.0.1 --directory site
+UV_CACHE_DIR=/tmp/uv-cache uv run --frozen --only-group docs \
+  mkdocs build --strict
 ```
 
-Then open <http://127.0.0.1:8000/>. Validate the source and browser behavior
-with:
+In a normal development environment already synchronized with all groups:
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run mkdocs serve \
+  --dev-addr 127.0.0.1:8000
+```
+
+Then open <http://127.0.0.1:8000/>. Validate source/build contracts and actual
+navigation/search behavior with:
 
 ```bash
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_github_pages.py
@@ -36,31 +70,23 @@ UV_CACHE_DIR=/tmp/uv-cache uv run pytest -m playwright \
   tests/test_github_pages_playwright.py
 ```
 
-The Playwright module checks meaningful desktop and narrow-view contracts,
-including keyboard skip navigation, image loading, horizontal overflow, theme
-persistence, command copying, and expandable glossary content. Chromium must
-already be installed; browser installation remains explicitly opt-in.
+Chromium installation remains explicitly opt-in.
 
 ## Publish
 
-`.github/workflows/pages.yml` uploads only `site/` and deploys it through the
-protected `github-pages` environment. A push to `main` that changes the site or
-workflow starts deployment; maintainers can also run it manually. The
-repository's Pages source must be **GitHub Actions**.
+`.github/workflows/pages.yml` runs for documentation, MkDocs configuration, and
+locked dependency changes on `main`. It installs `uv`, creates a docs-only
+environment, runs a strict build, uploads only generated `site/`, and deploys
+through the protected `github-pages` environment. The repository Pages source
+must remain **GitHub Actions**.
 
-Keep these publication details consistent when the repository name or site URL
-changes:
+The deployment does not publish repository source, run data, credentials, or
+the Flask operator API. It publishes only MkDocs output.
 
-- the canonical and Open Graph URLs in `site/index.html`;
-- `site/robots.txt` and `site/sitemap.xml`;
-- the visual-guide links in `README.md`; and
-- the repository homepage field on GitHub.
+## Update checklist
 
-The logo mark at `site/assets/posetestbot-mark.png` is a deliberate published
-copy of `posetestbot/web/static/cow_favicon.png`, so the Pages artifact stays
-self-contained. Update both when the established project mark changes.
-
-Detailed documentation links in the page point to the authoritative files on
-the `main` branch. Do not use links from the deployed site into sibling paths
-outside `site/`: the Pages artifact intentionally does not publish the source
-tree.
+1. Change authoritative Markdown and, when required, `mkdocs.yml` navigation.
+2. Regenerate the HTTP route index after any Flask route-map change.
+3. Run the strict MkDocs build.
+4. Run focused source and Playwright navigation tests.
+5. Check `git diff --check` and confirm `site/` is not staged.

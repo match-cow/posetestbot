@@ -1,0 +1,104 @@
+# yaml-language-server: $schema=https://squidfunk.github.io/mkdocs-material/schema.json
+
+site_name: PoseTestBot Technical Documentation
+site_description: Acquisition, calibration, synchronization, and BOP export contracts for PoseTestBot
+site_url: https://match-cow.github.io/posetestbot/
+repo_url: https://github.com/match-cow/PoseTestBot
+repo_name: match-cow/PoseTestBot
+edit_uri: edit/main/docs/
+docs_dir: docs
+site_dir: site
+use_directory_urls: true
+strict: true
+
+theme:
+  name: material
+  language: en
+  font: false
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - navigation.tracking
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue grey
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Use dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue grey
+      accent: light blue
+      toggle:
+        icon: material/brightness-4
+        name: Use light mode
+
+plugins:
+  - search:
+      lang: en
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Technical overview: index.md
+  - Start here:
+      - System overview: getting-started/overview.md
+      - Installation and first launch: getting-started/installation.md
+      - Operator workflows: OPERATOR_WORKFLOWS.md
+  - System design:
+      - Architecture and boundaries: concepts/architecture.md
+      - Runs and artifact lineage: concepts/runs-and-artifacts.md
+      - Safety and authorization: concepts/safety.md
+  - HTTP API:
+      - API conventions: reference/http-api.md
+      - Complete route index: reference/http-api-routes.md
+      - System, sensors, and monitoring: reference/api/system-sensors.md
+      - Runs and jobs: reference/api/runs-jobs.md
+      - Capture and pipeline: reference/api/capture-pipeline.md
+      - Calibration: reference/api/calibration.md
+      - Workpieces and pose templates: reference/api/catalogs.md
+      - BOP and cluster boundary: reference/api/bop-cluster.md
+  - File and command reference:
+      - Run configuration: reference/run-config.md
+      - Artifact index: reference/artifacts.md
+      - CLI and scripts: reference/cli.md
+  - Component guides:
+      - Calibration target generation: POSEGRIDGEN_CALIBRATION_TARGETS.md
+      - Workpiece Catalogue: WORKPIECE_CATALOGUE.md
+      - Pose templates and object GT: POSETEMPLATECREATOR_OBJECT_GT.md
+  - IIWA integration:
+      - Full-capture application: IIWA_FULL_CAPTURE_APPLICATION.md
+      - Single-frame static calibration: IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md
+      - Nine-frame calibration program: IIWA_CALIBRATION_VARIANCE_PROPOSAL.md
+      - Commissioning checklist: IIWA_CALIBRATION_TEACHING_CHECKLIST.md
+      - Pose-stream cadence: IIWA_POSE_STREAM_CADENCE.md
+  - Evidence and project status:
+      - Eye-in-hand validation: EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md
+      - Rewrite progress: REWRITE_PROGRESS.md
+      - Remaining work: REWRITE_REMAINING_WORK.md
+  - Documentation maintenance: GITHUB_PAGES.md
+
+copyright: PoseTestBot is research software; physical execution remains operator-controlled.

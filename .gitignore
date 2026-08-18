@@ -140,7 +140,8 @@ venv.bak/
 # Rope project settings
 .ropeproject
 
-# `site/` is the tracked, dependency-free GitHub Pages source.
+# MkDocs build output. Authoritative documentation source lives in `docs/`.
+site/
 
 # mypy
 .mypy_cache/

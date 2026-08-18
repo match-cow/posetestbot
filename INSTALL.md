@@ -636,6 +636,40 @@ The script validates `iiwa/calibration_teaching_plan.v2.json` and writes
 The procedure and printable sign-off sheet are linked from
 `docs/IIWA_CALIBRATION_VARIANCE_PROPOSAL.md`.
 
+### Technical Documentation Site
+
+The GitHub Pages site is built from `docs/` and `mkdocs.yml` with Material for
+MkDocs. Documentation dependencies are locked in the `docs` dependency group
+and are included by the default `uv sync --all-groups` installer path.
+
+Build the site with strict link and configuration checks:
+
+```bash
+bash scripts/install.sh --with-docs-build
+```
+
+Or run the build directly in an already synchronized development environment:
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run --frozen mkdocs build --strict
+```
+
+GitHub Actions uses a lean documentation-only environment:
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache uv run --frozen --only-group docs \
+  mkdocs build --strict
+```
+
+The generated `site/` directory is ignored and must not be edited. Refresh the
+checked-in Flask route inventory after adding, removing, or renaming an HTTP
+route:
+
+```bash
+uv run python scripts/generate_http_api_reference.py --write
+uv run python scripts/generate_http_api_reference.py --check
+```
+
 ### Playwright Browser Tests
 
 The Python Playwright package is a dev dependency installed by
