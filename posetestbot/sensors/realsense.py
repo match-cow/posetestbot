@@ -325,6 +325,9 @@ def capture_realsense_rgbd(
     sidecar_paths: dict[str, str] = {}
     captured_frames = 0
     valid_frames_seen = 0
+    skipped_duplicate_color_frames = 0
+    recorded_color_frame_numbers: set[int] = set()
+    recorded_frame_stems: set[str] = set()
     sidecars_written = False
     started_at_ns = time.time_ns()
     last_frame_wall_timestamp_ns = 0
@@ -362,6 +365,38 @@ def capture_realsense_rgbd(
                     if inverted:
                         color_image = _rotate_180(color_image)
                     cv2_preview.imshow("RealSense Capture RGB aligned", color_image)
+                    key = cv2_preview.waitKey(1)
+                    if key & 0xFF == ord("q") or key == 27:
+                        break
+                continue
+
+            color_timestamp_ns = _frame_timestamp_ns(color_frame)
+            color_frame_number = int(color_frame.get_frame_number())
+            frame_stem = (
+                _frame_stem_from_sensor_timestamp_ns(color_timestamp_ns)
+                if color_timestamp_ns is not None
+                else None
+            )
+            if record and (
+                color_frame_number in recorded_color_frame_numbers
+                or (frame_stem is not None and frame_stem in recorded_frame_stems)
+            ):
+                # librealsense alignment may emit a new depth frameset while
+                # reusing the preceding color frame. RGB is authoritative for
+                # calibration/PnP and names the aligned RGB-D pair, so recording
+                # that frameset would either duplicate one observation or hit
+                # the writer's intentional no-overwrite guard. Wait for the
+                # next unique color observation instead of aborting capture.
+                skipped_duplicate_color_frames += 1
+                valid_frames_seen += 1
+                if cv2_preview is not None:
+                    color_image = np.asanyarray(color_frame.get_data())
+                    if inverted:
+                        color_image = _rotate_180(color_image)
+                    cv2_preview.imshow(
+                        "RealSense Capture RGB aligned",
+                        color_image,
+                    )
                     key = cv2_preview.waitKey(1)
                     if key & 0xFF == ord("q") or key == 27:
                         break
@@ -409,13 +444,7 @@ def capture_realsense_rgbd(
                 if host_wall_timestamp_ns < min_next_wall_timestamp_ns:
                     host_wall_timestamp_ns = min_next_wall_timestamp_ns
                 last_frame_wall_timestamp_ns = host_wall_timestamp_ns
-                color_timestamp_ns = _frame_timestamp_ns(color_frame)
                 depth_timestamp_ns = _frame_timestamp_ns(aligned_depth_frame)
-                frame_stem = (
-                    _frame_stem_from_sensor_timestamp_ns(color_timestamp_ns)
-                    if color_timestamp_ns is not None
-                    else None
-                )
                 timestamp_metadata = _realsense_timestamp_metadata(
                     color_frame,
                     aligned_depth_frame,
@@ -434,7 +463,7 @@ def capture_realsense_rgbd(
                     host_wall_timestamp_ns=host_wall_timestamp_ns,
                     frame_stem=frame_stem,
                     extra_metadata={
-                        "color_frame_number": color_frame.get_frame_number(),
+                        "color_frame_number": color_frame_number,
                         "depth_frame_number": aligned_depth_frame.get_frame_number(),
                         "inverted": bool(inverted),
                         "image_rotation_degrees": image_rotation_degrees,
@@ -445,6 +474,9 @@ def capture_realsense_rgbd(
                     },
                 )
                 metadata_records.append(metadata)
+                recorded_color_frame_numbers.add(color_frame_number)
+                if frame_stem is not None:
+                    recorded_frame_stems.add(frame_stem)
 
             captured_frames += 1
             valid_frames_seen += 1
@@ -482,6 +514,7 @@ def capture_realsense_rgbd(
         "max_frames": max_frames,
         "warmup_frames": warmup_frames,
         "frame_count": captured_frames,
+        "skipped_duplicate_color_frame_count": skipped_duplicate_color_frames,
         "sidecars": sidecar_paths,
         "first_frame_id": first_metadata.get("frame_id"),
         "last_frame_id": last_metadata.get("frame_id"),

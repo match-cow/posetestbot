@@ -10,6 +10,7 @@ from flask import Flask, send_from_directory
 from posetestbot.jobs.runner import LocalJobRunner
 from posetestbot.web.routes.monitoring import monitoring_bp
 from posetestbot.web.routes.jobs_commands import jobs_commands_bp
+from posetestbot.web.routes.lifecycle import lifecycle_bp
 from posetestbot.web.routes.system_status import system_status_bp
 from posetestbot.web.routes.capture import capture_bp
 from posetestbot.web.routes.pipeline import pipeline_bp
@@ -110,6 +111,7 @@ def create_app(
 
     app.register_blueprint(pages_bp)
     app.register_blueprint(jobs_commands_bp)
+    app.register_blueprint(lifecycle_bp)
     app.register_blueprint(system_status_bp)
     app.register_blueprint(capture_bp)
     app.register_blueprint(pipeline_bp)

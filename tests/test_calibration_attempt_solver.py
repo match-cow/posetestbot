@@ -944,6 +944,137 @@ def test_planar_pnp_uses_shared_inliers_refines_and_retains_ippe_ambiguity() -> 
         and item["refinement"] == "solvePnPRefineLM"
         for item in result["candidates"]
     )
+    assert result["duplicate_marker_clutter_filtered"] is False
+    assert result["raw_common_inlier_ratio"] == result["common_inlier_ratio"]
+
+
+def test_planar_pnp_isolates_strong_target_instance_from_duplicate_marker_clutter(
+) -> None:
+    marker_origins = [
+        (column * 50.0, row * 50.0)
+        for row in range(3)
+        for column in range(4)
+    ]
+    marker_objects = [
+        np.asarray(
+            [
+                [x, y, 0.0],
+                [x + 35.0, y, 0.0],
+                [x + 35.0, y + 35.0, 0.0],
+                [x, y + 35.0, 0.0],
+            ],
+            dtype=float,
+        )
+        for x, y in marker_origins
+    ]
+    camera = np.asarray(
+        [[700.0, 0.0, 640.0], [0.0, 705.0, 360.0], [0.0, 0.0, 1.0]],
+        dtype=float,
+    )
+
+    def project(points: np.ndarray, translation: list[float]) -> np.ndarray:
+        return cv2.projectPoints(
+            points,
+            np.asarray([0.08, -0.04, 0.02]),
+            np.asarray(translation),
+            camera,
+            np.zeros(5),
+        )[0].reshape(-1, 2)
+
+    object_groups = list(marker_objects)
+    image_groups = [project(points, [10.0, -20.0, 650.0]) for points in marker_objects]
+    marker_ids = list(range(12))
+    grid_indices = [(marker_id // 4, marker_id % 4) for marker_id in marker_ids]
+    for translation in ([-250.0, 180.0, 700.0], [270.0, 160.0, 720.0]):
+        for marker_id in range(8):
+            object_groups.append(marker_objects[marker_id])
+            image_groups.append(project(marker_objects[marker_id], translation))
+            marker_ids.append(marker_id)
+            grid_indices.append((marker_id // 4, marker_id % 4))
+
+    object_points = np.concatenate(object_groups)
+    image_points = np.concatenate(image_groups)
+    point_marker_ids = np.repeat(np.asarray(marker_ids), 4)
+    point_grid_indices = np.repeat(np.asarray(grid_indices), 4, axis=0)
+    result = solve_planar_pnp_candidates(
+        object_points,
+        image_points,
+        camera,
+        np.zeros(5),
+        methods=("ITERATIVE",),
+        point_marker_ids=point_marker_ids,
+        point_grid_indices=point_grid_indices,
+    )
+
+    selected = result["selected"]["ITERATIVE"]
+    expected_centroid = np.mean(np.concatenate(image_groups[:12]), axis=0)
+    assert result["duplicate_marker_clutter_filtered"] is True
+    assert result["duplicate_marker_ids"] == list(range(8))
+    assert result["raw_common_inlier_ratio"] < 0.5
+    assert result["common_inlier_ratio"] == pytest.approx(1.0)
+    assert result["common_inlier_ratio_basis"] == (
+        "unique_marker_correspondence_capacity"
+    )
+    assert result["supported_marker_count"] == 12
+    assert result["ignored_clutter_correspondence_count"] == 64
+    assert result["consensus_image_centroid_px"] == pytest.approx(
+        expected_centroid.tolist(), abs=1e-4
+    )
+    assert selected["quality_reprojection_scope"] == (
+        "homography_consensus_target_instance"
+    )
+    assert selected["quality_mean_reprojection_error_px"] < 0.01
+    assert selected["all_point_mean_reprojection_error_px"] > 100.0
+
+
+def test_planar_pnp_rejects_small_duplicate_marker_clutter_consensus() -> None:
+    object_points = np.asarray(
+        [
+            [column * 45.0 + x, row * 45.0 + y, 0.0]
+            for row in range(2)
+            for column in range(2)
+            for x, y in ((0.0, 0.0), (35.0, 0.0), (35.0, 35.0), (0.0, 35.0))
+        ],
+        dtype=float,
+    )
+    camera = np.asarray(
+        [[700.0, 0.0, 320.0], [0.0, 705.0, 240.0], [0.0, 0.0, 1.0]],
+        dtype=float,
+    )
+    primary = cv2.projectPoints(
+        object_points,
+        np.zeros(3),
+        np.asarray([0.0, 0.0, 600.0]),
+        camera,
+        np.zeros(5),
+    )[0].reshape(-1, 2)
+    clutter = cv2.projectPoints(
+        object_points,
+        np.zeros(3),
+        np.asarray([180.0, 120.0, 650.0]),
+        camera,
+        np.zeros(5),
+    )[0].reshape(-1, 2)
+    marker_ids = np.tile(np.repeat(np.arange(4), 4), 2)
+    grid_indices = np.tile(
+        np.repeat(np.asarray([(0, 0), (0, 1), (1, 0), (1, 1)]), 4, axis=0),
+        (2, 1),
+    )
+
+    result = solve_planar_pnp_candidates(
+        np.tile(object_points, (2, 1)),
+        np.concatenate([primary, clutter]),
+        camera,
+        np.zeros(5),
+        methods=("ITERATIVE",),
+        point_marker_ids=marker_ids,
+        point_grid_indices=grid_indices,
+    )
+
+    assert result["selected"] == {}
+    assert result["failures"][0]["reason"] == (
+        "insufficient_duplicate_marker_clutter_consensus"
+    )
 
 
 def test_candidate_ranking_has_stable_method_tie_breaks() -> None:
@@ -1196,6 +1327,7 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
         "timestamp_fallback_allowed": False,
         "max_nearest_pose_delta_ms": 150.0,
         "warning_nearest_pose_delta_ms": 20.0,
+        "warning_fallback_used": False,
         "historical_per_sensor_offsets_allowed": False,
         "auto_estimated_per_sensor_offset": False,
         "sensor_key": sensor_key,

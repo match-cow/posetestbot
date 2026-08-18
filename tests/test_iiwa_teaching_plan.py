@@ -183,7 +183,10 @@ def test_printable_checklist_has_one_signoff_row_per_taught_frame() -> None:
     assert "--allow-cameras" in checklist
     assert "UDP stop messages cannot interrupt active motion" in checklist
     assert "requires a manual application restart" in checklist
-    assert "normalized centroid spans of at least 45% image width and 35%" in checklist
+    assert "For eye-in-hand captures" in checklist
+    assert "45% image width and 35% image height" in checklist
+    assert "research-stage static eye-to-hand captures" in checklist
+    assert "15% width, 20% height, and 3% hull area" in checklist
     assert "at least 6/9 image-centroid cells" in checklist
 
 

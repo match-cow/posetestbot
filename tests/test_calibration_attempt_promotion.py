@@ -207,6 +207,8 @@ def _write_fixed_zero_time_offset_evidence(
                     "per_sensor_offsets": per_sensor_offsets,
                     "historical_per_sensor_offsets_allowed": False,
                     "auto_estimated_per_sensor_offsets": False,
+                    "timing_warning_sensor_keys": [],
+                    "warning_fallback_sensor_keys": [],
                 },
             }
         )
@@ -574,6 +576,44 @@ def _passing_motion_consistency_evidence(*, hypothesis_count: int) -> dict:
     }
 
 
+def _failing_motion_consistency_evidence(
+    *,
+    hypothesis_count: int,
+    candidate_offset_ms: float,
+) -> dict:
+    evidence = _passing_motion_consistency_evidence(
+        hypothesis_count=hypothesis_count
+    )
+    motion_count = evidence["motion_count"]
+    evidence["status"] = "error"
+    evidence["candidate_robot_pose_time_offset_ms"] = candidate_offset_ms
+    for motion in evidence["motions"]:
+        for method in motion["methods"].values():
+            method["candidate_residuals"] = dict(method["zero_offset_residuals"])
+            method["improvement"] = {
+                "absolute_translation_mm": 0.0,
+                "relative_translation": 0.0,
+                "rotation_change_deg": 0.0,
+            }
+    for method in evidence["methods"].values():
+        method.update(
+            {
+                "status": "error",
+                "positive_motion_count": 0,
+                "material_motion_count": 0,
+                "positive_sign_p_value": 1.0,
+                "candidate_search_adjusted_positive_sign_p_value": 1.0,
+                "median_improvement": {
+                    "absolute_translation_mm": 0.0,
+                    "relative_translation": 0.0,
+                    "rotation_change_deg": 0.0,
+                },
+            }
+        )
+        assert method["motion_count"] == motion_count
+    return evidence
+
+
 def test_report_backed_applied_auto_offset_evidence_is_promotable(
     tmp_path: Path,
 ) -> None:
@@ -667,6 +707,149 @@ def test_report_backed_applied_auto_offset_evidence_is_promotable(
     assert evidence[sensor_key]["status"] == "applied"
     assert evidence[sensor_key]["selected_robot_pose_time_offset_ms"] == 75.0
     assert evidence[sensor_key]["selected_sync_delta_ms"] == -75.0
+
+
+def _report_backed_ambiguous_auto_offset_attempt(
+    tmp_path: Path,
+) -> tuple[dict, Path]:
+    attempt, attempt_root = _report_backed_fixed_zero_attempt(tmp_path)
+    sensor_key = "realsense_d435:1"
+    attempt["request"]["synchronization_policy"] = "auto_offset"
+    report = attempt["time_offset_search"]
+    report["policy"] = "auto_offset"
+    report["warning_sensor_keys"] = [sensor_key]
+    report["warning_sensor_count"] = 1
+    sensor = report["sensors"][0]
+    recorded_search = attempt["request"]["synchronization_search"]
+    search_grid = attempt_module.time_offset_values(
+        recorded_search["minimum_robot_pose_time_offset_ms"],
+        recorded_search["maximum_robot_pose_time_offset_ms"],
+        recorded_search["step_ms"],
+    )
+    motion_consistency = _failing_motion_consistency_evidence(
+        hypothesis_count=sum(value != 0.0 for value in search_grid),
+        candidate_offset_ms=30.0,
+    )
+    sensor.update(
+        {
+            "status": "kept_zero",
+            "decision": "recorded_timing_kept",
+            "decision_reason": "ambiguous_auto_offset_kept_recorded_zero",
+            "evidence_strength": "degraded",
+            "warning_fallback_used": True,
+            "candidate_robot_pose_time_offset_ms": 30.0,
+            "candidate_sync_delta_ms": -30.0,
+            "improvement_evidence_strategy": (
+                attempt_module.IMPROVEMENT_EVIDENCE_STRATEGY
+            ),
+            "motion_consistency": motion_consistency,
+            "checks": [
+                {
+                    "name": name,
+                    "status": "warning"
+                    if name
+                    in {
+                        "cross_validation_offset_stability",
+                        "leave_one_motion_out_timing_consistency",
+                    }
+                    else "ok",
+                    **(
+                        {
+                            "original_status": "error",
+                            "actual": (
+                                {
+                                    "motion_count": motion_consistency[
+                                        "motion_count"
+                                    ],
+                                    "methods": motion_consistency["methods"],
+                                }
+                                if name
+                                == "leave_one_motion_out_timing_consistency"
+                                else 110.0
+                            ),
+                            "threshold": (
+                                motion_consistency["thresholds"]
+                                if name
+                                == "leave_one_motion_out_timing_consistency"
+                                else 20.0
+                            ),
+                            "fallback": "recorded timing retained at 0 ms",
+                        }
+                        if name
+                        in {
+                            "cross_validation_offset_stability",
+                            "leave_one_motion_out_timing_consistency",
+                        }
+                        else {}
+                    ),
+                }
+                for name in (
+                    "fixed_full_range_observation_set",
+                    "cross_validation_offset_stability",
+                    "reference_method_sensitivity",
+                    "search_optimum_not_at_boundary",
+                    "cross_validated_translation_improvement",
+                    "cross_validation_fold_materiality",
+                    "leave_one_motion_out_timing_consistency",
+                    "cross_validated_rotation_guard",
+                    "zero_offset_identifiability",
+                )
+            ],
+        }
+    )
+    quality_path = attempt_root / SYNC_QUALITY_REPORT
+    quality = json.loads(quality_path.read_text())
+    policy = quality["calibration_attempt_policy"]
+    policy["synchronization_policy"] = "auto_offset"
+    policy["auto_estimated_per_sensor_offsets"] = True
+    policy["timing_warning_sensor_keys"] = [sensor_key]
+    policy["warning_fallback_sensor_keys"] = [sensor_key]
+    policy["per_sensor_offsets"][sensor_key]["status"] = "kept_zero"
+    quality_path.write_text(json.dumps(quality))
+    return attempt, attempt_root
+
+
+def test_report_backed_ambiguous_auto_offset_warning_is_promotable(
+    tmp_path: Path,
+) -> None:
+    attempt, _ = _report_backed_ambiguous_auto_offset_attempt(tmp_path)
+    sensor_key = "realsense_d435:1"
+
+    evidence = attempt_module._promotion_time_offset_evidence(attempt)
+
+    assert evidence[sensor_key]["status"] == "kept_zero"
+    assert evidence[sensor_key]["warning_fallback_used"] is True
+    assert evidence[sensor_key]["selected_robot_pose_time_offset_ms"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "tamper_mode",
+    [
+        "candidate_sign",
+        "motion_summary",
+        "quality_warning_fallback",
+    ],
+)
+def test_report_backed_ambiguous_auto_offset_tampering_blocks_promotion(
+    tmp_path: Path,
+    tamper_mode: str,
+) -> None:
+    attempt, attempt_root = _report_backed_ambiguous_auto_offset_attempt(tmp_path)
+    sensor = attempt["time_offset_search"]["sensors"][0]
+    if tamper_mode == "candidate_sign":
+        sensor["candidate_sync_delta_ms"] = 30.0
+    elif tamper_mode == "motion_summary":
+        sensor["motion_consistency"]["methods"]["shah"][
+            "positive_motion_count"
+        ] = 1
+    else:
+        quality_path = attempt_root / SYNC_QUALITY_REPORT
+        quality = json.loads(quality_path.read_text())
+        quality["calibration_attempt_policy"]["warning_fallback_sensor_keys"] = []
+        quality_path.write_text(json.dumps(quality))
+
+    with pytest.raises(ValueError):
+        attempt_module._promotion_time_offset_evidence(attempt)
 
 
 @pytest.mark.parametrize(

@@ -1965,6 +1965,24 @@ def _remove_validated_tree(
     validate_expected_identity(path, expected_identity)
     _signature(path)
     _assert_no_nested_mounts(path)
+    # Run-owned immutable snapshots intentionally remove owner write access
+    # from their directories.  A confirmed run deletion (and move-source
+    # cleanup) must be able to remove those snapshots without weakening the
+    # normal on-disk immutability contract.  Only relax directories owned by
+    # this process; ownership/ACL problems outside that narrow case must still
+    # fail closed and remain visible through durable recovery.
+    effective_uid = os.geteuid()
+    for _root, _directories, _files, descriptor in os.fwalk(
+        path,
+        topdown=True,
+        follow_symlinks=False,
+    ):
+        metadata = os.fstat(descriptor)
+        if metadata.st_uid != effective_uid:
+            continue
+        mode = stat.S_IMODE(metadata.st_mode)
+        if not mode & stat.S_IWUSR:
+            os.fchmod(descriptor, mode | stat.S_IWUSR)
     shutil.rmtree(path)
     _fsync_directory(path.parent)
 

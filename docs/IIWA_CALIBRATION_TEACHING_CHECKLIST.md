@@ -242,10 +242,11 @@ campaign.
 - [ ] For every required camera, verify:
   - [ ] at least 15 accepted views;
   - [ ] robot-camera field coverage with at least five views supporting each
-    extreme, normalized centroid spans of at least 45% image width and 35%
-    image height, and a supported normalized centroid convex-hull area of at
-    least 10%. Retain the 3 × 3 centroid-cell count as a warning, not an
-    absolute-position-dependent extrinsic veto;
+    extreme. For eye-in-hand captures, require normalized centroid spans of at
+    least 45% image width and 35% image height plus at least 10% supported
+    centroid-hull area. For research-stage static eye-to-hand captures, require
+    15% width, 20% height, and 3% hull area. Retain the 3 × 3 centroid-cell
+    count as a warning, not an absolute-position-dependent extrinsic veto;
   - [ ] strong target detections at all raster extremes;
   - [ ] at least 12 common PnP corner inliers and 50% whole-board support;
   - [ ] at least four supported markers with three corners each spanning two

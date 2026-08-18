@@ -57,6 +57,13 @@ arguments must never enter this repository or a browser response.
 - Preserve raw capture data. Synchronization/export work should create derived
   artifacts, usually under `processed/`, rather than renaming or deleting the
   only copy of frames.
+- PoseTestBot is a work-in-progress research test setup. When calibration input
+  evidence is complete and internally valid, prefer retained results with
+  prominent quality warnings over blocking solely on conservative
+  production/metrology margins. Missing, corrupt, contradictory, or
+  non-reproducible evidence must still fail closed. This tolerance policy never
+  weakens physical safety gates, path/containment checks, raw-data preservation,
+  or artifact-integrity validation.
 - Keep completed status current in `docs/REWRITE_PROGRESS.md` and unfinished
   work in `docs/REWRITE_REMAINING_WORK.md`.
 - A name containing `legacy` does not by itself make code removable. Keep the

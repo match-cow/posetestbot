@@ -22,13 +22,15 @@ Workbench project is compiled and a supervised cadence trial passes. See
 [IIWA pose-stream cadence](IIWA_POSE_STREAM_CADENCE.md).
 
 Calibration analysis does not confuse that commissioning target with a hard
-dataset cutoff. Current timing revision v3 retains nearest robot poses through
+dataset cutoff. Current timing revision v5 retains nearest robot poses through
 150 ms, warns above 20 ms, searches effective offset from -300 to +300 ms, and
-warns above ±150 ms. If the statistical offset search is weak or cannot be
-evaluated, it retains recorded 0 ms timing and continues to the existing
-geometric validation gates. At the 30 mm/s capture-motion cap, 100 ms is about
-3 mm of first-order translation; this bounded-error argument motivates a
-warning, not an automatic claim that the resulting calibration is valid.
+warns above ±150 ms. If a complete, evaluable statistical search is weak,
+ambiguous, inconsistent, or boundary-limited, it retains recorded 0 ms timing
+and continues to the existing geometric validation gates with a warning.
+Missing, corrupt, or unevaluable timestamp/robot-pose evidence remains
+blocking. At the 30 mm/s capture-motion cap, 100 ms is about 3 mm of first-order
+translation; this bounded-error argument motivates a warning, not an automatic
+claim that the resulting calibration is valid.
 
 A separate retained 2026-07-23 guided campaign captured three independent
 eye-in-hand calibration attempts for all three RealSense cameras; see the
@@ -236,13 +238,14 @@ validation and capture are operator-run work. Repository tests never access the
 robot or cameras.
 
 For every required camera, a future supervised trial must demonstrate at least
-15 accepted views, five-view-supported normalized centroid spans of at least
-45% image width and 35% image height, at least 10% supported centroid-hull
-area, strong extreme detections, per-view reprojection no greater than 3 px,
-sufficient motion diversity, and passing synchronization quality. The 3 × 3
-cell count remains diagnostic for extrinsics. A manual OpenCV intrinsic
-fallback separately requires 6/9 training coverage cells, no greater than
-1.5 px training RMS, and its held-out and plausibility gates; that RMS is not a
+15 accepted views, strong extreme detections, per-view reprojection no greater
+than 3 px, sufficient motion diversity, and passing synchronization quality.
+Five-view-supported field coverage is mode-specific: eye-in-hand requires at
+least 45% image width, 35% image height, and 10% supported centroid-hull area;
+research-stage static eye-to-hand requires 15%, 20%, and 3%. The 3 × 3 cell
+count remains diagnostic for extrinsics. A manual OpenCV intrinsic fallback
+separately requires 6/9 training coverage cells, no greater than 1.5 px
+training RMS, and its held-out and plausibility gates; that RMS is not a
 factory-profile requirement.
 
 The retained three-camera repeat met the applicable RGB calibration gates and

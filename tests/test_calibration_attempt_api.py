@@ -285,7 +285,10 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
     assert (
         synchronization["search"]["warning_absolute_robot_pose_time_offset_ms"] == 150.0
     )
-    assert synchronization["search"]["time_offset_failure_policy"] == "fail_closed"
+    assert (
+        synchronization["search"]["time_offset_failure_policy"]
+        == "warn_keep_zero"
+    )
     assert (
         synchronization["search"]["minimum_motion_count_per_cross_validation_fold"] == 4
     )
@@ -307,6 +310,9 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
         "min_pnp_supported_corners_per_marker": 3,
         "min_pnp_grid_rows": 2,
         "min_pnp_grid_columns": 2,
+        "min_pnp_clutter_supported_markers": 8,
+        "min_pnp_clutter_grid_rows": 3,
+        "min_pnp_clutter_grid_columns": 3,
         "min_target_marker_coverage_ratio": 0.5,
         "min_target_row_coverage_ratio": 0.6,
         "min_target_column_coverage_ratio": 0.6,
@@ -316,6 +322,20 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
         "min_image_centroid_x_span_ratio": 0.45,
         "min_image_centroid_y_span_ratio": 0.35,
         "min_image_centroid_hull_area_ratio": 0.1,
+        "image_coverage_by_mode": {
+            "eye_in_hand": {
+                "image_coverage_tail_support_views": 5,
+                "min_image_centroid_x_span_ratio": 0.45,
+                "min_image_centroid_y_span_ratio": 0.35,
+                "min_image_centroid_hull_area_ratio": 0.1,
+            },
+            "eye_to_hand": {
+                "image_coverage_tail_support_views": 5,
+                "min_image_centroid_x_span_ratio": 0.15,
+                "min_image_centroid_y_span_ratio": 0.2,
+                "min_image_centroid_hull_area_ratio": 0.03,
+            },
+        },
         "max_per_view_reprojection_error_px": 3.0,
         "max_intrinsic_rms_reprojection_error_px": 1.5,
         "min_motion_poses": 4,

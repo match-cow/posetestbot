@@ -31,7 +31,8 @@ export default defineConfig({
       "/robot": "http://127.0.0.1:5000",
       "/runtime": "http://127.0.0.1:5000",
       "/hardware": "http://127.0.0.1:5000",
-      "/run-command": "http://127.0.0.1:5000"
+      "/run-command": "http://127.0.0.1:5000",
+      "/system": "http://127.0.0.1:5000"
     }
   }
 })

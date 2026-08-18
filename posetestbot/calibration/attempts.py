@@ -31,12 +31,18 @@ from posetestbot.calibration.attempt_solver import (
     DEFAULT_MIN_IMAGE_CENTROID_Y_SPAN_RATIO,
     DEFAULT_MIN_PNP_COMMON_INLIERS,
     DEFAULT_MIN_PNP_COMMON_INLIER_RATIO,
+    DEFAULT_MIN_PNP_CLUTTER_GRID_COLUMNS,
+    DEFAULT_MIN_PNP_CLUTTER_GRID_ROWS,
+    DEFAULT_MIN_PNP_CLUTTER_SUPPORTED_MARKERS,
     DEFAULT_MIN_PNP_GRID_COLUMNS,
     DEFAULT_MIN_PNP_GRID_ROWS,
     DEFAULT_MIN_PNP_SUPPORTED_CORNERS_PER_MARKER,
     DEFAULT_MIN_PNP_SUPPORTED_MARKERS,
     DEFAULT_MIN_ROTATION_AXIS_ANGLE_DEG,
     DEFAULT_MIN_ROTATION_AXIS_SINGULAR_RATIO,
+    DEFAULT_STATIC_MIN_IMAGE_CENTROID_HULL_AREA_RATIO,
+    DEFAULT_STATIC_MIN_IMAGE_CENTROID_X_SPAN_RATIO,
+    DEFAULT_STATIC_MIN_IMAGE_CENTROID_Y_SPAN_RATIO,
     EXTRINSIC_METHOD_ORDER,
     PNP_METHOD_ORDER,
     evaluate_extrinsic_candidate,
@@ -94,7 +100,7 @@ from posetestbot.calibration.time_offset import (
     DEFAULT_POLICY as DEFAULT_SYNCHRONIZATION_POLICY,
     DEFAULT_REFERENCE_PNP_METHOD,
     DEFAULT_WARNING_NEAREST_POSE_DELTA_MS,
-    FAILURE_POLICY_FAIL_CLOSED,
+    FAILURE_POLICY_WARN_KEEP_ZERO,
     IMPROVEMENT_EVIDENCE_STRATEGY,
     IMPLEMENTATION_REVISION as TIME_OFFSET_IMPLEMENTATION_REVISION,
     LOMO_CONSISTENCY_STRATEGY,
@@ -226,6 +232,27 @@ PHASES = (
     ("compare_robot_camera_solutions", "Compare robot-camera solutions"),
     ("validate_and_rank", "Validate and rank"),
 )
+
+
+def _image_coverage_thresholds(mode: str) -> dict[str, float | int]:
+    """Return mounting-aware field-of-view diversity thresholds."""
+
+    if mode == "eye_to_hand":
+        x_span = DEFAULT_STATIC_MIN_IMAGE_CENTROID_X_SPAN_RATIO
+        y_span = DEFAULT_STATIC_MIN_IMAGE_CENTROID_Y_SPAN_RATIO
+        hull_area = DEFAULT_STATIC_MIN_IMAGE_CENTROID_HULL_AREA_RATIO
+    else:
+        x_span = DEFAULT_MIN_IMAGE_CENTROID_X_SPAN_RATIO
+        y_span = DEFAULT_MIN_IMAGE_CENTROID_Y_SPAN_RATIO
+        hull_area = DEFAULT_MIN_IMAGE_CENTROID_HULL_AREA_RATIO
+    return {
+        "image_coverage_tail_support_views": (
+            DEFAULT_IMAGE_COVERAGE_TAIL_SUPPORT_VIEWS
+        ),
+        "min_image_centroid_x_span_ratio": x_span,
+        "min_image_centroid_y_span_ratio": y_span,
+        "min_image_centroid_hull_area_ratio": hull_area,
+    }
 
 
 def utc_now_iso() -> str:
@@ -1040,6 +1067,13 @@ def calibration_setup(run_root: str | Path) -> dict[str, Any]:
                 ),
                 "min_pnp_grid_rows": DEFAULT_MIN_PNP_GRID_ROWS,
                 "min_pnp_grid_columns": DEFAULT_MIN_PNP_GRID_COLUMNS,
+                "min_pnp_clutter_supported_markers": (
+                    DEFAULT_MIN_PNP_CLUTTER_SUPPORTED_MARKERS
+                ),
+                "min_pnp_clutter_grid_rows": DEFAULT_MIN_PNP_CLUTTER_GRID_ROWS,
+                "min_pnp_clutter_grid_columns": (
+                    DEFAULT_MIN_PNP_CLUTTER_GRID_COLUMNS
+                ),
                 "min_target_marker_coverage_ratio": (
                     ATTEMPT_MIN_TARGET_MARKER_COVERAGE_RATIO
                 ),
@@ -1077,6 +1111,10 @@ def calibration_setup(run_root: str | Path) -> dict[str, Any]:
                 "min_image_centroid_hull_area_ratio": (
                     DEFAULT_MIN_IMAGE_CENTROID_HULL_AREA_RATIO
                 ),
+                "image_coverage_by_mode": {
+                    mode: _image_coverage_thresholds(mode)
+                    for mode in ("eye_in_hand", "eye_to_hand")
+                },
                 "max_mean_translation_mm": 10.0,
                 "max_mean_rotation_deg": 5.0,
                 "max_outlier_ratio": 0.25,
@@ -2909,10 +2947,36 @@ def _estimate_target_poses(
             frame_record.update(
                 {
                     "status": "ok" if solved["selected"] else "rejected",
+                    "detected_image_centroid_px": detection.get(
+                        "image_centroid_px"
+                    ),
+                    "image_centroid_px": solved[
+                        "consensus_image_centroid_px"
+                    ],
+                    "image_coverage_cell": _coverage_cell(
+                        solved["consensus_image_centroid_px"],
+                        detections.get("image_size"),
+                    ),
                     "common_inlier_indices": solved["common_inlier_indices"],
                     "common_inlier_count": solved["common_inlier_count"],
                     "common_inlier_ratio": solved["common_inlier_ratio"],
+                    "raw_common_inlier_ratio": solved[
+                        "raw_common_inlier_ratio"
+                    ],
+                    "common_inlier_ratio_basis": solved[
+                        "common_inlier_ratio_basis"
+                    ],
                     "correspondence_count": solved["correspondence_count"],
+                    "duplicate_marker_clutter_filtered": solved[
+                        "duplicate_marker_clutter_filtered"
+                    ],
+                    "duplicate_marker_ids": solved["duplicate_marker_ids"],
+                    "marker_detection_counts": solved[
+                        "marker_detection_counts"
+                    ],
+                    "ignored_clutter_correspondence_count": solved[
+                        "ignored_clutter_correspondence_count"
+                    ],
                     "supported_marker_ids": solved["supported_marker_ids"],
                     "supported_marker_count": solved["supported_marker_count"],
                     "supported_marker_corner_counts": solved[
@@ -2949,17 +3013,37 @@ def _estimate_target_poses(
                         ],
                         "pnp_common_inlier_count": solved["common_inlier_count"],
                         "pnp_common_inlier_ratio": solved["common_inlier_ratio"],
+                        "pnp_raw_common_inlier_ratio": solved[
+                            "raw_common_inlier_ratio"
+                        ],
+                        "pnp_common_inlier_ratio_basis": solved[
+                            "common_inlier_ratio_basis"
+                        ],
                         "pnp_correspondence_count": solved["correspondence_count"],
+                        "pnp_duplicate_marker_clutter_filtered": solved[
+                            "duplicate_marker_clutter_filtered"
+                        ],
+                        "pnp_ignored_clutter_correspondence_count": solved[
+                            "ignored_clutter_correspondence_count"
+                        ],
+                        "pnp_quality_reprojection_scope": selected[
+                            "quality_reprojection_scope"
+                        ],
                         "pnp_supported_marker_ids": solved["supported_marker_ids"],
                         "pnp_supported_grid_rows": solved["supported_grid_rows"],
                         "pnp_supported_grid_columns": solved["supported_grid_columns"],
                         "all_point_mean_reprojection_error_px": selected[
                             "all_point_mean_reprojection_error_px"
                         ],
-                        "image_centroid_px": detection.get("image_centroid_px"),
+                        "image_centroid_px": solved[
+                            "consensus_image_centroid_px"
+                        ],
+                        "detected_image_centroid_px": detection.get(
+                            "image_centroid_px"
+                        ),
                         "image_size": detections.get("image_size"),
                         "image_coverage_cell": _coverage_cell(
-                            detection.get("image_centroid_px"),
+                            solved["consensus_image_centroid_px"],
                             detections.get("image_size"),
                         ),
                     }
@@ -2979,6 +3063,18 @@ def _estimate_target_poses(
                         "pnp_inlier_indices": solved["common_inlier_indices"],
                         "pnp_inlier_count": solved["common_inlier_count"],
                         "pnp_inlier_ratio": solved["common_inlier_ratio"],
+                        "pnp_raw_inlier_ratio": solved[
+                            "raw_common_inlier_ratio"
+                        ],
+                        "pnp_inlier_ratio_basis": solved[
+                            "common_inlier_ratio_basis"
+                        ],
+                        "duplicate_marker_clutter_filtered": solved[
+                            "duplicate_marker_clutter_filtered"
+                        ],
+                        "ignored_clutter_correspondence_count": solved[
+                            "ignored_clutter_correspondence_count"
+                        ],
                         "mean_reprojection_error_px": preferred[
                             "mean_reprojection_error_px"
                         ],
@@ -3174,11 +3270,12 @@ def _estimate_and_apply_time_offsets(
             f"{implementation_revision}"
         )
     improvement_evidence_strategy = IMPROVEMENT_EVIDENCE_STRATEGY
-    failure_policy = FAILURE_POLICY_FAIL_CLOSED
+    failure_policy = FAILURE_POLICY_WARN_KEEP_ZERO
     recorded_failure_policy = search_configuration.get("time_offset_failure_policy")
     if recorded_failure_policy != failure_policy:
         raise ValueError(
-            "Current calibration time-offset attempts must record fail-closed timing"
+            "Current calibration time-offset attempts must record the warning-based "
+            "recorded-timing fallback policy"
         )
     max_lomo_search_adjusted_sign_p_value = float(
         search_configuration.get(
@@ -3388,7 +3485,9 @@ def _estimate_and_apply_time_offsets(
             failed_details.append(
                 sensor_key + (f" ({', '.join(error_checks)})" if error_checks else "")
             )
-        message = "Auto-sync evidence failed closed for: " + ", ".join(failed_details)
+        message = "Auto-sync input could not be evaluated for: " + ", ".join(
+            failed_details
+        )
         raise ValueError(message)
     return report, adjusted
 
@@ -3523,6 +3622,11 @@ def _materialize_authoritative_synchronization(
         ),
         "timing_warning_sensor_keys": list(
             time_offset_search.get("warning_sensor_keys", [])
+        ),
+        "warning_fallback_sensor_keys": sorted(
+            sensor_key
+            for sensor_key, value in result_by_sensor.items()
+            if value.get("warning_fallback_used") is True
         ),
     }
     checks = sync_quality.get("checks")
@@ -3675,6 +3779,7 @@ def _compare_solutions(
     *,
     time_offset_search: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
+    coverage_thresholds = _image_coverage_thresholds(str(request_value["mode"]))
     alignment_by_sensor = {
         str(item["sensor_key"]): item
         for item in time_offset_search["sensors"]
@@ -3694,16 +3799,32 @@ def _compare_solutions(
                     min_accepted_views=DEFAULT_MIN_ACCEPTED_VIEWS,
                     min_coverage_cells=DEFAULT_MIN_COVERAGE_CELLS,
                     image_coverage_tail_support_views=(
-                        DEFAULT_IMAGE_COVERAGE_TAIL_SUPPORT_VIEWS
+                        int(
+                            coverage_thresholds[
+                                "image_coverage_tail_support_views"
+                            ]
+                        )
                     ),
                     min_image_centroid_x_span_ratio=(
-                        DEFAULT_MIN_IMAGE_CENTROID_X_SPAN_RATIO
+                        float(
+                            coverage_thresholds[
+                                "min_image_centroid_x_span_ratio"
+                            ]
+                        )
                     ),
                     min_image_centroid_y_span_ratio=(
-                        DEFAULT_MIN_IMAGE_CENTROID_Y_SPAN_RATIO
+                        float(
+                            coverage_thresholds[
+                                "min_image_centroid_y_span_ratio"
+                            ]
+                        )
                     ),
                     min_image_centroid_hull_area_ratio=(
-                        DEFAULT_MIN_IMAGE_CENTROID_HULL_AREA_RATIO
+                        float(
+                            coverage_thresholds[
+                                "min_image_centroid_hull_area_ratio"
+                            ]
+                        )
                     ),
                     min_motion_poses=ATTEMPT_MIN_MOTION_POSES,
                     min_translation_span_mm=(ATTEMPT_MIN_TRANSLATION_SPAN_MM),
@@ -3712,6 +3833,9 @@ def _compare_solutions(
                 candidate["synchronization"] = {
                     "policy": time_offset_search["policy"],
                     "status": alignment_by_sensor[sensor_key]["status"],
+                    "warning_fallback_used": bool(
+                        alignment_by_sensor[sensor_key].get("warning_fallback_used")
+                    ),
                     "robot_pose_time_offset_ms": float(
                         alignment_by_sensor[sensor_key][
                             "selected_robot_pose_time_offset_ms"
@@ -3886,6 +4010,9 @@ def _candidate_profile(
                 "timestamp_fallback_allowed": False,
                 "max_nearest_pose_delta_ms": max_nearest_pose_delta_ms,
                 "warning_nearest_pose_delta_ms": (warning_nearest_pose_delta_ms),
+                "warning_fallback_used": bool(
+                    synchronization.get("warning_fallback_used")
+                ),
                 "historical_per_sensor_offsets_allowed": False,
                 "auto_estimated_per_sensor_offset": (
                     synchronization.get("policy") == "auto_offset"
@@ -4292,6 +4419,7 @@ def _validate_and_rank(
     *,
     time_offset_search: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    coverage_thresholds = _image_coverage_thresholds(str(request_value["mode"]))
     max_nearest_pose_delta_ms, warning_nearest_pose_delta_ms = (
         _recorded_nearest_pose_limits_ms(request_value)
     )
@@ -4414,18 +4542,23 @@ def _validate_and_rank(
         "thresholds": {
             "min_inliers": 6,
             "min_accepted_views": DEFAULT_MIN_ACCEPTED_VIEWS,
+            "min_pnp_clutter_supported_markers": (
+                DEFAULT_MIN_PNP_CLUTTER_SUPPORTED_MARKERS
+            ),
+            "min_pnp_clutter_grid_rows": DEFAULT_MIN_PNP_CLUTTER_GRID_ROWS,
+            "min_pnp_clutter_grid_columns": DEFAULT_MIN_PNP_CLUTTER_GRID_COLUMNS,
             "min_coverage_cells": DEFAULT_MIN_COVERAGE_CELLS,
             "image_coverage_tail_support_views": (
-                DEFAULT_IMAGE_COVERAGE_TAIL_SUPPORT_VIEWS
+                int(coverage_thresholds["image_coverage_tail_support_views"])
             ),
             "min_image_centroid_x_span_ratio": (
-                DEFAULT_MIN_IMAGE_CENTROID_X_SPAN_RATIO
+                float(coverage_thresholds["min_image_centroid_x_span_ratio"])
             ),
             "min_image_centroid_y_span_ratio": (
-                DEFAULT_MIN_IMAGE_CENTROID_Y_SPAN_RATIO
+                float(coverage_thresholds["min_image_centroid_y_span_ratio"])
             ),
             "min_image_centroid_hull_area_ratio": (
-                DEFAULT_MIN_IMAGE_CENTROID_HULL_AREA_RATIO
+                float(coverage_thresholds["min_image_centroid_hull_area_ratio"])
             ),
             "max_per_view_reprojection_error_px": (DEFAULT_MAX_VIEW_ERROR_PX),
             "max_intrinsic_rms_reprojection_error_px": DEFAULT_MAX_RMS_PX,
@@ -4930,33 +5063,60 @@ def _validate_promotion_motion_consistency(
     recorded_search: Mapping[str, Any],
     search_grid: Sequence[float],
     check_by_name: Mapping[str, Mapping[str, Any]],
+    require_passing: bool = True,
 ) -> None:
-    """Recalculate the v2 motion-consistency summary before promotion."""
+    """Recalculate motion-consistency evidence before promotion."""
 
     status = str(item.get("status") or "")
     fold_check = check_by_name["cross_validation_fold_materiality"]
     consistency_check = check_by_name["leave_one_motion_out_timing_consistency"]
     evidence = item.get("motion_consistency")
-    if status == "kept_zero":
+
+    def effective_check_status(check: Mapping[str, Any]) -> str:
         if (
-            evidence is not None
-            or fold_check.get("status") != "not_needed"
-            or consistency_check.get("status") != "not_needed"
+            check.get("status") == "warning"
+            and check.get("original_status") == "error"
+        ):
+            return "error"
+        return str(check.get("status") or "")
+
+    candidate_is_zero = math.isclose(
+        candidate_offset,
+        0.0,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
+    if candidate_is_zero:
+        if (
+            status != "kept_zero"
+            or evidence is not None
+            or effective_check_status(fold_check) != "not_needed"
+            or effective_check_status(consistency_check) != "not_needed"
         ):
             raise ValueError(
                 f"Zero-offset motion-consistency evidence is invalid for {sensor_key}"
             )
         return
+    expected_status = "applied" if require_passing else "kept_zero"
+    evidence_status = (
+        str(evidence.get("status") or "")
+        if isinstance(evidence, Mapping)
+        else ""
+    )
+    consistency_status = effective_check_status(consistency_check)
+    fold_status = effective_check_status(fold_check)
     if (
-        status != "applied"
+        status != expected_status
         or not isinstance(evidence, Mapping)
         or evidence.get("strategy") != LOMO_CONSISTENCY_STRATEGY
-        or evidence.get("status") != "ok"
+        or evidence_status not in {"ok", "error"}
         or evidence.get("candidate_search_adjustment") != "bonferroni"
         or evidence.get("candidate_selection_uses_audited_motions") is not True
         or evidence.get("transform_training_motion_disjoint") is not True
-        or consistency_check.get("status") != "ok"
-        or fold_check.get("status") not in {"ok", "warning"}
+        or consistency_status != evidence_status
+        or fold_status not in {"ok", "warning", "error"}
+        or (require_passing and evidence_status != "ok")
+        or (require_passing and fold_status not in {"ok", "warning"})
     ):
         raise ValueError(
             f"Leave-one-motion-out timing evidence is invalid for {sensor_key}"
@@ -5035,7 +5195,7 @@ def _validate_promotion_motion_consistency(
             f"Leave-one-motion-out timing coverage is invalid for {sensor_key}"
         )
 
-    improvements: dict[str, list[dict[str, float]]] = {
+    improvements: dict[str, list[dict[str, float | None]]] = {
         method: [] for method in expected_methods
     }
     motion_names: set[str] = set()
@@ -5089,12 +5249,17 @@ def _validate_promotion_motion_consistency(
                     candidate_residuals["mean_translation_mm"]
                 )
                 candidate_rotation = float(candidate_residuals["mean_rotation_deg"])
-                improvement = {
+                raw_relative_translation = raw_improvement[
+                    "relative_translation"
+                ]
+                improvement: dict[str, float | None] = {
                     "absolute_translation_mm": float(
                         raw_improvement["absolute_translation_mm"]
                     ),
-                    "relative_translation": float(
-                        raw_improvement["relative_translation"]
+                    "relative_translation": (
+                        float(raw_relative_translation)
+                        if raw_relative_translation is not None
+                        else None
                     ),
                     "rotation_change_deg": float(
                         raw_improvement["rotation_change_deg"]
@@ -5109,7 +5274,11 @@ def _validate_promotion_motion_consistency(
                 zero_rotation,
                 candidate_translation,
                 candidate_rotation,
-                *improvement.values(),
+                *(
+                    value
+                    for value in improvement.values()
+                    if value is not None
+                ),
             )
             expected_absolute = zero_translation - candidate_translation
             expected_relative = (
@@ -5118,18 +5287,14 @@ def _validate_promotion_motion_consistency(
             expected_rotation = candidate_rotation - zero_rotation
             if (
                 not all(math.isfinite(value) for value in source_values)
-                or expected_relative is None
                 or not math.isclose(
                     improvement["absolute_translation_mm"],
                     expected_absolute,
                     rel_tol=0.0,
                     abs_tol=1e-12,
                 )
-                or not math.isclose(
-                    improvement["relative_translation"],
-                    expected_relative,
-                    rel_tol=0.0,
-                    abs_tol=1e-12,
+                or not _optional_floats_match(
+                    improvement["relative_translation"], expected_relative
                 )
                 or not math.isclose(
                     improvement["rotation_change_deg"],
@@ -5145,11 +5310,12 @@ def _validate_promotion_motion_consistency(
 
     for method, values in improvements.items():
         positive_count = sum(
-            value["absolute_translation_mm"] > 1e-12 for value in values
+            float(value["absolute_translation_mm"]) > 1e-12 for value in values
         )
         material_count = sum(
-            value["absolute_translation_mm"] >= minimum_absolute
-            and value["relative_translation"] >= minimum_relative
+            float(value["absolute_translation_mm"]) >= minimum_absolute
+            and value["relative_translation"] is not None
+            and float(value["relative_translation"]) >= minimum_relative
             for value in values
         )
         raw_p = float(
@@ -5162,15 +5328,32 @@ def _validate_promotion_motion_consistency(
         adjusted_p = min(1.0, raw_p * candidate_hypothesis_count)
         medians = {
             "absolute_translation_mm": float(
-                np.median([value["absolute_translation_mm"] for value in values])
+                np.median(
+                    [float(value["absolute_translation_mm"]) for value in values]
+                )
             ),
-            "relative_translation": float(
-                np.median([value["relative_translation"] for value in values])
+            "relative_translation": (
+                float(
+                    np.median(
+                        [float(value["relative_translation"]) for value in values]
+                    )
+                )
+                if all(value["relative_translation"] is not None for value in values)
+                else None
             ),
             "rotation_change_deg": float(
-                np.median([value["rotation_change_deg"] for value in values])
+                np.median(
+                    [float(value["rotation_change_deg"]) for value in values]
+                )
             ),
         }
+        method_ok = bool(
+            medians["absolute_translation_mm"] >= minimum_absolute
+            and medians["relative_translation"] is not None
+            and float(medians["relative_translation"]) >= minimum_relative
+            and adjusted_p <= maximum_adjusted_p
+        )
+        expected_method_status = "ok" if method_ok else "error"
         summary = summaries[method]
         if not isinstance(summary, Mapping):
             raise ValueError(
@@ -5179,7 +5362,7 @@ def _validate_promotion_motion_consistency(
         recorded_medians = summary.get("median_improvement")
         try:
             summary_values_match = (
-                summary.get("status") == "ok"
+                summary.get("status") == expected_method_status
                 and int(summary["motion_count"]) == motion_count
                 and int(summary["positive_motion_count"]) == positive_count
                 and int(summary["material_motion_count"]) == material_count
@@ -5196,27 +5379,42 @@ def _validate_promotion_motion_consistency(
                     abs_tol=1e-12,
                 )
                 and isinstance(recorded_medians, Mapping)
-                and all(
-                    math.isclose(
-                        float(recorded_medians[name]),
-                        value,
-                        rel_tol=0.0,
-                        abs_tol=1e-12,
-                    )
-                    for name, value in medians.items()
+                and math.isclose(
+                    float(recorded_medians["absolute_translation_mm"]),
+                    float(medians["absolute_translation_mm"]),
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+                and _optional_floats_match(
+                    recorded_medians["relative_translation"],
+                    medians["relative_translation"],
+                )
+                and math.isclose(
+                    float(recorded_medians["rotation_change_deg"]),
+                    float(medians["rotation_change_deg"]),
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
                 )
             )
         except (KeyError, TypeError, ValueError):
             summary_values_match = False
-        if (
-            not summary_values_match
-            or medians["absolute_translation_mm"] < minimum_absolute
-            or medians["relative_translation"] < minimum_relative
-            or adjusted_p > maximum_adjusted_p
-        ):
+        if not summary_values_match or (require_passing and not method_ok):
             raise ValueError(
                 f"Leave-one-motion-out timing summary is inconsistent for {sensor_key}"
             )
+
+    expected_evidence_status = (
+        "ok"
+        if all(
+            isinstance(summary, Mapping) and summary.get("status") == "ok"
+            for summary in summaries.values()
+        )
+        else "error"
+    )
+    if evidence_status != expected_evidence_status:
+        raise ValueError(
+            f"Leave-one-motion-out timing status is inconsistent for {sensor_key}"
+        )
 
     expected_check_actual = {
         "motion_count": motion_count,
@@ -5277,6 +5475,11 @@ def _promotion_time_offset_evidence(
             "Calibration time-offset promotion evidence does not cover every sensor"
         )
     if recorded_revision == TIME_OFFSET_IMPLEMENTATION_REVISION:
+        if (
+            recorded_search.get("time_offset_failure_policy")
+            != FAILURE_POLICY_WARN_KEEP_ZERO
+        ):
+            raise ValueError("Calibration time-offset fallback policy is invalid")
         expected_warning_sensor_keys = sorted(
             sensor_key
             for sensor_key, item in sensors.items()
@@ -5328,6 +5531,11 @@ def _promotion_time_offset_evidence(
             operator_offset = float(item["selected_robot_pose_time_offset_ms"])
             sync_delta = float(item["selected_sync_delta_ms"])
             candidate_offset = float(item["candidate_robot_pose_time_offset_ms"])
+            candidate_sync_delta = (
+                float(item["candidate_sync_delta_ms"])
+                if policy == "auto_offset"
+                else -candidate_offset
+            )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(
                 f"Calibration time-offset evidence is invalid for {sensor_key}"
@@ -5336,9 +5544,16 @@ def _promotion_time_offset_evidence(
             not math.isfinite(operator_offset)
             or not math.isfinite(sync_delta)
             or not math.isfinite(candidate_offset)
+            or not math.isfinite(candidate_sync_delta)
             or not math.isclose(
                 sync_delta,
                 -operator_offset,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+            or not math.isclose(
+                candidate_sync_delta,
+                -candidate_offset,
                 rel_tol=0.0,
                 abs_tol=1e-9,
             )
@@ -5365,6 +5580,69 @@ def _promotion_time_offset_evidence(
                     "Auto-sync improvement evidence strategy is invalid for "
                     f"{sensor_key}"
                 )
+            degraded_warning_fallback = bool(
+                recorded_revision == TIME_OFFSET_IMPLEMENTATION_REVISION
+                and item.get("warning_fallback_used") is True
+            )
+            if degraded_warning_fallback:
+                warning_checks = [
+                    check
+                    for check in check_by_name.values()
+                    if check.get("status") == "warning"
+                ]
+                converted_blockers = [
+                    check
+                    for check in warning_checks
+                    if check.get("original_status") == "error"
+                ]
+                candidate_on_grid = any(
+                    math.isclose(
+                        candidate_offset,
+                        value,
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    )
+                    for value in search_grid
+                )
+                if (
+                    status != "kept_zero"
+                    or item.get("decision") != "recorded_timing_kept"
+                    or item.get("decision_reason")
+                    != "ambiguous_auto_offset_kept_recorded_zero"
+                    or item.get("evidence_strength") != "degraded"
+                    or not math.isclose(
+                        operator_offset,
+                        0.0,
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    )
+                    or not candidate_on_grid
+                    or not required_auto_checks.issubset(check_by_name)
+                    or not converted_blockers
+                    or any(
+                        check.get("fallback")
+                        != "recorded timing retained at 0 ms"
+                        for check in converted_blockers
+                    )
+                    or any(
+                        check.get("status") == "error"
+                        for check in check_by_name.values()
+                    )
+                ):
+                    raise ValueError(
+                        "Degraded auto-sync warning fallback is invalid for "
+                        f"{sensor_key}"
+                    )
+                _validate_promotion_motion_consistency(
+                    item,
+                    sensor_key=sensor_key,
+                    candidate_offset=candidate_offset,
+                    recorded_search=recorded_search,
+                    search_grid=search_grid,
+                    check_by_name=check_by_name,
+                    require_passing=False,
+                )
+                continue
             if not required_auto_checks.issubset(check_by_name) or any(
                 check.get("status") == "error" for check in check_by_name.values()
             ):
@@ -5456,6 +5734,29 @@ def _promotion_time_offset_artifact_bindings(
         raise ValueError("Authoritative synchronization quality is not promotable")
     policy = quality.get("calibration_attempt_policy")
     offsets = policy.get("per_sensor_offsets") if isinstance(policy, Mapping) else None
+    expected_timing_warning_sensor_keys = sorted(
+        sensor_key
+        for sensor_key, alignment in sensors.items()
+        if any(
+            isinstance(check, Mapping) and check.get("status") == "warning"
+            for check in alignment.get("checks", [])
+        )
+    )
+    expected_warning_fallback_sensor_keys = sorted(
+        sensor_key
+        for sensor_key, alignment in sensors.items()
+        if alignment.get("warning_fallback_used") is True
+    )
+    timing_warning_sensor_keys = (
+        policy.get("timing_warning_sensor_keys")
+        if isinstance(policy, Mapping)
+        else None
+    )
+    warning_fallback_sensor_keys = (
+        policy.get("warning_fallback_sensor_keys")
+        if isinstance(policy, Mapping)
+        else None
+    )
     if (
         not isinstance(policy, Mapping)
         or policy.get("synchronization_policy")
@@ -5463,6 +5764,12 @@ def _promotion_time_offset_artifact_bindings(
         or policy.get("time_offset_search") != source_reference
         or not isinstance(offsets, Mapping)
         or set(offsets) != set(sensors)
+        or not isinstance(timing_warning_sensor_keys, list)
+        or sorted(str(item) for item in timing_warning_sensor_keys)
+        != expected_timing_warning_sensor_keys
+        or not isinstance(warning_fallback_sensor_keys, list)
+        or sorted(str(item) for item in warning_fallback_sensor_keys)
+        != expected_warning_fallback_sensor_keys
     ):
         raise ValueError("Authoritative synchronization provenance is inconsistent")
 
@@ -6005,6 +6312,10 @@ def _selected_profiles(
             != request_value["synchronization_policy"]
             or candidate_synchronization.get("status") != alignment.get("status")
             or profile_synchronization.get("status") != alignment.get("status")
+            or bool(candidate_synchronization.get("warning_fallback_used"))
+            != bool(alignment.get("warning_fallback_used"))
+            or bool(profile_synchronization.get("warning_fallback_used"))
+            != bool(alignment.get("warning_fallback_used"))
             or not _optional_floats_match(
                 candidate_synchronization.get("robot_pose_time_offset_ms"),
                 alignment.get("selected_robot_pose_time_offset_ms"),

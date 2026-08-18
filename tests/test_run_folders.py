@@ -275,6 +275,30 @@ def test_delete_removes_run_and_only_verified_compatibility_aliases(
     assert unrecorded.is_symlink()
 
 
+def test_delete_removes_owned_read_only_snapshot_directories(tmp_path: Path) -> None:
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    source = storage / "run-a"
+    _write_run(source)
+    snapshot = source / "processed" / "calibration_inputs" / ("a" * 64)
+    snapshot.mkdir(parents=True)
+    profile = snapshot / "calibration_profiles.json"
+    profile.write_text("{}")
+    profile.chmod(0o444)
+    snapshot.chmod(0o555)
+
+    result = delete_run_folder(
+        source,
+        expected_identity=run_identity(source),
+        allowed_roots=[storage],
+    )
+
+    assert result["status"] == "deleted"
+    assert not source.exists()
+    assert not list(storage.glob(".posetestbot_run_folder_transaction_*.json"))
+    assert not list(storage.glob(".posetestbot_run_move_source_*"))
+
+
 def test_delete_fails_closed_at_nested_filesystem_boundary_before_isolation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

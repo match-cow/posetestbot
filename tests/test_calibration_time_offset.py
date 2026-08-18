@@ -261,6 +261,37 @@ def test_auto_offset_flat_curve_fails_closed() -> None:
     assert all(item["robot_pose_time_offset_ms"] == 0.0 for item in adjusted)
 
 
+def test_auto_offset_flat_curve_keeps_recorded_timing_with_warning() -> None:
+    observations, robot_records = _synthetic_offset_evidence(
+        mode="eye_to_hand",
+        planted_offset_ms=20,
+        stationary_within_motion=True,
+    )
+
+    result, adjusted = estimate_sensor_time_offset(
+        observations,
+        sensor_key="realsense_d435:test",
+        robot_records=robot_records,
+        mode="eye_to_hand",
+        offsets_ms=[float(value) for value in range(-40, 41, 10)],
+        methods=("shah",),
+        max_search_motions=12,
+        failure_policy=time_offset_module.FAILURE_POLICY_WARN_KEEP_ZERO,
+    )
+
+    assert result["status"] == "kept_zero"
+    assert result["decision"] == "recorded_timing_kept"
+    assert result["evidence_strength"] == "degraded"
+    assert result["warning_fallback_used"] is True
+    assert result["selected_robot_pose_time_offset_ms"] == 0.0
+    assert any(
+        item.get("status") == "warning" and item.get("original_status") == "error"
+        for item in result["checks"]
+    )
+    assert not any(item.get("status") == "error" for item in result["checks"])
+    assert all(item["robot_pose_time_offset_ms"] == 0.0 for item in adjusted)
+
+
 def test_auto_offset_motion_consistency_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -310,6 +341,10 @@ def test_full_search_correction_requires_16_of_17_positive_motions() -> None:
 
 
 def test_time_offset_public_contract_is_explicit_and_deterministic() -> None:
+    assert (
+        time_offset_module.search_configuration()["time_offset_failure_policy"]
+        == time_offset_module.FAILURE_POLICY_WARN_KEEP_ZERO
+    )
     assert offset_values(-20.0, 20.0, 5.0) == [
         -20.0,
         -15.0,

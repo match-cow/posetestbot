@@ -31,7 +31,9 @@ from posetestbot.calibration.candidates import _robot_ee_to_reference
 SCHEMA_VERSION = "calibration_time_offset_search.v1"
 LEGACY_IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_cv.v1"
 LOMO_IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_lomo_cv.v2"
-IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_lomo_fail_closed.v4"
+IMPLEMENTATION_REVISION = (
+    "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5"
+)
 SUPPORTED_IMPLEMENTATION_REVISIONS = frozenset({IMPLEMENTATION_REVISION})
 POLICIES = ("auto_offset", "fixed_zero")
 DEFAULT_POLICY = "fixed_zero"
@@ -55,6 +57,7 @@ LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY = "every_cross_validation_fold"
 IMPROVEMENT_EVIDENCE_STRATEGY = "leave_one_motion_out_consistency"
 LOMO_CONSISTENCY_STRATEGY = "leave_one_motion_out_candidate_consistency_bonferroni.v1"
 FAILURE_POLICY_FAIL_CLOSED = "fail_closed"
+FAILURE_POLICY_WARN_KEEP_ZERO = "warn_keep_zero"
 
 
 def offset_values(
@@ -797,7 +800,10 @@ def estimate_sensor_time_offset(
             "Unsupported time-offset improvement evidence strategy: "
             f"{improvement_evidence_strategy}"
         )
-    if failure_policy != FAILURE_POLICY_FAIL_CLOSED:
+    if failure_policy not in {
+        FAILURE_POLICY_FAIL_CLOSED,
+        FAILURE_POLICY_WARN_KEEP_ZERO,
+    }:
         raise ValueError(f"Unsupported time-offset failure policy: {failure_policy}")
     if (
         not math.isfinite(max_nearest_pose_delta_ms)
@@ -1243,7 +1249,22 @@ def estimate_sensor_time_offset(
         if zero_offset_identified and not blocking
         else "failed"
     )
-    status = strict_status
+    warning_fallback_used = bool(
+        strict_status == "failed" and failure_policy == FAILURE_POLICY_WARN_KEEP_ZERO
+    )
+    status = "kept_zero" if warning_fallback_used else strict_status
+    if warning_fallback_used:
+        checks = [
+            {
+                **item,
+                "status": "warning",
+                "original_status": "error",
+                "fallback": "recorded timing retained at 0 ms",
+            }
+            if item["status"] == "error"
+            else item
+            for item in checks
+        ]
     reason = (
         (
             (
@@ -1255,7 +1276,9 @@ def estimate_sensor_time_offset(
         )
         if status == "applied"
         else (
-            "candidate_failed_safety_or_stability_checks"
+            "ambiguous_auto_offset_kept_recorded_zero"
+            if warning_fallback_used
+            else "candidate_failed_safety_or_stability_checks"
             if status == "failed"
             else "zero_offset_identified_by_all_cross_validation_folds"
         )
@@ -1285,7 +1308,9 @@ def estimate_sensor_time_offset(
             }
         )
     evidence_strength = (
-        "strong"
+        "degraded"
+        if warning_fallback_used
+        else "strong"
         if status == "applied"
         and float(cross_validated_relative or 0.0) >= 0.15
         and fold_candidate_spread_ms <= DEFAULT_STEP_MS * 2.0
@@ -1301,6 +1326,8 @@ def estimate_sensor_time_offset(
         "decision": (
             "auto_offset_applied"
             if status == "applied"
+            else "recorded_timing_kept"
+            if warning_fallback_used
             else "auto_zero_offset_identified"
             if status == "kept_zero"
             else "auto_sync_rejected"
@@ -1311,6 +1338,7 @@ def estimate_sensor_time_offset(
         "candidate_robot_pose_time_offset_ms": candidate_offset_ms,
         "candidate_sync_delta_ms": -candidate_offset_ms,
         "evidence_strength": evidence_strength,
+        "warning_fallback_used": warning_fallback_used,
         "boundary_hit": boundary_hit,
         "reference_pnp_method": DEFAULT_REFERENCE_PNP_METHOD,
         "reference_extrinsic_methods": list(methods),
@@ -1359,7 +1387,7 @@ def search_configuration() -> dict[str, Any]:
         "max_nearest_pose_delta_ms": DEFAULT_MAX_NEAREST_POSE_DELTA_MS,
         "warning_nearest_pose_delta_ms": DEFAULT_WARNING_NEAREST_POSE_DELTA_MS,
         "warning_absolute_robot_pose_time_offset_ms": (DEFAULT_WARNING_ABS_OFFSET_MS),
-        "time_offset_failure_policy": FAILURE_POLICY_FAIL_CLOSED,
+        "time_offset_failure_policy": FAILURE_POLICY_WARN_KEEP_ZERO,
         "max_observations_per_motion": DEFAULT_MAX_OBSERVATIONS_PER_MOTION,
         "maximum_search_motion_count": DEFAULT_MAX_SEARCH_MOTIONS,
         "minimum_motion_count_per_cross_validation_fold": (

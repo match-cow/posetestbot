@@ -22,7 +22,7 @@ ambiguously retaught frame.
 | Use | Persistent Sunrise frame | Repository frame role |
 | --- | --- | --- |
 | Nine-frame calibration motion waypoints | `/PoseTestBot/TemplateBase` | Motion planning only; not a run transform endpoint |
-| Single-frame static-calibration bottom anchor | `/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle` | Minimum local-Z motion anchor; generated center is +50 mm in its Z axis |
+| Single-frame static-calibration bottom-center point | `/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle` | Lowest permitted `PoseTemplateBase.Z` grid point; generated X/Z grid uses the parent axes |
 | Static-calibration and ordinary-capture pose stream | `/PoseTestBot/PoseTemplateBase` | Run `template_base` and static `camera → template_base` result |
 | Calibration board geometry, static cameras | Target bundle `aruco_grid` | Unknown rigid `aruco_grid → robot_flange`, estimated as support evidence |
 | Calibration board geometry, eye-in-hand cameras | Target bundle `aruco_grid` | Explicit or estimated `aruco_grid → template_base` placement |
@@ -34,8 +34,10 @@ origin and axes against the physical pose-template datum. Record its
 relationship to `/PoseTestBot/TemplateBase` as commissioning evidence for the
 motion plan. That relationship is not needed by the static-camera solver.
 The [single-frame static-camera alternative](IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md)
-instead places its sole taught motion anchor below `PoseTemplateBase`; it does
-not change the pose-stream endpoint.
+adds its sole taught bottom-center grid point as a child of that Application
+Data frame; it does not change the pose-stream endpoint. Generated
+translations use the parent `PoseTemplateBase` X/Z axes, not the child
+frame's local axes.
 
 The word `template_base` in run artifacts is a semantic role, not a Sunrise
 path. Both static-camera calibration and ordinary dataset capture map that role

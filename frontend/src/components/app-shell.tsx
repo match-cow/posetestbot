@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query"
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
 import { ArrowRight, BookOpen, Bot, Boxes, ChartNoAxesCombined, Check, Circle, CircleDot, Cpu, FlaskConical, FolderOpen, Folders, Gauge, Github, Grid3X3, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Route, Sun, Workflow } from "lucide-react"
 import { ConsoleGuide } from "@/components/console-guide"
+import { RestartControl } from "@/components/restart-control"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useOperator } from "@/providers/operator-provider"
@@ -218,6 +219,7 @@ export function AppShell() {
                 <Tooltip><TooltipTrigger asChild><Button asChild variant="outline" size="icon" className="hidden size-[34px] sm:inline-flex"><a href="https://github.com/match-cow/PoseTestBot" target="_blank" rel="noreferrer" aria-label="Open PoseTestBot on GitHub"><Github /></a></Button></TooltipTrigger><TooltipContent>GitHub repository</TooltipContent></Tooltip>
                 <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" className="size-[34px]" onClick={() => setGuideOpen(true)} aria-label="Open operator console guide"><BookOpen /></Button></TooltipTrigger><TooltipContent>Console guide</TooltipContent></Tooltip>
                 <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" className="size-[34px]" onClick={() => setTheme(theme === "light" ? "dark" : "light")} aria-label={`Switch to ${theme === "light" ? "dark" : "light"} theme`}>{theme === "light" ? <Moon /> : <Sun />}</Button></TooltipTrigger><TooltipContent>{theme === "light" ? "Use dark theme" : "Use light theme"}</TooltipContent></Tooltip>
+                <RestartControl />
               </div>
               <nav className="order-3 flex w-full gap-1 overflow-x-auto pb-0.5 xl:hidden" aria-label="Primary navigation">
                 {navigation.map(({ to, label, icon: Icon, match }) => {

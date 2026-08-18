@@ -64,9 +64,9 @@ recommissioned before replacing the accepted controller program.
 The ordinary full-capture Sunrise application is separate from the accepted
 calibration program and remains open under milestone 1.
 The additional `PoseTestBotSingleFrameStaticCameraCalibrationApplication` is a
-repository candidate with one taught bottom-middle anchor and a generated
-center for its bounded relative grid and swivel motions. It does not inherit
-the nine-frame program's historical physical acceptance.
+repository candidate with one taught bottom-center grid point and a generated
+center for its bounded parent-frame X/Z grid and swivel motions. It does not
+inherit the nine-frame program's historical physical acceptance.
 
 ## 1 — IIWA Controller Commissioning and Cadence Rollout
 
@@ -85,12 +85,20 @@ outcome.
   Sunrise.OS API.
 - [ ] For the single-frame static-camera alternative, create and read back only
   `/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle` beyond the
-  existing `/PoseTestBot/PoseTemplateBase`; verify its +Z axis points from the
-  local minimum-Z position toward the available workspace, then simulate and
-  T1-commission the +50 mm center approach and every relative grid, depth,
-  orientation, and return path. Verify the 100 mm center-relative and 110 mm
-  taught-anchor envelopes, the read-only 25 mm start-proximity rejection, and
-  target visibility plus swept target/arm/cable clearance.
+  existing `/PoseTestBot/PoseTemplateBase`. Verify its flange position is the
+  lowest allowed Z in the parent coordinate system, parent X supplies the
+  intended left/right columns, and parent +Z supplies the middle/top rows.
+  Simulate and T1-commission the parent-frame X/Z grid from the taught point to
+  the generated center, every orientation leg, and the return to the taught
+  point. Verify the 100 mm relative-leg and 125 mm taught-point envelopes, the
+  absence of any
+  generated point below the taught parent-frame Z, the read-only 25 mm
+  start-proximity rejection, and target visibility plus swept
+  target/arm/cable clearance. Confirm retained static-camera target centroids
+  clear the research-stage 15% image-width, 20% image-height, and 3%
+  supported-hull minima; retain the measured coverage and pursue wider motion
+  where the cell permits it rather than treating those minima as an ideal
+  calibration trajectory.
 - [ ] Before replacing the accepted calibration deployment, revalidate its
   unchanged motion/frame contract and retain a supervised cadence report.
   Target at least 50 Hz median host receive rate, no more than 25 ms p95 gap,
@@ -103,6 +111,10 @@ outcome.
   cameras. Bind the printed grid to `robot_flange` with unknown attachment,
   perform one explicitly authorized supervised capture, and retain the
   three-camera static-world attempt (internally the eye-to-hand equation).
+  Keep other printed grids that reuse the same marker dictionary outside the
+  camera views where practical. The solver can retain one strong 8-marker,
+  3-row, 3-column planar instance with a warning, but clutter filtering is
+  reviewable fallback evidence rather than the preferred capture arrangement.
   Require every robot pose packet to use
   `sunrise_reference_frame_path=/PoseTestBot/PoseTemplateBase`, passing
   `camera -> PoseTemplateBase` profiles, and mutually consistent estimated

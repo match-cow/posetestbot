@@ -23,51 +23,62 @@ motion frame:
 /PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle
 ```
 
-Teach `CalibrationStaticBottomMiddle` at the minimum local-Z endpoint that the
-calibration target may occupy. Orient the frame so its +Z axis points from this
-bottom position toward the available workspace. The generated pattern center
-is 50 mm along that +Z axis. At that center, the robot-carried target must be
-centered and fully visible in the intended static camera, with useful border
-margin for translation and rotation. The program does not construct numeric
-absolute frames at runtime.
+Teach `CalibrationStaticBottomMiddle` as the bottom-center point of the 3 × 3
+calibration grid. Its flange position is the lowest permitted Z value in the
+parent `PoseTemplateBase` coordinate system. The other bottom-row points are
+65 mm in parent-frame -X and +X; no generated grid point may have a
+`PoseTemplateBase.Z` below the taught point.
 
-All translations are expressed in the taught bottom-middle frame's axes.
-“Bottom” in this contract means the minimum local-Z endpoint, not necessarily
-the bottom of a camera image or negative Z of another Sunrise frame. “Upper”,
-“lower”, “left”, “depth plus”, and “depth minus” are route labels, not promises
-about camera-image direction or camera distance. For the ceiling-mounted cell,
-commissioning must verify that taught-frame +Z actually points away from the
-restricted negative-Z workspace before any motion is enabled.
+The program resolves the existing `PoseTemplateBase` `ObjectFrame` and
+expresses every generated translation in that parent frame—not in the taught
+child frame's axes. Parent X supplies left/center/right, parent Y remains fixed,
+and parent Z supplies bottom/middle/top. The generated center is
+`(X=0, Y=0, Z=+50 mm)` relative to the taught point. At that center, the
+robot-carried target must be centered and fully visible in the intended static
+camera, with useful border margin for translation and rotation.
 
 ## Relative Motion Plan
 
-The program first moves 50 mm in local +Z from the taught bottom-middle frame
-to the generated center. The planar grid retains 65 mm X/Y half-spans around
-that center, and the depth dither retains ±50 mm Z travel around it. Thus the
-complete pattern occupies local Z = 0…100 mm and never generates an endpoint
-below the taught frame.
+Starting at the taught bottom-middle point, the 3 × 3 grid occupies
+`PoseTemplateBase.X = -65, 0, +65 mm`, fixed
+`PoseTemplateBase.Y`, and bottom-relative
+`PoseTemplateBase.Z = 0, +50, +100 mm`.
 
 | Generated point | X from taught bottom | Y from taught bottom | Z from taught bottom | Distance from taught bottom |
 | --- | ---: | ---: | ---: | ---: |
-| Pattern center | 0 | 0 | +50 mm | 50 mm |
-| Upper left | -65 mm | +65 mm | +50 mm | 104.6 mm |
-| Upper center | 0 | +65 mm | +50 mm | 82.0 mm |
-| Upper right | +65 mm | +65 mm | +50 mm | 104.6 mm |
-| Middle right | +65 mm | 0 | +50 mm | 82.0 mm |
-| Lower right | +65 mm | -65 mm | +50 mm | 104.6 mm |
-| Lower center | 0 | -65 mm | +50 mm | 82.0 mm |
-| Lower left | -65 mm | -65 mm | +50 mm | 104.6 mm |
+| Bottom left | -65 mm | 0 | 0 | 65 mm |
+| Bottom middle (taught) | 0 | 0 | 0 | 0 |
+| Bottom right | +65 mm | 0 | 0 | 65 mm |
 | Middle left | -65 mm | 0 | +50 mm | 82.0 mm |
-| Depth plus | 0 | 0 | +100 mm | 100 mm |
-| Depth minus / taught bottom | 0 | 0 | 0 | 0 |
+| Pattern center | 0 | 0 | +50 mm | 50 mm |
+| Middle right | +65 mm | 0 | +50 mm | 82.0 mm |
+| Top left | -65 mm | 0 | +100 mm | 119.3 mm |
+| Top center | 0 | 0 | +100 mm | 100 mm |
+| Top right | +65 mm | 0 | +100 mm | 119.3 mm |
 
-Each grid or depth result is a blocking `LIN_REL` from the generated center and
-is followed by its exact inverse `LIN_REL` back to that center. Every individual
-relative translation remains within the 100 mm center limit, and every
-generated endpoint remains within the separate 110 mm radius around the taught
-bottom-middle frame. The program then visits independent -10° and +10° results
-about A, B, and C at zero translation from the generated center, returning to
-center after each orientation.
+The grid phase follows this deterministic perimeter-to-center order:
+
+```text
+Bottom-middle → bottom-left → middle-left → top-left → top-center
+              → top-right → middle-right → bottom-right → center
+```
+
+Each leg is a blocking `LIN_REL` delta from the preceding point; the robot no
+longer makes a center-return spoke after every grid observation. The final
+bottom-right-to-center diagonal is about 82.0 mm; all other grid legs are 50 or
+65 mm. Every grid endpoint is checked against the taught bottom before its
+relative delta is issued, and a negative bottom-relative Z is rejected.
+
+There is no separate depth phase. After the grid route reaches the generated
+center, orientation follows
+`center → -10° → +10° → center` independently for A, B, and C. The direct
+negative-to-positive leg is a 20° relative rotation. Translation remains zero
+throughout all orientation legs.
+
+The generated sequence contains 18 relative legs: eight grid legs, nine
+orientation legs, and center-to-bottom. Every individual relative translation
+remains within the 100 mm leg limit, and every generated endpoint remains
+within 125 mm of the taught bottom-middle point.
 
 These bounds apply only to the flange origin's translation. They do not bound
 every point of the robot, tool, mounted target, or cables. Orientation can sweep
@@ -84,18 +95,21 @@ positive-velocity START command. After START it:
    is already within 25 mm of `CalibrationStaticBottomMiddle`;
 2. configures pose streaming in `/PoseTestBot/PoseTemplateBase`;
 3. moves PTP to the taught `CalibrationStaticBottomMiddle` anchor;
-4. moves `LIN_REL` +50 mm in the taught frame's Z axis to the generated center;
-5. visits and returns from all eight planar grid points;
-6. visits and returns from the two depth points;
-7. visits and returns from the six orientation results at the generated center;
-8. moves `LIN_REL` -50 mm in taught-frame Z back to the bottom-middle anchor;
-9. performs a final blocking PTP confirmation at that absolute taught frame;
-   and
-10. sends the successful terminal marker only after that return completes.
+4. follows the eight-leg X/Z grid route from that bottom-middle point through
+   every other grid point and ends at its generated center;
+5. sweeps each A/B/C axis from -10° through +10° and back to center in
+   three legs per axis;
+6. moves `LIN_REL` -50 mm in `PoseTemplateBase.Z` back to—not below—the
+   taught bottom-middle point; and
+7. sends the successful terminal marker only after that blocking return
+   completes.
 
-Relative motions use 60% of the requested Cartesian speed, clamped to
-8–30 mm/s, plus 3% relative joint velocity, acceleration, and jerk limits.
-Bottom-middle PTP motions use 8% relative joint velocity and the same 3%
+Grid translations use `PoseTemplateBase` as their explicit `LIN_REL`
+reference. The zero-translation orientation legs use the taught bottom-middle
+frame's orientation axes while the flange is at the generated center. Relative
+motions use 60% of the requested Cartesian speed, clamped to 8–30 mm/s, plus
+3% relative joint velocity, acceleration, and jerk limits. The initial
+bottom-middle PTP uses 8% relative joint velocity and the same 3%
 acceleration/jerk limits. Every leg has a 1.5-second dwell followed by three
 settled pose samples. These are motion-quality settings, not safety-rated
 limits.
@@ -118,21 +132,26 @@ completed.
   application or automatic-background-task metadata.
 - Register `PoseTestBotPoseStreamTask` as the one automatic cyclic provider of
   `PoseTestBotPoseStreamFunction`, then compile all five Java sources.
-- Read back the exact parent and bottom-middle paths and the taught frame's
-  XYZABC/joint branch. Confirm local +Z points from the taught minimum-Z target
-  position toward the generated center and available workspace. Confirm the
-  target is rigidly mounted and its attachment does not change during the
-  recording.
+- Read back the exact parent and bottom-middle paths, the parent
+  `PoseTemplateBase` axes, and the taught frame's XYZABC/joint branch. Confirm
+  the taught flange position is the lowest allowed parent-frame Z, parent -X
+  and +X are the intended left/right grid directions, and parent +Z leads from
+  the bottom row to the middle and top rows. The taught child frame's local
+  axes do not define grid translation. Confirm the target is rigidly mounted
+  and its attachment does not change during the recording.
 - Before START, manually position the flange within 25 mm of the taught
   bottom-middle frame.
   The program rejects a farther start without moving, but that proximity check
   does not prove the initial PTP joint-space path is collision-free.
-- Simulate the bottom-to-center `LIN_REL`, every PTP and other `LIN_REL`
-  endpoint, and every swept path. Confirm no generated endpoint crosses below
-  local Z = 0. Check reachability, joint/redundancy branch, singularity margin,
-  fixtures, the complete mounted target, arm, and cable clearance—not only the
-  flange-origin envelope.
-- Verify all grid/depth/orientation results keep the complete target detectable
+- Simulate every PTP and `LIN_REL` endpoint and swept path. Verify the
+  complete generated route keeps
+  `PoseTemplateBase.Z >= CalibrationStaticBottomMiddle.Z`; pay particular
+  attention to the initial PTP because a Cartesian endpoint contract does not
+  constrain its joint-space swept path. Recommission the direct grid legs and
+  20° negative-to-positive orientation legs. Check reachability,
+  joint/redundancy branch, singularity margin, fixtures, the complete mounted
+  target, arm, and cable clearance—not only the flange-origin envelope.
+- Verify all grid/orientation results keep the complete target detectable
   with useful image coverage in every selected static camera.
 - With explicit operator authorization, single-step the entire sequence in T1
   at reduced pendant override before a supervised capture. Do not infer

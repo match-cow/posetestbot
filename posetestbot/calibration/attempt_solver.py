@@ -60,6 +60,9 @@ DEFAULT_MIN_PNP_SUPPORTED_MARKERS = 4
 DEFAULT_MIN_PNP_SUPPORTED_CORNERS_PER_MARKER = 3
 DEFAULT_MIN_PNP_GRID_ROWS = 2
 DEFAULT_MIN_PNP_GRID_COLUMNS = 2
+DEFAULT_MIN_PNP_CLUTTER_SUPPORTED_MARKERS = 8
+DEFAULT_MIN_PNP_CLUTTER_GRID_ROWS = 3
+DEFAULT_MIN_PNP_CLUTTER_GRID_COLUMNS = 3
 DEFAULT_MIN_ROTATION_AXIS_ANGLE_DEG = 2.0
 DEFAULT_MIN_ROTATION_AXIS_SINGULAR_RATIO = 0.15
 DEFAULT_MAX_OBSERVATIONS_PER_MOTION = 5
@@ -67,6 +70,9 @@ DEFAULT_IMAGE_COVERAGE_TAIL_SUPPORT_VIEWS = 5
 DEFAULT_MIN_IMAGE_CENTROID_X_SPAN_RATIO = 0.45
 DEFAULT_MIN_IMAGE_CENTROID_Y_SPAN_RATIO = 0.35
 DEFAULT_MIN_IMAGE_CENTROID_HULL_AREA_RATIO = 0.10
+DEFAULT_STATIC_MIN_IMAGE_CENTROID_X_SPAN_RATIO = 0.15
+DEFAULT_STATIC_MIN_IMAGE_CENTROID_Y_SPAN_RATIO = 0.20
+DEFAULT_STATIC_MIN_IMAGE_CENTROID_HULL_AREA_RATIO = 0.03
 
 
 def _finite_transform(value: np.ndarray) -> bool:
@@ -288,6 +294,11 @@ def solve_planar_pnp_candidates(
     ),
     min_grid_rows: int = DEFAULT_MIN_PNP_GRID_ROWS,
     min_grid_columns: int = DEFAULT_MIN_PNP_GRID_COLUMNS,
+    min_clutter_supported_markers: int = (
+        DEFAULT_MIN_PNP_CLUTTER_SUPPORTED_MARKERS
+    ),
+    min_clutter_grid_rows: int = DEFAULT_MIN_PNP_CLUTTER_GRID_ROWS,
+    min_clutter_grid_columns: int = DEFAULT_MIN_PNP_CLUTTER_GRID_COLUMNS,
 ) -> dict[str, Any]:
     """Compare supported planar PnP algorithms with one robust point mask."""
 
@@ -322,18 +333,46 @@ def solve_planar_pnp_candidates(
             raise ValueError("PnP marker support thresholds must be positive")
         if min_grid_rows < 1 or min_grid_columns < 1:
             raise ValueError("PnP grid span thresholds must be positive")
+        if (
+            min_clutter_supported_markers < min_supported_markers
+            or min_clutter_grid_rows < min_grid_rows
+            or min_clutter_grid_columns < min_grid_columns
+        ):
+            raise ValueError(
+                "PnP clutter-consensus thresholds must be no weaker than the "
+                "ordinary spatial-support thresholds"
+            )
     common_indices = _common_pnp_inliers(
         object_array, image_array, matrix, distortion_array
     )
-    common_inlier_ratio = float(len(common_indices) / len(object_array))
+    raw_common_inlier_ratio = float(len(common_indices) / len(object_array))
     supported_marker_ids: list[int] = []
     supported_grid_rows: list[int] = []
     supported_grid_columns: list[int] = []
     marker_corner_counts: dict[str, int] = {}
     spatial_support_available = marker_ids is not None and grid_indices is not None
+    marker_detection_counts: dict[str, int] = {}
+    duplicate_marker_ids: list[int] = []
+    unique_marker_correspondence_capacity = len(object_array)
+    duplicate_marker_clutter = False
     if spatial_support_available:
         assert marker_ids is not None
         assert grid_indices is not None
+        marker_point_counts = {
+            marker_id: int(np.count_nonzero(marker_ids == marker_id))
+            for marker_id in sorted({int(value) for value in marker_ids})
+        }
+        if any(count % 4 != 0 for count in marker_point_counts.values()):
+            raise ValueError("PnP marker metadata does not contain four-corner detections")
+        marker_detection_counts = {
+            str(marker_id): count // 4
+            for marker_id, count in marker_point_counts.items()
+        }
+        duplicate_marker_ids = [
+            marker_id for marker_id, count in marker_point_counts.items() if count > 4
+        ]
+        duplicate_marker_clutter = bool(duplicate_marker_ids)
+        unique_marker_correspondence_capacity = 4 * len(marker_point_counts)
         for marker_id in sorted({int(value) for value in marker_ids[common_indices]}):
             count = int(np.count_nonzero(marker_ids[common_indices] == marker_id))
             marker_corner_counts[str(marker_id)] = count
@@ -351,10 +390,46 @@ def solve_planar_pnp_candidates(
         and len(supported_grid_rows) >= min_grid_rows
         and len(supported_grid_columns) >= min_grid_columns
     )
+    clutter_consensus_support_ok = not duplicate_marker_clutter or (
+        len(supported_marker_ids) >= min_clutter_supported_markers
+        and len(supported_grid_rows) >= min_clutter_grid_rows
+        and len(supported_grid_columns) >= min_clutter_grid_columns
+    )
+    common_inlier_ratio_basis = (
+        "unique_marker_correspondence_capacity"
+        if duplicate_marker_clutter
+        else "all_detected_correspondences"
+    )
+    common_inlier_ratio = float(
+        min(
+            1.0,
+            len(common_indices)
+            / max(1, unique_marker_correspondence_capacity),
+        )
+        if duplicate_marker_clutter
+        else raw_common_inlier_ratio
+    )
+    consensus_image_centroid_px = np.mean(
+        image_array[common_indices], axis=0
+    ).astype(float).tolist()
     support_evidence = {
         "correspondence_count": int(len(object_array)),
         "common_inlier_count": int(len(common_indices)),
         "common_inlier_ratio": common_inlier_ratio,
+        "raw_common_inlier_ratio": raw_common_inlier_ratio,
+        "common_inlier_ratio_basis": common_inlier_ratio_basis,
+        "unique_marker_correspondence_capacity": int(
+            unique_marker_correspondence_capacity
+        ),
+        "duplicate_marker_clutter_filtered": duplicate_marker_clutter,
+        "duplicate_marker_ids": duplicate_marker_ids,
+        "marker_detection_counts": marker_detection_counts,
+        "ignored_clutter_correspondence_count": (
+            int(len(object_array) - len(common_indices))
+            if duplicate_marker_clutter
+            else 0
+        ),
+        "consensus_image_centroid_px": consensus_image_centroid_px,
         "spatial_support_available": spatial_support_available,
         "supported_marker_ids": supported_marker_ids,
         "supported_marker_count": len(supported_marker_ids),
@@ -371,19 +446,25 @@ def solve_planar_pnp_candidates(
             "min_supported_corners_per_marker": int(min_supported_corners_per_marker),
             "min_grid_rows": int(min_grid_rows),
             "min_grid_columns": int(min_grid_columns),
+            "min_clutter_supported_markers": int(min_clutter_supported_markers),
+            "min_clutter_grid_rows": int(min_clutter_grid_rows),
+            "min_clutter_grid_columns": int(min_clutter_grid_columns),
         },
     }
     if (
         len(common_indices) < min_common_inliers
         or common_inlier_ratio < min_common_inlier_ratio
         or not spatial_support_ok
+        or not clutter_consensus_support_ok
     ):
-        reason = (
-            "insufficient_common_pnp_support"
-            if len(common_indices) < min_common_inliers
-            or common_inlier_ratio < min_common_inlier_ratio
-            else "insufficient_spatial_pnp_support"
-        )
+        if not clutter_consensus_support_ok:
+            reason = "insufficient_duplicate_marker_clutter_consensus"
+        elif len(common_indices) < min_common_inliers or (
+            common_inlier_ratio < min_common_inlier_ratio
+        ):
+            reason = "insufficient_common_pnp_support"
+        else:
+            reason = "insufficient_spatial_pnp_support"
         return {
             "common_inlier_indices": common_indices.astype(int).tolist(),
             **support_evidence,
@@ -456,6 +537,14 @@ def solve_planar_pnp_candidates(
                 )
                 if not np.all(np.isfinite(errors)):
                     raise ValueError("non-finite reprojection errors")
+                quality_indices = (
+                    common_indices
+                    if duplicate_marker_clutter
+                    else np.arange(len(object_array), dtype=np.int64)
+                )
+                quality_mean_reprojection_error_px = float(
+                    np.mean(errors[quality_indices])
+                )
                 item = {
                     "method": method,
                     "hypothesis": hypothesis_index,
@@ -469,6 +558,20 @@ def solve_planar_pnp_candidates(
                     "max_reprojection_error_px": float(np.max(errors[common_indices])),
                     "all_point_mean_reprojection_error_px": float(np.mean(errors)),
                     "all_point_max_reprojection_error_px": float(np.max(errors)),
+                    "quality_reprojection_scope": (
+                        "homography_consensus_target_instance"
+                        if duplicate_marker_clutter
+                        else "all_detected_correspondences"
+                    ),
+                    "quality_mean_reprojection_error_px": (
+                        quality_mean_reprojection_error_px
+                    ),
+                    "duplicate_marker_clutter_filtered": (
+                        duplicate_marker_clutter
+                    ),
+                    "ignored_clutter_correspondence_count": support_evidence[
+                        "ignored_clutter_correspondence_count"
+                    ],
                     "transform": transform_record(
                         pose,
                         from_frame="aruco_grid",
@@ -477,7 +580,7 @@ def solve_planar_pnp_candidates(
                 }
                 item["quality_status"] = (
                     "accepted"
-                    if item["all_point_mean_reprojection_error_px"]
+                    if quality_mean_reprojection_error_px
                     <= max_all_point_mean_error_px
                     else "rejected"
                 )
@@ -502,7 +605,17 @@ def solve_planar_pnp_candidates(
                 failures.append(
                     {
                         "method": method,
-                        "reason": "whole_board_reprojection_error",
+                        "reason": (
+                            "target_instance_consensus_reprojection_error"
+                            if duplicate_marker_clutter
+                            else "whole_board_reprojection_error"
+                        ),
+                        "quality_reprojection_scope": best[
+                            "quality_reprojection_scope"
+                        ],
+                        "quality_mean_reprojection_error_px": best[
+                            "quality_mean_reprojection_error_px"
+                        ],
                         "all_point_mean_reprojection_error_px": best[
                             "all_point_mean_reprojection_error_px"
                         ],
@@ -1262,6 +1375,14 @@ def evaluate_extrinsic_candidate(
             float(item.get("mean_reprojection_error_px", 0.0))
             for item in input_observations
         ]
+        clutter_filtered_view_count = sum(
+            bool(item.get("pnp_duplicate_marker_clutter_filtered"))
+            for item in input_observations
+        )
+        ignored_clutter_correspondence_count = sum(
+            int(item.get("pnp_ignored_clutter_correspondence_count", 0))
+            for item in input_observations
+        )
         passing = (
             solver_inlier_count >= min_inliers
             and held_out_summary["mean_translation_mm"] <= max_mean_translation_mm
@@ -1295,6 +1416,34 @@ def evaluate_extrinsic_candidate(
                 "actual": len(accepted_views),
                 "threshold": min_accepted_views,
             },
+            *(
+                [
+                    {
+                        "name": "duplicate_marker_clutter_filtered",
+                        "status": "warning",
+                        "actual": {
+                            "affected_view_count": clutter_filtered_view_count,
+                            "accepted_view_count": len(accepted_views),
+                            "ignored_correspondence_count": (
+                                ignored_clutter_correspondence_count
+                            ),
+                        },
+                        "threshold": {
+                            "minimum_supported_markers_per_affected_view": (
+                                DEFAULT_MIN_PNP_CLUTTER_SUPPORTED_MARKERS
+                            ),
+                            "minimum_grid_rows_per_affected_view": (
+                                DEFAULT_MIN_PNP_CLUTTER_GRID_ROWS
+                            ),
+                            "minimum_grid_columns_per_affected_view": (
+                                DEFAULT_MIN_PNP_CLUTTER_GRID_COLUMNS
+                            ),
+                        },
+                    }
+                ]
+                if clutter_filtered_view_count
+                else []
+            ),
             {
                 "name": "image_centroid_coverage",
                 "status": (

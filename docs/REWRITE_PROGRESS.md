@@ -43,6 +43,174 @@ The code rewrite is implemented across:
 - the packaged React operator console, managed jobs/services, and scoped Flask
   APIs.
 
+## 2026-08-18 Complete Static-Calibration Change Review
+
+A complete cross-layer review covered the corrected parent-frame X/Z Sunrise
+route and its commissioning docs, mounting-aware field-coverage thresholds,
+duplicate-ID multi-grid consensus, v5 recorded-timing fallback, calibration
+promotion, RealSense duplicate-color handling, run-folder cleanup, managed
+console restart controls, and the rebuilt operator UI. Retained evidence from
+static attempts `d70cfd359c2e4661a336e4cdaadcabe8` and
+`8e88c57af23444de8d531672bce9b93f` was re-read without mutation; both still
+satisfy their recorded current contracts and remain deliberately unpromoted.
+
+The review found and fixed three concrete consistency defects. Promotion of a
+v5 degraded timing fallback now recalculates its saved leave-one-motion-out
+residual improvements, method summaries, significance correction, statuses,
+candidate/synchronizer sign relationship, and authoritative quality-report
+warning bindings instead of trusting warning labels. RealSense duplicate-color
+skips now keep preview Q/Escape handling reachable even if a stream repeatedly
+reuses the same aligned color frame. Operator documentation now consistently
+describes the parent `PoseTemplateBase` X/Z route, mode-specific coverage, v5
+fallback limits, and the distinct failed-discovery versus successful-replay
+attempt IDs.
+
+Validation passed 714 default non-Playwright tests, all 20 desktop Playwright
+tests, Ruff on the affected Python modules and tests, frontend TypeScript build
+and ESLint, the production Vite build, the non-mutating installer check, real
+retained-artifact promotion revalidation, and `git diff --check`. The build
+retains Vite's advisory large-chunk warning for the existing PLY loader. No
+camera or robot command was executed, no raw evidence was changed, and no
+calibration result was promoted.
+
+## 2026-08-17 Managed Console Restart Controls
+
+The persistent top-right console header now exposes one explicit **Restart**
+dialog with Frontend, Backend, and Both actions. Frontend restart reloads only
+the current browser tab. Backend restart derives its fixed unit name from the
+serving process's own Linux systemd control group; its strict JSON endpoint
+cannot accept a browser-provided unit name, checks that the exact user-systemd
+unit is loaded, active, and owns the serving process, and schedules restart
+after returning HTTP 202. An optional environment override supports unusual
+managed layouts but is not required for the standard service. The browser
+waits for the backend instance identity to change before reporting
+reconnection or reloading for the combined action.
+
+Backend actions require a visible interruption acknowledgement and report the
+current count of active process-owned local jobs. The dialog explains that
+captures, previews, and local jobs stop during graceful backend shutdown while
+durable remote cluster jobs remain independent. The deployed web-service
+process cgroup owns the fixed service-unit identity; unmanaged Flask/Vite
+development sessions fail closed for backend restart while retaining frontend
+reload.
+
+Live verification covered the already-installed standard user service, whose
+unit intentionally has no restart-specific environment setting. After a
+zero-active-job controlled restart, the backend derived
+`posetestbot-web.service`, matched its new systemd `MainPID`, and advertised
+managed restart as available with no blockers.
+
+Validation passed 17 focused Flask/runtime/UI tests, frontend type checking and
+lint, the production Vite build, the focused 1920 × 1080 Playwright regression,
+Ruff on the affected Python files, and `git diff --check`. No camera or robot
+command was executed.
+
+## 2026-08-17 Research-Stage Static Calibration Tolerance
+
+Static-camera (`eye_to_hand`) extrinsic attempts now use research-stage field
+coverage minima of 15% image width, 20% image height, and 3% supported
+centroid-hull area, with the existing five-view tail support. Robot-mounted
+camera attempts retain the established 45% / 35% / 10% minima. The measured
+19.6% / 26.4% / 4.72% coverage from static attempt
+`980574a9dd524ee2b1997dea6b87c0d3` therefore clears the revised static gate
+while remaining explicit evidence for later review.
+
+Current Auto time alignment still applies an inferred offset only when its
+motion-disjoint and leave-one-motion-out evidence is strong and consistent.
+When a completed search is weak, ambiguous, inconsistent, or boundary-limited,
+it now keeps the recorded 0 ms pairing, converts the failed identification
+checks into prominent warnings, and continues to robot-camera geometry
+validation. Missing, corrupt, or unevaluable timestamp/robot-pose input remains
+blocking. This is revision
+`constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5`; prior attempts
+remain immutable inspection evidence.
+
+Fresh derived-only replay `d70cfd359c2e4661a336e4cdaadcabe8` on the same
+preserved recording completed with one passing `IPPE + Park` recommendation.
+It retained 0 ms after recording the weak +30 ms candidate as a degraded
+warning, accepted all 539 observations, and reported 1.492 mm / 0.818° mean
+held-out residual with 0.768 px mean reprojection error. Its measured 19.60% /
+26.42% / 4.72% field coverage passed the recorded 15% / 20% / 3% static
+thresholds. The result remains unpromoted and awaits operator review.
+
+Static replay `4fb4e50240ec425682ae6e22fe0b869a` exposed a separate
+target-detection defect: every image also contained other printed grids that
+reused marker IDs. The old whole-image inlier ratio rejected all 743 frames
+even though one coherent target instance retained 12–20 markers with
+subpixel-level fit. Planar PnP now recognizes duplicate-ID multi-grid clutter,
+requires the retained instance to span at least 8 markers, 3 rows, and 3
+columns, measures pose quality and centroid coverage only on that consensus,
+and retains the discarded correspondences as a prominent warning. Weak target
+fragments remain blocking. Optional OpenCV intrinsic comparison remains
+non-blocking when a compatible factory lens model is selected.
+
+The new immutable fixed-zero replay
+`8e88c57af23444de8d531672bce9b93f` completed with a passing
+`IPPE + Shah` recommendation: 743/743 accepted observations, 0.859 px mean
+retained-grid reprojection error, 0.940 mm / 0.672° mean held-out residual, and
+25.03% / 22.59% / 5.39% supported field coverage. It explicitly recorded and
+applied a 0 ms robot-pose offset. All 743 views record duplicate-grid filtering
+and 49,905 ignored off-instance corner correspondences as reviewable warning
+evidence. The result remains unpromoted and awaits operator review.
+
+Validation passed all 700 default non-Playwright tests, five focused desktop
+Playwright calibration regressions, the production frontend build, Ruff on the
+affected Python modules/tests, promotion revalidation of the real fallback
+artifact, and `git diff --check`. No camera or robot command was executed.
+
+The duplicate-grid follow-up additionally passed 48 focused calibration tests,
+two desktop Playwright regressions, the production frontend build, Ruff on the
+affected Python files, and `git diff --check`. Its replay used preserved raw
+evidence only; no camera or robot command was executed.
+
+## 2026-08-17 RealSense Repeated-Frame Capture Hardening
+
+RealSense alignment may emit a new depth frameset while reusing the preceding
+color frame. Because the color timestamp names the authoritative aligned RGB-D
+pair, that SDK behavior previously reached the no-overwrite guard and aborted
+an otherwise active supervised capture. The adapter now skips repeated color
+frame identities and timestamp-derived filename stems, waits for the next
+unique color observation, and reports the skipped count in its capture summary.
+The writer still refuses any genuine overwrite of pre-existing raw evidence.
+
+The final calibration-analysis view now derives the recorded physical
+arrangement from the run-owned camera configuration, independently of whether
+captured RGB-D, timestamp, and robot-pose evidence is data-ready. A failed or
+incomplete capture therefore reports its missing evidence without falsely
+claiming that Workflow step 1 has no configured camera group.
+
+Validation passed all 698 default non-Playwright tests, the focused desktop
+Playwright camera-arrangement regression, the production frontend build, and
+`git diff --check`. No camera or robot command was executed.
+
+## 2026-08-17 Corrected Bottom-Middle X/Z Calibration Grid
+
+The single-frame static-camera candidate now implements
+`CalibrationStaticBottomMiddle` as the name specifies: it is the bottom-center
+point of the 3 × 3 grid and the lowest permitted flange Z in the
+`PoseTemplateBase` coordinate system. The previous candidate incorrectly used
+the child frame's local axes for an X/Y grid plus a depth phase. That
+interpretation could move in the wrong physical directions and did not encode
+the required parent-frame minimum-Z contract.
+
+The application now resolves `PoseTemplateBase` explicitly and uses its X/Z
+axes for every generated translation. X supplies -65/0/+65 mm columns, Y stays
+fixed, and bottom-relative Z supplies 0/+50/+100 mm rows. Starting at the taught
+bottom-middle point, the ordered grid route visits every other grid point once
+and ends at the generated center before each A/B/C
+`center → minus → plus → center` orientation sweep. The separate depth phase
+and redundant final PTP confirmation are removed. Endpoint guards reject any
+negative bottom-relative Z; relative legs remain below 100 mm and all grid
+points remain within 125 mm of the taught point.
+
+These corrected paths remain an uncommissioned source candidate and require
+Workbench simulation plus supervised T1 recommissioning. Repository work did
+not command the robot or open a camera.
+
+Validation passed all 27 IIWA source/teaching contracts and the complete
+default non-hardware suite at 696 passed / 18 deselected, plus Ruff on the
+affected source-contract tests and `git diff --check`.
+
 ## 2026-08-17 Durable User-Service Worker Resolution
 
 Queued `uv run` workers now resolve the supported per-user uv installation even
@@ -128,28 +296,13 @@ are vertically centered inside the 72 px desktop top bar; Playwright asserts
 equal control heights and equal top/bottom spacing at the normal desktop
 viewport.
 
-## 2026-08-06 Bottom-Anchored Single-Frame Static Calibration
+## 2026-08-06 Superseded Bottom-Anchor Interpretation
 
-The single-frame Sunrise calibration source now resolves only
-`/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle`. It treats that
-taught frame as the minimum local-Z flange endpoint, moves +50 mm to a generated
-pattern center, and retains the ±65 mm X/Y grid, ±50 mm depth results, and ±10°
-A/B/C swivel results around that center. The flange endpoints therefore occupy
-local Z = 0…100 mm instead of extending below the taught anchor. A final -50 mm
-`LIN_REL` returns to the bottom before a short absolute PTP confirmation.
-
-Initialization and per-point guards bind the center offset to the depth
-half-span, reject an endpoint below local Z = 0, retain the 100 mm
-center-relative translation limit, and enforce a separate 110 mm radius around
-the taught bottom-middle frame. The operator contract explicitly requires the
-taught +Z axis to point toward the available workspace; repository checks do
-not establish that physical alignment or replace Workbench simulation and T1
-commissioning.
-
-Validation passed all 27 IIWA source/teaching contracts and the complete
-default non-hardware suite at 692 passed / 17 deselected, plus Ruff on the
-affected tests and `git diff --check`. No camera or robot was opened or
-commanded.
+This dated implementation introduced
+`/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle` but incorrectly
+treated the taught child frame's local Z as a depth anchor for an X/Y grid.
+That route is superseded by the corrected 2026-08-17 parent-frame X/Z contract
+above and must not be commissioned.
 
 ## 2026-08-04 Research Simplification
 
@@ -237,18 +390,14 @@ The repository Sunrise sources now use role-specific Java names:
 application/background-task metadata and any deployed controller selection
 must be updated and recorded independently.
 
-The new static-camera alternative requires one additional taught frame at
+The new static-camera alternative required one additional taught frame at
 `/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle`. After an accepted
-START it PTP-anchors there, moves 50 mm in local +Z to a generated pattern
-center, visits the eight non-center points of a 3 x 3 relative grid with ±65 mm
-center-frame X/Y axes, adds independent ±50 mm depth and ±10° A/B/C dithers,
-performs every swivel at that generated center, and returns to the absolute
-taught bottom-middle anchor with a -50 mm `LIN_REL` and final PTP confirmation
-before sending the terminal marker. The generated pattern spans local
-Z = 0…100 mm, individual relative translations remain inside the 100 mm center
-limit, and all endpoints remain inside a separate 110 mm taught-anchor limit.
-Before the initial PTP, a read-only pose check rejects START unless the flange
-is already within 25 mm of the taught anchor.
+START it anchored there and generated the other motions. Its original
+center-relative X/Y/depth interpretation was later found not to match the
+bottom-center grid meaning and is superseded by the 2026-08-17
+`PoseTemplateBase` X/Z route. Before the initial PTP, the retained read-only
+pose check rejects START unless the flange is already within 25 mm of the
+taught point.
 
 All motion applications now start by resolving their shared pose-stream
 provider and waiting without robot motion for an accepted UDP START. The former
@@ -1041,9 +1190,11 @@ grid at 0.05. Per-fold materiality remains recorded as a warning rather than
 allowing one arbitrary three-fold partition to veto stronger motion-level
 evidence. Promotion recalculates the saved per-motion improvements, medians,
 sign probability, and search correction instead of trusting saved `ok` labels.
-The current fail-closed revision retains that strong-evidence path and rejects
-weak, ambiguous, inconsistent, boundary, or unevaluable search evidence. An
-automatic 0 ms result is accepted only when all required folds identify zero.
+The current research-stage revision retains that strong-evidence path for
+applying a nonzero offset. A completed but weak, ambiguous, inconsistent, or
+boundary-limited search keeps recorded 0 ms with degraded warning evidence;
+missing, corrupt, or unevaluable input still blocks. An automatic 0 ms result
+is identified without degradation only when all required folds support zero.
 Earlier attempts retain their immutable evidence for inspection only; they
 cannot be replayed or promoted.
 
@@ -1070,13 +1221,15 @@ recommended profiles were explicitly promoted with saved sync deltas -70 ms,
 `calibration.v2`, all three profiles are valid, and
 `rewrite_calibration_validation.v1` is ready at 3/3.
 
-Extrinsic image-coverage acceptance is now partition-independent. It requires
-five-view-supported normalized centroid spans of at least 45% x and 35% y plus
-at least 10% supported convex-hull area. The 3 × 3 cell count remains visible
-as a diagnostic warning and remains the separate manual-intrinsic gate. This
-allowed the real `033422071805` evidence to be judged by its measured 53.1% /
-43.3% spans and 13.25% hull area instead of failing solely because those views
-landed in five arbitrary cells.
+Extrinsic image-coverage acceptance is partition-independent. Eye-in-hand
+attempts require five-view-supported normalized centroid spans of at least 45%
+x and 35% y plus at least 10% supported convex-hull area. Research-stage static
+eye-to-hand attempts use 15% / 20% / 3%; the actual mode-specific thresholds
+are recorded in ranking evidence. The 3 × 3 cell count remains visible as a
+diagnostic warning and remains the separate manual-intrinsic gate. The strict
+eye-in-hand policy allowed the real `033422071805` evidence to be judged by its
+measured 53.1% / 43.3% spans and 13.25% hull area instead of failing solely
+because those views landed in five arbitrary cells.
 
 Object-dataset synchronization now applies the exact per-camera timing from the
 selected run-owned calibration snapshot and rejects overrides. Sync quality,

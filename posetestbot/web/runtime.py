@@ -10,6 +10,7 @@ import os
 import re
 import stat
 import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ CLUSTER_SHARED_ENV_NAMES = {
     "POSETESTBOT_CLUSTER_HOST",
     "POSETESTBOT_CLUSTER_PORT",
 }
+SYSTEMD_SERVICE_UNIT_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,128}\.service$")
 
 
 def _env_bool(name: str, *, default: bool = False) -> bool:
@@ -34,6 +36,25 @@ def _env_bool(name: str, *, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _current_systemd_service_unit(
+    cgroup_path: Path = Path("/proc/self/cgroup"),
+) -> str | None:
+    """Return the systemd service that owns this process, when directly managed."""
+
+    try:
+        lines = cgroup_path.read_text().splitlines()
+    except (OSError, UnicodeError):
+        return None
+    for line in lines:
+        fields = line.split(":", 2)
+        if len(fields) != 3:
+            continue
+        component = fields[2].rstrip("/").rsplit("/", 1)[-1]
+        if SYSTEMD_SERVICE_UNIT_RE.fullmatch(component) is not None:
+            return component
+    return None
 
 
 def _cluster_env_file(path_value: str | None) -> tuple[Path | None, dict[str, str]]:
@@ -96,6 +117,7 @@ class WebSettings:
     cluster_enabled: bool = False
     cluster_env_file: Path | None = None
     cluster_service_unit: str | None = None
+    web_service_unit: str | None = None
 
     @classmethod
     def from_environment(cls) -> WebSettings:
@@ -127,6 +149,10 @@ class WebSettings:
             cluster_service_unit=(
                 os.environ.get("POSETESTBOT_CLUSTER_SERVICE_UNIT") or None
             ),
+            web_service_unit=(
+                os.environ.get("POSETESTBOT_WEB_SERVICE_UNIT")
+                or _current_systemd_service_unit()
+            ),
         )
 
 
@@ -136,6 +162,12 @@ class WebRuntime:
     job_runner: LocalJobRunner
     cluster_client: Any | None = None
     cluster_service_manager: Any | None = None
+    web_service_manager: Any | None = None
+    instance_id: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.instance_id:
+            self.instance_id = uuid.uuid4().hex
 
 
 _default_runtime: WebRuntime | None = None
@@ -163,11 +195,19 @@ def create_web_runtime(
         cluster_service_manager = SystemdUserServiceManager(
             selected_settings.cluster_service_unit
         )
+    web_service_manager = None
+    if selected_settings.web_service_unit:
+        from posetestbot.web.web_service import WebServiceRestartManager
+
+        web_service_manager = WebServiceRestartManager(
+            selected_settings.web_service_unit
+        )
     return WebRuntime(
         settings=selected_settings,
         job_runner=job_runner or LocalJobRunner(selected_settings.job_root),
         cluster_client=cluster_client,
         cluster_service_manager=cluster_service_manager,
+        web_service_manager=web_service_manager,
     )
 
 

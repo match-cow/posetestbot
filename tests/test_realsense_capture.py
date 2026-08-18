@@ -238,6 +238,7 @@ def test_capture_realsense_rgbd_writes_frames_without_preview(tmp_path) -> None:
     assert summary["sensor_id"] == "825412070181"
     assert summary["product_line"] == "D400"
     assert summary["frame_count"] == 2
+    assert summary["skipped_duplicate_color_frame_count"] == 0
     assert summary["preview"] is False
     assert preview.imshow_calls == 0
     assert fake_rs.pipeline_instance.stopped is True
@@ -259,6 +260,93 @@ def test_capture_realsense_rgbd_writes_frames_without_preview(tmp_path) -> None:
     assert records[0]["sensor_id"] == "825412070181"
     assert records[0]["inverted"] is False
     assert records[0]["image_rotation_degrees"] == 0
+
+
+def test_capture_realsense_rgbd_skips_reused_aligned_color_frame(
+    tmp_path,
+) -> None:
+    class RepeatedColorFrames(FakeFrames):
+        def __init__(self, depth_index: int, color_index: int):
+            super().__init__(depth_index)
+            self.color_index = color_index
+
+        def get_color_frame(self):
+            return FakeFrame(self.color_index, color=True)
+
+    class RepeatedColorPipeline(FakePipeline):
+        def wait_for_frames(self):
+            self.index += 1
+            color_index = 1 if self.index <= 2 else 2
+            return RepeatedColorFrames(self.index, color_index)
+
+    class RepeatedColorRS(FakeRS):
+        def pipeline(self):
+            self.pipeline_instance = RepeatedColorPipeline(self.device)
+            return self.pipeline_instance
+
+    fake_rs = RepeatedColorRS("233522079721")
+    summary = capture_realsense_rgbd(
+        tmp_path,
+        device_id="233522079721",
+        fps=6,
+        max_frames=2,
+        rs_module=fake_rs,
+    )
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / FRAME_METADATA_JSONL).read_text().splitlines()
+    ]
+    assert summary["status"] == "succeeded"
+    assert summary["frame_count"] == 2
+    assert summary["skipped_duplicate_color_frame_count"] == 1
+    assert fake_rs.pipeline_instance.index == 3
+    assert [record["frame_index"] for record in records] == [0, 1]
+    assert [record["color_frame_number"] for record in records] == [1, 2]
+    assert [record["depth_frame_number"] for record in records] == [1, 3]
+    assert [record["frame_id"] for record in records] == ["10.png", "20.png"]
+
+
+def test_capture_realsense_rgbd_duplicate_keeps_preview_stop_reachable(
+    tmp_path,
+) -> None:
+    class RepeatedColorFrames(FakeFrames):
+        def get_color_frame(self):
+            return FakeFrame(1, color=True)
+
+    class RepeatedColorPipeline(FakePipeline):
+        def wait_for_frames(self):
+            self.index += 1
+            return RepeatedColorFrames(self.index)
+
+    class RepeatedColorRS(FakeRS):
+        def pipeline(self):
+            self.pipeline_instance = RepeatedColorPipeline(self.device)
+            return self.pipeline_instance
+
+    class QuitOnDuplicatePreview(PreviewSpy):
+        def waitKey(self, *_args):
+            self.wait_key_calls += 1
+            return ord("q") if self.wait_key_calls == 2 else -1
+
+    fake_rs = RepeatedColorRS("233522079721")
+    preview = QuitOnDuplicatePreview()
+    summary = capture_realsense_rgbd(
+        tmp_path,
+        device_id="233522079721",
+        fps=6,
+        max_frames=2,
+        preview=True,
+        rs_module=fake_rs,
+        cv2_module=preview,
+    )
+
+    assert summary["frame_count"] == 1
+    assert summary["skipped_duplicate_color_frame_count"] == 1
+    assert fake_rs.pipeline_instance.index == 2
+    assert preview.imshow_calls == 2
+    assert preview.wait_key_calls == 2
+    assert preview.destroy_calls == 1
 
 
 def test_host_received_timestamp_is_sampled_before_alignment(

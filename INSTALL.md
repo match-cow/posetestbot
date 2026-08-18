@@ -396,6 +396,22 @@ Do not attach a source-file watcher to the production service: a restart can
 interrupt process-owned local jobs and must happen at an intentional deploy
 boundary.
 
+When PoseTestBot runs directly as a user-systemd service, it derives the fixed
+unit name from its own Linux control group. This enables the top-right
+**Restart** dialog to ask user-systemd to restart that exact backend after
+explicit interruption acknowledgement; the browser cannot name another unit
+or supply scheduler arguments, and the unit's main PID must match the serving
+backend process. `POSETESTBOT_WEB_SERVICE_UNIT` remains an optional explicit
+override for unusual managed layouts, not a required deployment setting.
+**Frontend only** always reloads
+the current browser tab without touching backend work. **Backend** keeps the
+loaded browser bundle and waits for a new backend-instance identity, while
+**Both** reloads the tab after that identity changes. Backend restart stops
+process-owned local jobs, captures, and previews during graceful service
+shutdown; independently durable remote cluster jobs continue. A direct
+`uv run posetestbot-web` or Vite development launch intentionally reports
+backend restart as unavailable because it is not owned by a managed service.
+
 In the console, the fixed **Cluster controller** card is in the Dashboard's
 first readiness row. **Start** launches the configured companion; **Cluster
 storage** opens the archive/restore panel directly below the **Run folders**
@@ -517,9 +533,10 @@ and its objects. `/PoseTestBot/TemplateBase` remains only the parent of the
 nine-frame calibration application's taught motion waypoints; it is not the
 pose-stream reference or static-calibration result frame. The single-frame
 static-camera alternative instead teaches
-`/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle`, moves 50 mm in
-its local +Z direction to the generated center, and keeps the calibration
-pattern at or above that taught bottom anchor. See
+`/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle` as the
+bottom-center grid point, then generates the other points in the parent
+`PoseTemplateBase` X/Z axes. Its center is 50 mm above the taught point in
+parent-frame Z, and no generated point falls below that bottom anchor. See
 [the controller contract](docs/IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md).
 The same setting is available from the CLI:
 
@@ -695,8 +712,10 @@ bun run build
 ```
 
 Run the Flask server in another terminal when using `bun run dev`; Vite proxies
-the existing API routes to `127.0.0.1:5000`. Never point browser tests at lab
-hardware: use the mocked Playwright fixtures.
+the existing API routes, including `/system/lifecycle`, to `127.0.0.1:5000`.
+The frontend-only action remains usable in this mode; backend restart remains
+disabled unless Flask is running as the configured user-systemd unit. Never
+point browser tests at lab hardware: use the mocked Playwright fixtures.
 
 ## Real Robot Profile
 

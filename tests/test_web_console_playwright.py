@@ -117,6 +117,31 @@ def run_config(*, plan_only: bool = True, sensors: list[dict] | None = None) -> 
     }
 
 
+def eye_in_hand_calibration_config(*, include_oak: bool = False) -> dict:
+    sensors = [
+        {
+            "sensor_type": "realsense_d435",
+            "device_id": "wrist-1",
+            "display_name": "Wrist RGB-D",
+            "mounting_mode": "eye_in_hand",
+            "enabled": True,
+            "inverted": False,
+        }
+    ]
+    if include_oak:
+        sensors.append(
+            {
+                "sensor_type": "oak_d_pro",
+                "device_id": "static-1",
+                "display_name": "Auxiliary OAK-D",
+                "mounting_mode": "eye_in_hand",
+                "enabled": True,
+                "inverted": False,
+            }
+        )
+    return run_config(sensors=sensors)
+
+
 def run_folder_inventory() -> dict:
     def record(
         *,
@@ -1122,6 +1147,101 @@ def test_active_run_header_alignment_and_change_affordance(
     expect(change_run).to_contain_text("Change run")
 
 
+def test_top_right_restart_controls_reload_frontend_backend_or_both(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    backend = {"instance": "backend-a", "restart_count": 0, "available": True}
+    restart_requests: list[dict] = []
+
+    def lifecycle_handler(route) -> None:
+        fulfill_json(
+            route,
+            {
+                "schema_version": "web_lifecycle.v1",
+                "instance_id": backend["instance"],
+                "backend_restart": {
+                    "configured": True,
+                    "available": backend["available"],
+                    "service_unit": "posetestbot-web.service",
+                    "state": "running" if backend["available"] else "unmanaged",
+                    "blockers": (
+                        []
+                        if backend["available"]
+                        else [
+                            {
+                                "code": "web_service_management_not_configured",
+                                "message": "Managed backend restart is not configured.",
+                            }
+                        ]
+                    ),
+                },
+                "active_local_jobs": 1,
+            },
+        )
+
+    def restart_handler(route) -> None:
+        restart_requests.append(route.request.post_data_json)
+        previous = backend["instance"]
+        backend["restart_count"] += 1
+        backend["instance"] = f"backend-{backend['restart_count']}"
+        fulfill_json(
+            route,
+            {
+                "accepted": True,
+                "instance_id": previous,
+                "retry_after_ms": 1,
+            },
+            status=202,
+        )
+
+    page.route("**/system/lifecycle**", lifecycle_handler)
+    page.route("**/system/restart-backend", restart_handler)
+    page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
+
+    restart_control = page.get_by_test_id("open-restart-controls")
+    expect(restart_control).to_be_visible()
+    expect(restart_control).to_contain_text("Restart")
+    restart_control.click()
+    dialog = page.get_by_test_id("restart-controls-dialog")
+    expect(dialog.get_by_role("heading", name="Restart operator console")).to_be_visible()
+    expect(dialog.get_by_test_id("restart-frontend")).to_be_visible()
+    expect(dialog.get_by_test_id("restart-backend")).to_be_disabled()
+    expect(dialog.get_by_test_id("restart-both")).to_be_disabled()
+    expect(dialog).to_contain_text("1 local job is currently active")
+
+    dialog.get_by_test_id("backend-restart-acknowledgement").click()
+    expect(dialog.get_by_test_id("restart-backend")).to_be_enabled()
+    page.evaluate("window.__posetestbotRestartMarker = 'backend-only'")
+    dialog.get_by_test_id("restart-backend").click()
+    expect(page.get_by_text("Backend restarted", exact=True)).to_be_visible()
+    assert page.evaluate("window.__posetestbotRestartMarker") == "backend-only"
+    assert restart_requests == [{"confirm": True}]
+
+    restart_control.click()
+    dialog.get_by_test_id("backend-restart-acknowledgement").click()
+    page.evaluate("window.__posetestbotRestartMarker = 'both'")
+    dialog.get_by_test_id("restart-both").click()
+    page.wait_for_function("window.__posetestbotRestartMarker === undefined")
+    expect(page.get_by_test_id("open-restart-controls")).to_be_visible()
+    assert restart_requests == [{"confirm": True}, {"confirm": True}]
+
+    backend["available"] = False
+    page.get_by_test_id("open-restart-controls").click()
+    expect(page.get_by_test_id("backend-restart-disabled-reason")).to_have_text(
+        "Managed backend restart is not configured."
+    )
+    expect(page.get_by_test_id("restart-backend")).to_have_count(0)
+    expect(page.get_by_test_id("restart-both")).to_have_count(0)
+
+    page.evaluate("window.__posetestbotRestartMarker = 'frontend-only'")
+    page.get_by_test_id("restart-frontend").click()
+    page.wait_for_function("window.__posetestbotRestartMarker === undefined")
+    expect(page.get_by_test_id("open-restart-controls")).to_be_visible()
+    assert restart_requests == [{"confirm": True}, {"confirm": True}]
+
+
 def test_dashboard_starts_and_stops_managed_cluster_controller(
     console_server, page
 ) -> None:
@@ -2088,6 +2208,22 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
         "JSON.stringify(['realsense_d435:wrist-1', 'realsense_d435:static-1']))"
     )
     page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=calculate",
+        wait_until="networkidle",
+    )
+    analysis_arrangement = page.get_by_test_id("calibration-analysis-arrangement")
+    expect(analysis_arrangement).to_have_attribute(
+        "data-calibration-mode", "eye_in_hand"
+    )
+    expect(analysis_arrangement).to_contain_text("Robot-mounted cameras · fixed target")
+    expect(
+        page.get_by_text("No captured camera has complete RGB-D", exact=False)
+    ).to_be_visible()
+    expect(
+        page.get_by_text("No calibration camera group configured", exact=True)
+    ).to_have_count(0)
+
+    page.goto(
         f"{console_server.url}/#/workflow/calibration?step=configure",
         wait_until="networkidle",
     )
@@ -2689,7 +2825,10 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
 ) -> None:
     requests: list[dict] = []
     promotion_status: dict[str, str | None] = {"value": None}
-    install_common_mocks(page)
+    install_common_mocks(
+        page,
+        config_payload=eye_in_hand_calibration_config(include_oak=True),
+    )
     setup = {
         "schema_version": "calibration_setup.v1",
         "run_root": RUN_ROOT,
@@ -2766,7 +2905,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                 },
             ],
             "synchronization": {
-                "implementation_revision": "constant_latency_nearest_pose_motion_lomo_fail_closed.v4",
+                "implementation_revision": "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5",
                 "default_policy": "auto_offset",
                 "policies": [
                     {
@@ -2787,7 +2926,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                     "max_nearest_pose_delta_ms": 150.0,
                     "warning_nearest_pose_delta_ms": 20.0,
                     "warning_absolute_robot_pose_time_offset_ms": 150.0,
-                    "time_offset_failure_policy": "fail_closed",
+                    "time_offset_failure_policy": "warn_keep_zero",
                     "minimum_motion_count_per_cross_validation_fold": 4,
                     "maximum_leave_one_motion_out_search_adjusted_sign_p_value": 0.05,
                 },
@@ -2799,6 +2938,9 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                 "min_pnp_supported_markers": 4,
                 "min_pnp_grid_rows": 2,
                 "min_pnp_grid_columns": 2,
+                "min_pnp_clutter_supported_markers": 8,
+                "min_pnp_clutter_grid_rows": 3,
+                "min_pnp_clutter_grid_columns": 3,
                 "min_accepted_views": 15,
                 "min_coverage_cells": 6,
                 "image_coverage_tail_support_views": 5,
@@ -2886,6 +3028,22 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
         "profile_id": "static_ippe_park",
         "recommended": True,
         "score": 0.16,
+        "checks": [
+            {
+                "name": "duplicate_marker_clutter_filtered",
+                "status": "warning",
+                "actual": {
+                    "affected_view_count": 743,
+                    "accepted_affected_view_count": 743,
+                    "ignored_correspondence_count": 47_552,
+                },
+                "threshold": {
+                    "min_supported_markers": 8,
+                    "min_grid_rows": 3,
+                    "min_grid_columns": 3,
+                },
+            }
+        ],
         "primary_transform": static_transform,
         "companion_transform": {
             **static_transform,
@@ -3018,7 +3176,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                 ],
             },
             "time_offset_search": {
-                "implementation_revision": "constant_latency_nearest_pose_motion_lomo_fail_closed.v4",
+                "implementation_revision": "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5",
                 "policy": "auto_offset",
                 "status": "complete",
                 "sign_convention": {
@@ -3033,7 +3191,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                     "max_nearest_pose_delta_ms": 150.0,
                     "warning_nearest_pose_delta_ms": 20.0,
                     "warning_absolute_robot_pose_time_offset_ms": 150.0,
-                    "time_offset_failure_policy": "fail_closed",
+                    "time_offset_failure_policy": "warn_keep_zero",
                 },
                 "sensors": [
                     {
@@ -3346,7 +3504,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
         "Calibration has advisory timing evidence"
     )
     expect(page.get_by_test_id("calibration-time-alignment-warning")).to_contain_text(
-        "passed every required fail-closed identification and stability check"
+        "advisory nearest-pose or magnitude evidence"
     )
     page.mouse.move(0, 0)
     alignment.get_by_role(
@@ -3402,7 +3560,19 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     static_intrinsics = page.get_by_test_id("intrinsic-comparison-oak_d_pro:static-1")
     expect(static_intrinsics).to_contain_text("Using factory SDK values")
     expect(static_intrinsics).to_contain_text("The factory SDK values are compatible")
+    expect(static_intrinsics).to_contain_text(
+        "OpenCV comparison was not eligible; this does not block the selected factory lens model."
+    )
     expect(static_intrinsics).to_contain_text("coverage 2/9 is below 6/9")
+    clutter_warning = page.get_by_test_id(
+        "calibration-grid-clutter-warning-oak_d_pro:static-1"
+    )
+    expect(clutter_warning).to_contain_text(
+        "Other calibration grids were filtered from the target pose."
+    )
+    expect(clutter_warning).to_contain_text("743 views")
+    expect(clutter_warning).to_contain_text("47552 off-instance corner correspondences")
+    expect(clutter_warning).to_contain_text("result remains usable with this warning")
     wrist_result = page.locator('[data-camera-key="realsense_d435:wrist-1"]')
     expect(wrist_result).to_contain_text("Reusable robot-mounted-camera transform")
     expect(wrist_result).to_contain_text("camera → robot_flange")
@@ -3433,7 +3603,7 @@ def calibration_time_alignment_setup(
     latest_attempt_id: str | None,
     latest_status: str = "complete",
     implementation_revision: str | None = (
-        "constant_latency_nearest_pose_motion_lomo_fail_closed.v4"
+        "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5"
     ),
 ) -> dict:
     latest_attempt = (
@@ -3508,7 +3678,7 @@ def calibration_time_alignment_setup(
                     "max_nearest_pose_delta_ms": 150.0,
                     "warning_nearest_pose_delta_ms": 20.0,
                     "warning_absolute_robot_pose_time_offset_ms": 150.0,
-                    "time_offset_failure_policy": "fail_closed",
+                    "time_offset_failure_policy": "warn_keep_zero",
                 },
             },
             "thresholds": {
@@ -3543,7 +3713,7 @@ def test_calibration_workflow_explains_immutable_legacy_timing_attempt(
         latest_attempt_id=attempt_id,
         latest_status="failed",
     )
-    install_common_mocks(page)
+    install_common_mocks(page, config_payload=eye_in_hand_calibration_config())
     page.route("**/calibration/setup?**", lambda route: fulfill_json(route, setup))
     attempt = {
         "schema_version": "calibration_attempt.v1",
@@ -3678,7 +3848,7 @@ def test_failed_auto_sync_evidence_remains_visible_without_solver_results(
         latest_attempt_id=attempt_id,
         latest_status="failed",
     )
-    install_common_mocks(page)
+    install_common_mocks(page, config_payload=eye_in_hand_calibration_config())
     page.route("**/calibration/setup?**", lambda route: fulfill_json(route, setup))
     attempt = {
         "schema_version": "calibration_attempt.v1",
@@ -3836,6 +4006,119 @@ def test_failed_auto_sync_evidence_remains_visible_without_solver_results(
     )
 
 
+def test_ambiguous_auto_sync_keeps_recorded_timing_with_visible_warning(
+    console_server,
+    page,
+) -> None:
+    attempt_id = "b" * 32
+    setup = calibration_time_alignment_setup(latest_attempt_id=attempt_id)
+    install_common_mocks(page, config_payload=eye_in_hand_calibration_config())
+    page.route("**/calibration/setup?**", lambda route: fulfill_json(route, setup))
+    residuals = {
+        "mean_translation_mm": 1.7,
+        "median_translation_mm": 1.6,
+        "max_translation_mm": 3.5,
+        "mean_rotation_deg": 0.8,
+        "median_rotation_deg": 0.7,
+        "max_rotation_deg": 2.4,
+    }
+    attempt = {
+        "schema_version": "calibration_attempt.v1",
+        "attempt_id": attempt_id,
+        "request": {
+            "mode": "eye_in_hand",
+            "sensor_keys": ["realsense_d435:wrist-1"],
+            "target_id": setup["saved_targets"][0]["target_id"],
+            "solver_policy": "auto_compare",
+            "intrinsics_policy": "compare_factory_opencv",
+            "synchronization_policy": "auto_offset",
+        },
+        "progress": calibration_attempt_progress(
+            status="complete",
+            time_alignment_status="complete",
+            message="Calibration calculations are complete with timing warnings.",
+        ),
+        "results": calibration_failed_results(setup["cameras"][0]),
+        "intrinsic_comparison": None,
+        "time_offset_search": {
+            "implementation_revision": (
+                "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5"
+            ),
+            "policy": "auto_offset",
+            "status": "complete",
+            "warning_sensor_keys": ["realsense_d435:wrist-1"],
+            "warning_sensor_count": 1,
+            "sign_convention": {
+                "operator_equation": "robot_pose_query_time = frame_time + offset",
+                "positive_operator_value": (
+                    "pair the frame with a robot pose recorded later"
+                ),
+                "conversion": "sync_delta_ms = -robot_pose_time_offset_ms",
+            },
+            "search": {
+                "minimum_robot_pose_time_offset_ms": -300.0,
+                "maximum_robot_pose_time_offset_ms": 300.0,
+                "step_ms": 5.0,
+                "time_offset_failure_policy": "warn_keep_zero",
+            },
+            "sensors": [
+                {
+                    "sensor_key": "realsense_d435:wrist-1",
+                    "sensor_name": "realsense_wrist-1",
+                    "display_name": "Wrist RGB-D",
+                    "status": "kept_zero",
+                    "decision_reason": "ambiguous_auto_offset_kept_recorded_zero",
+                    "selected_robot_pose_time_offset_ms": 0.0,
+                    "selected_sync_delta_ms": 0.0,
+                    "candidate_robot_pose_time_offset_ms": 30.0,
+                    "evidence_strength": "degraded",
+                    "warning_fallback_used": True,
+                    "boundary_hit": False,
+                    "cross_validation": {
+                        "zero_offset": {"residuals": residuals},
+                        "candidate": {"residuals": residuals},
+                        "improvement": {
+                            "absolute_translation_mm": 0.015,
+                            "relative_translation": 0.0088,
+                            "rotation_change_deg": -0.04,
+                        },
+                    },
+                    "checks": [
+                        {
+                            "name": "cross_validation_offset_stability",
+                            "status": "warning",
+                            "original_status": "error",
+                            "actual": 110.0,
+                            "threshold": 20.0,
+                        }
+                    ],
+                    "curve": [],
+                }
+            ],
+        },
+        "promotion": None,
+    }
+    page.route(
+        f"**/calibration/attempts/{attempt_id}?**",
+        lambda route: fulfill_json(route, attempt),
+    )
+
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=calculate",
+        wait_until="networkidle",
+    )
+
+    warning = page.get_by_test_id("calibration-time-alignment-warning")
+    expect(warning).to_contain_text("kept its recorded 0 ms pairing")
+    row = page.get_by_test_id("calibration-time-alignment").locator(
+        '[data-time-offset-sensor="realsense_d435:wrist-1"]'
+    )
+    expect(row).to_contain_text("Recorded 0 ms kept with warning")
+    expect(row).to_contain_text("Applied +0.0 ms")
+    expect(row).to_contain_text("+30.0 ms candidate not applied")
+    expect(row).to_contain_text("degraded")
+
+
 def test_fixed_zero_policy_is_submitted_and_reported(
     console_server,
     page,
@@ -3843,7 +4126,7 @@ def test_fixed_zero_policy_is_submitted_and_reported(
     attempt_id = "0" * 32
     setup = calibration_time_alignment_setup(latest_attempt_id=None)
     requests: list[dict] = []
-    install_common_mocks(page)
+    install_common_mocks(page, config_payload=eye_in_hand_calibration_config())
     page.route("**/calibration/setup?**", lambda route: fulfill_json(route, setup))
 
     def create_handler(route) -> None:
@@ -3918,10 +4201,21 @@ def test_fixed_zero_policy_is_submitted_and_reported(
     )
 
     page.locator('input[value="fixed_zero"]').check()
-    page.get_by_role("button", name="Analyze recording").click()
+    fixed_zero_button = page.get_by_role(
+        "button", name="Analyze recording · captured timestamps (0 ms)"
+    )
+    expect(fixed_zero_button).to_be_enabled()
+    fixed_zero_button.click()
 
     expect(page.get_by_text("Calibration queued")).to_be_visible()
     assert requests[-1]["synchronization_policy"] == "fixed_zero"
+    expect(page.get_by_test_id("calibration-attempt-job-status")).to_contain_text(
+        "Recorded timing policy: captured timestamps (0 ms)"
+    )
+    expect(page.get_by_role("heading", name="Captured timestamp pairing")).to_be_visible()
+    expect(page.get_by_test_id("calibration-time-alignment")).to_contain_text(
+        "Offset estimation was explicitly skipped. This attempt uses the recorded camera/robot pairing at 0 ms."
+    )
     row = page.get_by_test_id("calibration-time-alignment").locator(
         '[data-time-offset-sensor="realsense_d435:wrist-1"]'
     )

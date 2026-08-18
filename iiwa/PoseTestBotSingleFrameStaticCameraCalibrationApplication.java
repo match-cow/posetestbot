@@ -24,12 +24,13 @@ import org.json.simple.parser.JSONParser;
 /**
  * Static-camera calibration application with one taught motion frame.
  *
- * Teach only /PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle at
- * the minimum local-Z extent of the calibration pattern. Its +Z axis must
- * point from that bottom position toward the available workspace. The program
- * moves +50 mm from the taught frame to the generated pattern center before
- * running the 3 x 3 planar grid, depth dither, and center swivel motions. This
- * keeps every generated endpoint at or above the taught local-Z position.
+ * Teach only /PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle as
+ * the bottom-center point of the calibration grid. It is the lowest permitted
+ * robot-flange Z in the PoseTemplateBase coordinate system. All generated
+ * translations are therefore expressed in PoseTemplateBase: X supplies the
+ * left/center/right columns, Y stays fixed, and Z supplies the
+ * bottom/middle/top rows. The program finishes the ordered 3 x 3 grid at its
+ * generated center before running the A/B/C orientation sweeps there.
  *
  * IMPORTANT: This source does not establish which application is deployed on
  * the lab controller. Compile and simulate it in the exact Sunrise.Workbench
@@ -56,12 +57,12 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 	private static final int SETTLED_PACKET_COUNT = 3;
 	private static final int SETTLED_PACKET_INTERVAL_MS = 50;
 
-	private static final double GRID_HALF_SPAN_MM = 65.0;
-	private static final double DEPTH_DITHER_MM = 50.0;
+	private static final double GRID_HALF_WIDTH_MM = 65.0;
+	private static final double GRID_ROW_SPACING_MM = 50.0;
 	private static final double PATTERN_CENTER_Z_OFFSET_MM = 50.0;
 	private static final double ORIENTATION_DITHER_DEG = 10.0;
-	private static final double MAX_CENTER_TRANSLATION_MM = 100.0;
-	private static final double MAX_BOTTOM_MIDDLE_TRANSLATION_MM = 110.0;
+	private static final double MAX_RELATIVE_TRANSLATION_MM = 100.0;
+	private static final double MAX_BOTTOM_MIDDLE_TRANSLATION_MM = 125.0;
 	private static final double MAX_START_TRANSLATION_MM = 25.0;
 
 	private static final double CAPTURE_VELOCITY_SCALE = 0.60;
@@ -77,6 +78,7 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 	@Inject
 	private InfoTemplate robotinfo;
 
+	private ObjectFrame poseTemplateBase;
 	private ObjectFrame calibrationStaticBottomMiddle;
 	private PoseTestBotPoseStreamFunction poseStream;
 
@@ -84,14 +86,15 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 	public void initialize() {
 		robot = getContext().getDeviceFromType(LBR.class);
 		robotinfo.setBase(POSE_TEMPLATE_BASE_PATH);
+		poseTemplateBase = requiredFrame(POSE_TEMPLATE_BASE_PATH);
 		calibrationStaticBottomMiddle = requiredFrame(
 				CALIBRATION_STATIC_BOTTOM_MIDDLE_PATH);
 		validateProgramEnvelope();
 
-		getLogger().info("Resolved single taught static-camera calibration "
-				+ "frame: " + CALIBRATION_STATIC_BOTTOM_MIDDLE_PATH);
-		getLogger().info("Configured pose-stream reference: "
+		getLogger().info("Resolved PoseTemplateBase translation reference: "
 				+ POSE_TEMPLATE_BASE_PATH);
+		getLogger().info("Resolved single taught bottom-center grid point: "
+				+ CALIBRATION_STATIC_BOTTOM_MIDDLE_PATH);
 	}
 
 	private ObjectFrame requiredFrame(String path) {
@@ -104,30 +107,21 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 	}
 
 	private void validateProgramEnvelope() {
-		double cornerRadiusMm = Math.sqrt(
-				2.0 * GRID_HALF_SPAN_MM * GRID_HALF_SPAN_MM);
-		if (cornerRadiusMm > MAX_CENTER_TRANSLATION_MM) {
-			throw new IllegalStateException("Relative grid corner radius is "
-					+ cornerRadiusMm + " mm; limit is "
-					+ MAX_CENTER_TRANSLATION_MM + " mm");
+		if (PATTERN_CENTER_Z_OFFSET_MM != GRID_ROW_SPACING_MM) {
+			throw new IllegalStateException("Pattern-center PoseTemplateBase Z "
+					+ "offset must equal one grid-row spacing");
 		}
-		if (DEPTH_DITHER_MM > MAX_CENTER_TRANSLATION_MM) {
-			throw new IllegalStateException("Depth dither exceeds the "
-					+ MAX_CENTER_TRANSLATION_MM + " mm center envelope");
+		double bottomRightToCenterLegMm = translationRadiusMm(
+				GRID_HALF_WIDTH_MM, 0.0, GRID_ROW_SPACING_MM);
+		if (bottomRightToCenterLegMm > MAX_RELATIVE_TRANSLATION_MM) {
+			throw new IllegalStateException("Longest relative grid leg is "
+					+ bottomRightToCenterLegMm + " mm; limit is "
+					+ MAX_RELATIVE_TRANSLATION_MM + " mm");
 		}
-		if (PATTERN_CENTER_Z_OFFSET_MM != DEPTH_DITHER_MM) {
-			throw new IllegalStateException("Pattern-center local-Z offset must "
-					+ "equal the depth half-span so the taught frame remains the "
-					+ "bottom of the pattern");
-		}
-		double gridCornerFromBottomMm = translationRadiusMm(
-				GRID_HALF_SPAN_MM,
-				GRID_HALF_SPAN_MM,
-				PATTERN_CENTER_Z_OFFSET_MM);
-		double depthTopFromBottomMm =
-				PATTERN_CENTER_Z_OFFSET_MM + DEPTH_DITHER_MM;
-		double furthestPointFromBottomMm = Math.max(
-				gridCornerFromBottomMm, depthTopFromBottomMm);
+		double topRowZFromBottomMm =
+				2.0 * GRID_ROW_SPACING_MM;
+		double furthestPointFromBottomMm = translationRadiusMm(
+				GRID_HALF_WIDTH_MM, 0.0, topRowZFromBottomMm);
 		if (furthestPointFromBottomMm > MAX_BOTTOM_MIDDLE_TRANSLATION_MM) {
 			throw new IllegalStateException("Generated calibration endpoint is "
 					+ furthestPointFromBottomMm
@@ -196,142 +190,131 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 				+ "run " + command.runId + " at " + cartVelocityMmS + " mm/s");
 
 		moveToBottomMiddle("capture start anchor");
-		moveFromBottomMiddleToPatternCenter(cartVelocityMmS);
 		runRelativePlanarGrid(cartVelocityMmS);
-		runRelativeDepthDither(cartVelocityMmS);
 		runRelativeOrientationDither(cartVelocityMmS);
 		moveFromPatternCenterToBottomMiddle(cartVelocityMmS);
-		moveToBottomMiddle("capture end anchor confirmation");
 
-		/* Report success only after the blocking return to the taught anchor. */
+		/* Report success only after the blocking LIN return to the taught anchor. */
 		poseStream.finishCapture();
-	}
-
-	private void moveFromBottomMiddleToPatternCenter(
-			double cartVelocityMmS) {
-		requirePatternPointInsideEnvelope(0.0, 0.0, 0.0,
-				"pattern_center");
-		captureRelativePose(0.0, 0.0, PATTERN_CENTER_Z_OFFSET_MM,
-				0.0, 0.0, 0.0,
-				cartVelocityMmS, "bottom_middle_to_pattern_center");
 	}
 
 	private void moveFromPatternCenterToBottomMiddle(
 			double cartVelocityMmS) {
-		requirePatternPointInsideEnvelope(
-				0.0, 0.0, -PATTERN_CENTER_Z_OFFSET_MM,
-				"bottom_middle");
-		captureRelativePose(0.0, 0.0, -PATTERN_CENTER_Z_OFFSET_MM,
-				0.0, 0.0, 0.0,
+		capturePlanarGridLeg(
+				0.0, PATTERN_CENTER_Z_OFFSET_MM,
+				0.0, 0.0,
 				cartVelocityMmS, "pattern_center_to_bottom_middle");
 	}
 
 	/**
-	 * Visit the eight non-center points of a 3 x 3 grid. Each point is reached
-	 * from center and immediately reversed, keeping every individual relative
-	 * translation within 100 mm of the generated pattern center.
+	 * Start at the taught bottom-middle grid point, visit each other generated
+	 * point once around the grid perimeter, and finish at the generated center.
+	 * Every stated PoseTemplateBase Z is relative to the taught minimum and is
+	 * therefore non-negative.
 	 */
 	private void runRelativePlanarGrid(double cartVelocityMmS) {
-		captureGridPoint(-GRID_HALF_SPAN_MM, GRID_HALF_SPAN_MM,
-				cartVelocityMmS, "grid_upper_left");
-		captureGridPoint(0.0, GRID_HALF_SPAN_MM,
-				cartVelocityMmS, "grid_upper_center");
-		captureGridPoint(GRID_HALF_SPAN_MM, GRID_HALF_SPAN_MM,
-				cartVelocityMmS, "grid_upper_right");
-		captureGridPoint(GRID_HALF_SPAN_MM, 0.0,
-				cartVelocityMmS, "grid_middle_right");
-		captureGridPoint(GRID_HALF_SPAN_MM, -GRID_HALF_SPAN_MM,
-				cartVelocityMmS, "grid_lower_right");
-		captureGridPoint(0.0, -GRID_HALF_SPAN_MM,
-				cartVelocityMmS, "grid_lower_center");
-		captureGridPoint(-GRID_HALF_SPAN_MM, -GRID_HALF_SPAN_MM,
-				cartVelocityMmS, "grid_lower_left");
-		captureGridPoint(-GRID_HALF_SPAN_MM, 0.0,
-				cartVelocityMmS, "grid_middle_left");
+		capturePlanarGridLeg(
+				0.0, 0.0,
+				-GRID_HALF_WIDTH_MM, 0.0,
+				cartVelocityMmS, "grid_bottom_middle_to_bottom_left");
+		capturePlanarGridLeg(
+				-GRID_HALF_WIDTH_MM, 0.0,
+				-GRID_HALF_WIDTH_MM, PATTERN_CENTER_Z_OFFSET_MM,
+				cartVelocityMmS, "grid_bottom_left_to_middle_left");
+		capturePlanarGridLeg(
+				-GRID_HALF_WIDTH_MM, PATTERN_CENTER_Z_OFFSET_MM,
+				-GRID_HALF_WIDTH_MM, 2.0 * GRID_ROW_SPACING_MM,
+				cartVelocityMmS, "grid_middle_left_to_top_left");
+		capturePlanarGridLeg(
+				-GRID_HALF_WIDTH_MM, 2.0 * GRID_ROW_SPACING_MM,
+				0.0, 2.0 * GRID_ROW_SPACING_MM,
+				cartVelocityMmS, "grid_top_left_to_top_center");
+		capturePlanarGridLeg(
+				0.0, 2.0 * GRID_ROW_SPACING_MM,
+				GRID_HALF_WIDTH_MM, 2.0 * GRID_ROW_SPACING_MM,
+				cartVelocityMmS, "grid_top_center_to_top_right");
+		capturePlanarGridLeg(
+				GRID_HALF_WIDTH_MM, 2.0 * GRID_ROW_SPACING_MM,
+				GRID_HALF_WIDTH_MM, PATTERN_CENTER_Z_OFFSET_MM,
+				cartVelocityMmS, "grid_top_right_to_middle_right");
+		capturePlanarGridLeg(
+				GRID_HALF_WIDTH_MM, PATTERN_CENTER_Z_OFFSET_MM,
+				GRID_HALF_WIDTH_MM, 0.0,
+				cartVelocityMmS, "grid_middle_right_to_bottom_right");
+		capturePlanarGridLeg(
+				GRID_HALF_WIDTH_MM, 0.0,
+				0.0, PATTERN_CENTER_Z_OFFSET_MM,
+				cartVelocityMmS, "grid_bottom_right_to_center");
 	}
 
-	private void captureGridPoint(double xMm, double yMm,
+	private void capturePlanarGridLeg(
+			double fromXMm, double fromZMm,
+			double toXMm, double toZMm,
 			double cartVelocityMmS, String motionName) {
-		requirePatternPointInsideEnvelope(xMm, yMm, 0.0, motionName);
-		captureRelativePose(xMm, yMm, 0.0, 0.0, 0.0, 0.0,
-				cartVelocityMmS, motionName + "_outbound");
-		captureRelativePose(-xMm, -yMm, 0.0, 0.0, 0.0, 0.0,
-				cartVelocityMmS, motionName + "_return_center");
-	}
-
-	private void runRelativeDepthDither(double cartVelocityMmS) {
-		captureDepthPoint(DEPTH_DITHER_MM, cartVelocityMmS,
-				"depth_plus");
-		captureDepthPoint(-DEPTH_DITHER_MM, cartVelocityMmS,
-				"depth_minus");
-	}
-
-	private void captureDepthPoint(double zMm, double cartVelocityMmS,
-			String motionName) {
-		requirePatternPointInsideEnvelope(0.0, 0.0, zMm, motionName);
-		captureRelativePose(0.0, 0.0, zMm, 0.0, 0.0, 0.0,
-				cartVelocityMmS, motionName + "_outbound");
-		captureRelativePose(0.0, 0.0, -zMm, 0.0, 0.0, 0.0,
-				cartVelocityMmS, motionName + "_return_center");
+		requireGridPointInsideEnvelope(
+				fromXMm, fromZMm, motionName + "_start");
+		requireGridPointInsideEnvelope(
+				toXMm, toZMm, motionName + "_end");
+		captureRelativeTranslation(
+				toXMm - fromXMm, 0.0, toZMm - fromZMm,
+				cartVelocityMmS, motionName);
 	}
 
 	/**
-	 * Rotate about all three center-frame axes without translating the flange.
-	 * Every +/-10 degree result returns to center before the next result.
+	 * Sweep each center-frame axis from -10 to +10 degrees, then return to
+	 * center before starting the next axis. This matches the ordered motion
+	 * shape of the taught nine-frame calibration program without requiring
+	 * additional persistent frames.
 	 */
 	private void runRelativeOrientationDither(double cartVelocityMmS) {
-		captureOrientationPoint(-ORIENTATION_DITHER_DEG, 0.0, 0.0,
-				cartVelocityMmS, "orientation_alpha_minus");
-		captureOrientationPoint(ORIENTATION_DITHER_DEG, 0.0, 0.0,
-				cartVelocityMmS, "orientation_alpha_plus");
-		captureOrientationPoint(0.0, -ORIENTATION_DITHER_DEG, 0.0,
-				cartVelocityMmS, "orientation_beta_minus");
-		captureOrientationPoint(0.0, ORIENTATION_DITHER_DEG, 0.0,
-				cartVelocityMmS, "orientation_beta_plus");
-		captureOrientationPoint(0.0, 0.0, -ORIENTATION_DITHER_DEG,
-				cartVelocityMmS, "orientation_gamma_minus");
-		captureOrientationPoint(0.0, 0.0, ORIENTATION_DITHER_DEG,
-				cartVelocityMmS, "orientation_gamma_plus");
+		captureOrientationLeg(-ORIENTATION_DITHER_DEG, 0.0, 0.0,
+				cartVelocityMmS, "orientation_alpha_center_to_minus");
+		captureOrientationLeg(2.0 * ORIENTATION_DITHER_DEG, 0.0, 0.0,
+				cartVelocityMmS, "orientation_alpha_minus_to_plus");
+		captureOrientationLeg(-ORIENTATION_DITHER_DEG, 0.0, 0.0,
+				cartVelocityMmS, "orientation_alpha_plus_to_center");
+		captureOrientationLeg(0.0, -ORIENTATION_DITHER_DEG, 0.0,
+				cartVelocityMmS, "orientation_beta_center_to_minus");
+		captureOrientationLeg(0.0, 2.0 * ORIENTATION_DITHER_DEG, 0.0,
+				cartVelocityMmS, "orientation_beta_minus_to_plus");
+		captureOrientationLeg(0.0, -ORIENTATION_DITHER_DEG, 0.0,
+				cartVelocityMmS, "orientation_beta_plus_to_center");
+		captureOrientationLeg(0.0, 0.0, -ORIENTATION_DITHER_DEG,
+				cartVelocityMmS, "orientation_gamma_center_to_minus");
+		captureOrientationLeg(0.0, 0.0,
+				2.0 * ORIENTATION_DITHER_DEG,
+				cartVelocityMmS, "orientation_gamma_minus_to_plus");
+		captureOrientationLeg(0.0, 0.0, -ORIENTATION_DITHER_DEG,
+				cartVelocityMmS, "orientation_gamma_plus_to_center");
 	}
 
-	private void captureOrientationPoint(double alphaDeg, double betaDeg,
+	private void captureOrientationLeg(double alphaDeg, double betaDeg,
 			double gammaDeg, double cartVelocityMmS, String motionName) {
-		captureRelativePose(0.0, 0.0, 0.0,
-				alphaDeg, betaDeg, gammaDeg,
-				cartVelocityMmS, motionName + "_outbound");
-		captureRelativePose(0.0, 0.0, 0.0,
-				-alphaDeg, -betaDeg, -gammaDeg,
-				cartVelocityMmS, motionName + "_return_center");
+		captureRelativeOrientation(
+				alphaDeg, betaDeg, gammaDeg, cartVelocityMmS, motionName);
 	}
 
-	private void requirePatternPointInsideEnvelope(double xMm, double yMm,
-			double zFromCenterMm, String motionName) {
-		double centerRadiusMm = translationRadiusMm(
-				xMm, yMm, zFromCenterMm);
-		double zFromBottomMiddleMm =
-				PATTERN_CENTER_Z_OFFSET_MM + zFromCenterMm;
+	private void requireGridPointInsideEnvelope(
+			double xFromBottomMiddleMm,
+			double zFromBottomMiddleMm,
+			String motionName) {
 		double bottomMiddleRadiusMm = translationRadiusMm(
-				xMm, yMm, zFromBottomMiddleMm);
-		if (Double.isNaN(centerRadiusMm)
-				|| Double.isInfinite(centerRadiusMm)
-				|| centerRadiusMm > MAX_CENTER_TRANSLATION_MM) {
-			throw new IllegalArgumentException("Pattern endpoint "
-					+ motionName + " is " + centerRadiusMm
-					+ " mm from the generated center; limit is "
-					+ MAX_CENTER_TRANSLATION_MM + " mm");
-		}
-		if (Double.isNaN(zFromBottomMiddleMm)
+				xFromBottomMiddleMm, 0.0, zFromBottomMiddleMm);
+		if (Double.isNaN(xFromBottomMiddleMm)
+				|| Double.isInfinite(xFromBottomMiddleMm)
+				|| Double.isNaN(zFromBottomMiddleMm)
 				|| Double.isInfinite(zFromBottomMiddleMm)
 				|| zFromBottomMiddleMm < 0.0) {
-			throw new IllegalArgumentException("Pattern endpoint "
-					+ motionName + " has invalid bottom-relative Z "
+			throw new IllegalArgumentException("Grid endpoint "
+					+ motionName + " would violate the minimum "
+					+ "PoseTemplateBase Z at CalibrationStaticBottomMiddle: "
 					+ zFromBottomMiddleMm + " mm");
 		}
 		if (Double.isNaN(bottomMiddleRadiusMm)
 				|| Double.isInfinite(bottomMiddleRadiusMm)
 				|| bottomMiddleRadiusMm
 						> MAX_BOTTOM_MIDDLE_TRANSLATION_MM) {
-			throw new IllegalArgumentException("Pattern endpoint "
+			throw new IllegalArgumentException("Grid endpoint "
 					+ motionName + " is " + bottomMiddleRadiusMm
 					+ " mm from CalibrationStaticBottomMiddle; limit is "
 					+ MAX_BOTTOM_MIDDLE_TRANSLATION_MM + " mm");
@@ -343,11 +326,11 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 			double zMm, String motionName) {
 		double radiusMm = translationRadiusMm(xMm, yMm, zMm);
 		if (Double.isNaN(radiusMm) || Double.isInfinite(radiusMm)
-				|| radiusMm > MAX_CENTER_TRANSLATION_MM) {
+				|| radiusMm > MAX_RELATIVE_TRANSLATION_MM) {
 			throw new IllegalArgumentException("Relative endpoint "
 					+ motionName + " is " + radiusMm
 					+ " mm from the current phase anchor; limit is "
-					+ MAX_CENTER_TRANSLATION_MM + " mm");
+					+ MAX_RELATIVE_TRANSLATION_MM + " mm");
 		}
 	}
 
@@ -384,17 +367,38 @@ public class PoseTestBotSingleFrameStaticCameraCalibrationApplication
 		settleAtCurrentPose(motionName);
 	}
 
-	private void captureRelativePose(double xMm, double yMm, double zMm,
-			double alphaDeg, double betaDeg, double gammaDeg,
+	private void captureRelativeTranslation(
+			double xMm, double yMm, double zMm,
 			double cartVelocityMmS, String motionName) {
 		requireInsideRelativeTranslationEnvelope(
 				xMm, yMm, zMm, motionName);
 		Transformation offset = Transformation.ofDeg(
-				xMm, yMm, zMm, alphaDeg, betaDeg, gammaDeg);
+				xMm, yMm, zMm, 0.0, 0.0, 0.0);
+		captureRelativeMotion(
+				offset, poseTemplateBase, cartVelocityMmS, motionName);
+	}
+
+	private void captureRelativeOrientation(
+			double alphaDeg, double betaDeg, double gammaDeg,
+			double cartVelocityMmS, String motionName) {
+		Transformation offset = Transformation.ofDeg(
+				0.0, 0.0, 0.0, alphaDeg, betaDeg, gammaDeg);
+		captureRelativeMotion(
+				offset,
+				calibrationStaticBottomMiddle,
+				cartVelocityMmS,
+				motionName);
+	}
+
+	private void captureRelativeMotion(
+			Transformation offset,
+			ObjectFrame referenceFrame,
+			double cartVelocityMmS,
+			String motionName) {
 		long sentPoseCount;
 		poseStream.startMotion(motionName);
 		try {
-			robot.move(linRel(offset, calibrationStaticBottomMiddle)
+			robot.move(linRel(offset, referenceFrame)
 					.setCartVelocity(cartVelocityMmS)
 					.setJointVelocityRel(RELATIVE_MOTION_JOINT_VEL_REL)
 					.setJointAccelerationRel(SMOOTH_MOTION_JOINT_ACCEL_REL)
