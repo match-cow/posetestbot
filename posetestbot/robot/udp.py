@@ -1,9 +1,10 @@
-"""UDP helpers for the current and rewrite iiwa command protocols."""
+"""UDP helpers for the sole structured iiwa command protocol."""
 
 from __future__ import annotations
 
 import json
 import socket
+import uuid
 from typing import Any
 
 from posetestbot.config import (
@@ -20,23 +21,9 @@ def _advertised_receiver_ip(receiver_ip: str) -> str | None:
     return normalized
 
 
-def legacy_start_command(
-    cartesian_velocity_m_s: float,
-    *,
-    receiver_ip: str | None = None,
-    receiver_port: int | None = None,
-) -> dict[str, float | int | str]:
-    command: dict[str, float | int | str] = {"start": cartesian_velocity_m_s}
-    if receiver_ip:
-        command["receiver_ip"] = receiver_ip
-    if receiver_port is not None:
-        command["receiver_port"] = receiver_port
-    return command
-
-
 def structured_start_command(
     cartesian_velocity_m_s: float,
-    run_id: str | None = None,
+    run_id: str,
     *,
     receiver_ip: str | None = None,
     receiver_port: int | None = None,
@@ -46,8 +33,13 @@ def structured_start_command(
         "command": "start_capture",
         "cartesian_velocity_m_s": cartesian_velocity_m_s,
     }
-    if run_id:
-        command["run_id"] = run_id
+    try:
+        canonical_run_id = str(uuid.UUID(run_id))
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("run_id must be a canonical UUID") from exc
+    if run_id != canonical_run_id:
+        raise ValueError("run_id must be a canonical UUID")
+    command["run_id"] = run_id
     if receiver_ip:
         command["receiver_ip"] = receiver_ip
     if receiver_port is not None:
@@ -55,14 +47,10 @@ def structured_start_command(
     return command
 
 
-def legacy_stop_command() -> dict[str, bool]:
-    return {"stop": True}
-
-
-def structured_stop_command(intent: str = "stop_after_current_motion") -> dict[str, str]:
+def structured_stop_command() -> dict[str, str]:
     return {
         "schema_version": "robot_command.v1",
-        "command": intent,
+        "command": "exit_idle_program",
     }
 
 
@@ -75,8 +63,7 @@ def send_udp_json(message: dict[str, Any], ip: str, port: int) -> None:
 def send_start(
     profile: RobotProfile,
     *,
-    protocol: str = "legacy",
-    run_id: str | None = None,
+    run_id: str,
     maximum_velocity_m_s: float = MAX_CAPTURE_COMMAND_VELOCITY_M_S,
 ) -> dict[str, Any]:
     receiver_ip = _advertised_receiver_ip(profile.receiver_ip)
@@ -84,21 +71,12 @@ def send_start(
         profile.cartesian_velocity_m_s,
         maximum_velocity_m_s=maximum_velocity_m_s,
     )
-    if protocol == "v1":
-        message = structured_start_command(
-            command_velocity_m_s,
-            run_id,
-            receiver_ip=receiver_ip,
-            receiver_port=profile.receiver_port,
-        )
-    elif protocol == "legacy":
-        message = legacy_start_command(
-            command_velocity_m_s,
-            receiver_ip=receiver_ip,
-            receiver_port=profile.receiver_port,
-        )
-    else:
-        raise ValueError("protocol must be 'legacy' or 'v1'")
+    message = structured_start_command(
+        command_velocity_m_s,
+        run_id,
+        receiver_ip=receiver_ip,
+        receiver_port=profile.receiver_port,
+    )
 
     send_udp_json(message, profile.robot_ip, profile.command_port)
     return message
@@ -106,16 +84,7 @@ def send_start(
 
 def send_stop(
     profile: RobotProfile,
-    *,
-    protocol: str = "legacy",
-    intent: str = "stop_after_current_motion",
 ) -> dict[str, Any]:
-    if protocol == "v1":
-        message = structured_stop_command(intent)
-    elif protocol == "legacy":
-        message = legacy_stop_command()
-    else:
-        raise ValueError("protocol must be 'legacy' or 'v1'")
-
+    message = structured_stop_command()
     send_udp_json(message, profile.robot_ip, profile.command_port)
     return message

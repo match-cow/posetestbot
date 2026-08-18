@@ -9,7 +9,7 @@ from pytransform3d import transformations as pt
 
 from posetestbot.calibration import time_offset as time_offset_module
 from posetestbot.calibration.attempt_solver import transform_record
-from posetestbot.calibration.candidates import _robot_ee_to_reference
+from posetestbot.calibration.transforms import robot_ee_to_reference
 from posetestbot.calibration.time_offset import (
     IMPROVEMENT_EVIDENCE_STRATEGY,
     apply_sensor_time_offset,
@@ -78,7 +78,7 @@ def _synthetic_offset_evidence(
         for frame_index, local_ms in enumerate(range(220, 341, 20)):
             physical_local_ms = local_ms + planted_offset_ms
             robot_pose = poses_by_local_ms[physical_local_ms]
-            flange_to_base = _robot_ee_to_reference(robot_pose)
+            flange_to_base = robot_ee_to_reference(robot_pose)
             if mode == "eye_in_hand":
                 target_to_camera = (
                     pt.invert_transform(camera_to_flange)
@@ -184,7 +184,7 @@ def test_auto_offset_applies_large_supported_offset_with_warning() -> None:
     assert len(adjusted) == len(observations)
 
 
-def test_auto_offset_boundary_optimum_fails_closed() -> None:
+def test_auto_offset_boundary_optimum_keeps_recorded_timing_with_warning() -> None:
     observations, robot_records = _synthetic_offset_evidence(
         mode="eye_in_hand",
         planted_offset_ms=40,
@@ -200,8 +200,8 @@ def test_auto_offset_boundary_optimum_fails_closed() -> None:
         max_search_motions=12,
     )
 
-    assert result["status"] == "failed"
-    assert result["evidence_strength"] == "failed"
+    assert result["status"] == "kept_zero"
+    assert result["evidence_strength"] == "degraded"
     assert result["boundary_hit"] is True
     assert result["selected_robot_pose_time_offset_ms"] == 0.0
     boundary_check = next(
@@ -209,7 +209,8 @@ def test_auto_offset_boundary_optimum_fails_closed() -> None:
         for item in result["checks"]
         if item["name"] == "search_optimum_not_at_boundary"
     )
-    assert boundary_check["status"] == "error"
+    assert boundary_check["status"] == "warning"
+    assert boundary_check["original_status"] == "error"
     assert all(item["robot_pose_time_offset_ms"] == 0.0 for item in adjusted)
 
 
@@ -231,7 +232,7 @@ def test_auto_offset_requires_three_motion_disjoint_folds() -> None:
         )
 
 
-def test_auto_offset_flat_curve_fails_closed() -> None:
+def test_auto_offset_flat_curve_keeps_zero_with_warning() -> None:
     observations, robot_records = _synthetic_offset_evidence(
         mode="eye_in_hand",
         planted_offset_ms=20,
@@ -248,7 +249,7 @@ def test_auto_offset_flat_curve_fails_closed() -> None:
         max_search_motions=12,
     )
 
-    assert result["status"] == "failed"
+    assert result["status"] == "kept_zero"
     assert result["selected_robot_pose_time_offset_ms"] == 0.0
     assert (
         next(
@@ -256,7 +257,7 @@ def test_auto_offset_flat_curve_fails_closed() -> None:
             for item in result["checks"]
             if item["name"] == "zero_offset_identifiability"
         )["status"]
-        == "error"
+        == "warning"
     )
     assert all(item["robot_pose_time_offset_ms"] == 0.0 for item in adjusted)
 
@@ -276,7 +277,6 @@ def test_auto_offset_flat_curve_keeps_recorded_timing_with_warning() -> None:
         offsets_ms=[float(value) for value in range(-40, 41, 10)],
         methods=("shah",),
         max_search_motions=12,
-        failure_policy=time_offset_module.FAILURE_POLICY_WARN_KEEP_ZERO,
     )
 
     assert result["status"] == "kept_zero"
@@ -292,7 +292,7 @@ def test_auto_offset_flat_curve_keeps_recorded_timing_with_warning() -> None:
     assert all(item["robot_pose_time_offset_ms"] == 0.0 for item in adjusted)
 
 
-def test_auto_offset_motion_consistency_fails_closed(
+def test_auto_offset_motion_consistency_keeps_zero_with_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observations, robot_records = _synthetic_offset_evidence(
@@ -319,7 +319,7 @@ def test_auto_offset_motion_consistency_fails_closed(
         max_search_motions=12,
     )
 
-    assert result["status"] == "failed"
+    assert result["status"] == "kept_zero"
     assert result["selected_robot_pose_time_offset_ms"] == 0.0
     assert (
         next(
@@ -327,7 +327,7 @@ def test_auto_offset_motion_consistency_fails_closed(
             for item in result["checks"]
             if item["name"] == "leave_one_motion_out_timing_consistency"
         )["status"]
-        == "error"
+        == "warning"
     )
     assert all(item["robot_pose_time_offset_ms"] == 0.0 for item in adjusted)
 

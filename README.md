@@ -35,18 +35,19 @@ calibration, timing, geometry, and object inputs that created them.
 
 The desktop console guides two outcomes:
 
-1. **Camera calibration** — configure the camera rig, capture target
-   observations, compare candidates, validate the result, and publish a
-   reusable calibration profile.
+1. **Camera calibration** — configure the camera rig and target, supervise a
+   capture, run one intent-level calibration attempt, review its evidence, and
+   explicitly promote reusable profiles.
 2. **Object dataset** — snapshot a calibration and pose template into a run,
    supervise physical capture, synchronize and validate the data, then export
    a BOP dataset.
 
 ```text
-reusable inputs → run snapshot → supervised capture → sync + quality gates
-                                                    → base BOP export
-                                                      ↳ optional GT + masks
-                                                        → annotated BOP export
+reusable inputs → run snapshot → fixed supervised capture recipe
+                                   │
+                                   └→ fixed sync → quality → rectify → BOP
+                                                                    │
+                                                                    └→ optional GT/masks
 ```
 
 Calibration targets feed calibration runs. Workpieces feed immutable pose
@@ -82,7 +83,7 @@ visibility data for evaluation-ready datasets.
 
 ## Repository Boundary
 
-PoseTestBot's acquisition pipeline ends at a validated BOP dataset. It does
+PoseTestBot's acquisition boundary ends at a validated BOP dataset. It does
 not contain or execute pose-estimator code and does not convert proprietary
 estimator output.
 
@@ -90,22 +91,21 @@ The **Inspect → BOP Evaluation** page is intentionally limited to dataset
 validation. It can apply the pinned official BOP19 metrics to an already
 compatible result CSV, or to a clearly labelled deterministic test result
 derived from ground truth. Evaluation evidence remains run-scoped and is never
-an acquisition-pipeline stage.
+an acquisition stage.
 
 The optional **Inspect → Pose Estimation** page is a thin integration with the
 separate [`match-cow/posetestbot-cluster`](https://github.com/match-cow/posetestbot-cluster)
 companion. That loopback-only controller owns SSH credentials, immutable run
 archives, BIGWORK staging, durable SLURM state, an estimator-driver registry,
 qualified private runtimes, and standard BOP19 CSV generation. Archive and
-restore remain usable without any pose method; FoundationPose is the first
-registered estimator and future methods use the same external boundary.
-PoseTestBot revalidates the active run,
+restore remain usable without any pose method. Estimators are available only
+when the controller advertises a qualified current driver. PoseTestBot
+revalidates the active run,
 proxies browser-safe requests, imports a completed CSV through its existing
 BOP19 validator, and retains external-job/container/input/output provenance.
-It never becomes a pipeline stage. The browser never receives a controller
-token or cluster credential. The private SIF is built with Apptainer on a LUIS
-login node and retained on BIGWORK; the exact pinned upstream FoundationPose
-license is bundled as runtime provenance, with no PoseTestBot approval gate.
+It never becomes an acquisition stage. The browser never receives a controller
+token or cluster credential. Private runtimes, licenses, remote paths, and
+scheduler details remain companion-owned.
 The Dashboard reports storage/archive readiness separately from qualified
 estimator readiness. It may also inspect, start, and stop one fixed server-configured
 user-systemd controller unit. Those lifecycle actions are queued local jobs;
@@ -114,8 +114,7 @@ credential. The controller card links to the **Run folders** page's top-level
 **Cluster storage** archive/restore panel, and **Pose Estimation** provides the
 same return handoff.
 
-The single deployment and qualification runbook is the companion's
-[FoundationPose cluster setup](https://github.com/match-cow/posetestbot-cluster/blob/main/docs/FOUNDATIONPOSE_CLUSTER_SETUP.md).
+Deployment and qualification instructions live in the companion repository.
 
 ## Lab Context and Safety
 
@@ -148,4 +147,5 @@ it only on the trusted lab network, or bind it to localhost for local use.
 - [Installation and runtime requirements](INSTALL.md)
 - [Workpiece Catalogue](docs/WORKPIECE_CATALOGUE.md)
 - [Pose templates and object ground truth](docs/POSETEMPLATECREATOR_OBJECT_GT.md)
+- [Physical commissioning](docs/COMMISSIONING.md)
 - [Contributor and safety rules](AGENTS.md)

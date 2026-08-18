@@ -117,7 +117,9 @@ def test_hardware_status_report_writes_manifest_stage(tmp_path: Path) -> None:
     assert path == run_root / HARDWARE_STATUS_REPORT
     assert report["overall_status"] == "warning"
     manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
-    stage = next(stage for stage in manifest["stages"] if stage["name"] == "hardware_status")
+    stage = next(
+        stage for stage in manifest["stages"] if stage["name"] == "hardware_status"
+    )
     assert stage["status"] == "succeeded"
     assert stage["artifacts"][HARDWARE_STATUS_REPORT] == HARDWARE_STATUS_REPORT
     assert manifest["robot_profile"]["mode"] == "real"
@@ -127,7 +129,9 @@ def test_hardware_status_report_uses_run_config_robot_profile(
     tmp_path: Path,
 ) -> None:
     run_root = tmp_path / "real-run"
-    config = create_run_config(run_root=run_root)
+    config = create_run_config(
+        capture_intent="dataset", bop_annotation_mode="none", run_root=run_root
+    )
     write_run_config(run_root, config)
 
     report = build_hardware_status_report(

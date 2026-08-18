@@ -9,7 +9,7 @@ run-scoped dataset-validation path: it consumes an already exported,
 annotation-bearing BOP dataset plus an immutable standard BOP19 result CSV (or
 a deterministic test-only GT perturbation), invokes the pinned official BOP
 Toolkit, and writes derived evidence only below `processed/bop_evaluation/`.
-It is not an estimator, converter, or acquisition-pipeline stage.
+It is not an estimator, converter, or acquisition stage.
 The separate `match-cow/posetestbot-cluster` companion may own SSH transfer,
 durable SLURM orchestration, an estimator-driver registry with pinned runtimes
 (FoundationPose first), and canonical BOP19 CSV generation. PoseTestBot may
@@ -72,11 +72,11 @@ arguments must never enter this repository or a browser response.
   non-reproducible evidence must still fail closed. This tolerance policy never
   weakens physical safety gates, path/containment checks, raw-data preservation,
   or artifact-integrity validation.
-- Keep completed status current in `docs/REWRITE_PROGRESS.md` and unfinished
-  work in `docs/REWRITE_REMAINING_WORK.md`.
-- A name containing `legacy` does not by itself make code removable. Keep the
-  compatibility readers and entry points named in the remaining-work plan until
-  that plan records a migration and sunset decision.
+- Keep the five operator-run physical acceptance tasks current in
+  `docs/COMMISSIONING.md`; do not recreate rewrite-history ledgers.
+- Current readers fail closed on retired schemas, aliases, protocol shapes,
+  and workflow routes. Do not add migration behavior without an explicit new
+  design decision.
 - Before deleting or renaming a tracked file, search production code, tests,
   docs, packaging manifests, and installer checks for references. Rebuild the
   checked-in frontend with Vite; never hand-edit or selectively retain hashed
@@ -145,9 +145,9 @@ uv run python scripts/robot_status.py --json
 Plan physical capture without executing it:
 
 ```bash
-uv run python scripts/create_run_config.py working_data/test_run
-uv run python scripts/run_pipeline_sequence.py working_data/test_run \
-  --sequence real_full_capture_validation --plan-only
+uv run python scripts/create_run_config.py working_data/test_run \
+  --intent dataset --annotation-mode none
+uv run python scripts/plan_capture.py working_data/test_run --json
 ```
 
 Read-only status commands:
@@ -169,15 +169,14 @@ Keep or extend these areas:
 
 - `posetestbot.pipeline.capture_plan`,
   `posetestbot.pipeline.capture_plan_preflight`,
-  and `posetestbot.pipeline.capture_execution`.
+  `posetestbot.pipeline.capture_execution`, capture completion, and the fixed
+  recipes in `posetestbot.pipeline.orchestration`.
 - `posetestbot.sensors.*` adapters, registry, status, discovery, and frame
   writer contracts.
 - `posetestbot.sync.non_destructive` and `posetestbot.sync.quality`.
-- `posetestbot.calibration.*` profile validation, preflight, observations,
-  target import, intrinsic/rectification, frame graph, candidates, explicit
-  extrinsic modes, and validation/promotion.
-- `scripts/run_aruco_stage.py` and `posetestbot.aruco.coverage` as calibration
-  target support.
+- `posetestbot.calibration.*` target import, current attempt solving,
+  intrinsic/rectification, transform utilities, profile validation, and
+  explicit promotion.
 - BlenderProc preparation/render planning for optional dataset GT/masks.
 - `posetestbot.pose_templates.catalog` as the JSON-backed Workpiece Catalogue
   persistence, identity, lifecycle, and metadata portability contract.
@@ -188,7 +187,7 @@ Keep or extend these areas:
   BOP Toolkit runtime bridge, and its run-scoped result/report APIs. It may
   import already compatible BOP19 CSVs or create deterministic test-only
   slight-offset results from GT, but must write only below
-  `processed/bop_evaluation/` and must never become a pipeline stage.
+  `processed/bop_evaluation/` and must never become an acquisition stage.
 - The thin `posetestbot.cluster` loopback client and `/cluster/*` web proxies
   for the separately deployed `posetestbot-cluster` companion. Result import
   must rerun the local standard BOP19 validator, bind the controller and staged
@@ -196,7 +195,8 @@ Keep or extend these areas:
   `processed/bop_evaluation/results/`.
 - Flask operator APIs for jobs, capture status, hardware/sensor/runtime
   status, run config, preflight, calibration, the `/workpieces` catalogue,
-  sync quality, Inspect-only BOP evaluation, and pipeline sequence submission.
+  sync quality, Inspect-only BOP evaluation, and purpose-specific preflight,
+  capture, dataset-processing, and robot-command submission.
 
 Do not expand the Inspect-only exception into downstream behavior:
 
@@ -204,9 +204,9 @@ Do not expand the Inspect-only exception into downstream behavior:
   SSH/SLURM wrappers in PoseTestBot. The typed external-controller client is
   the only estimator-orchestration boundary.
 - No BOP19 result CSV conversion stage.
-- No general evaluator bridge or evaluation pipeline stage beyond the
+- No general evaluator bridge or evaluation stage beyond the
   run-scoped official BOP19 metrics described above.
-- No legacy accuracy or metric-report export stage.
+- No accuracy or metric-report export stage outside the Inspect adapter.
 
 ## Important Artifacts
 
@@ -225,15 +225,9 @@ Do not expand the Inspect-only exception into downstream behavior:
   and `capture_execution_logs/`.
 - Derived sync report: `sync_report.json`.
 - Run-level sync quality report: `sync_quality_report.json`.
-- Calibration artifacts: `calibration_preflight_report.json`,
-  `calibration_target.json`, `intrinsic_calibration_profiles.json`,
-  attempt-level `intrinsic_comparison.json`,
-  per-sensor `aruco_detections.json`, `camera_rectification_report.json`,
-  `calibration_observations.json`, `calibration_candidates.json`,
-  `calibration_profiles_from_observations.json`,
-  `calibration_solver_report.json`, `calibration_profiles_solved.json`,
-  `calibration_validation_report.json`, and promoted
-  `calibration_profiles.json` (`calibration.v2`).
+- Calibration artifacts: `calibration_target.json`,
+  `camera_rectification_report.json`, promoted `calibration_profiles.json`
+  (`calibration.v2`), and the attempt-level evidence listed below.
 - Run-owned reusable-calibration selection is recorded in
   `calibration_profile_selection.json`. One or more promoted source runs may
   supply explicit per-sensor profiles. Exact single-source or deterministic
@@ -242,8 +236,7 @@ Do not expand the Inspect-only exception into downstream behavior:
   snapshots live below `processed/calibration_inputs/<bundle_sha256>/`; the
   selection manifest binds their hashes, every source bundle, and the
   per-sensor profile mapping so a later source-run change cannot alter the
-  dataset run. Selection schema v1 remains loadable; multi-source provenance
-  uses `calibration_profile_selection.v2`.
+  dataset run. Only `calibration_profile_selection.v2` is accepted.
 - Intent-level calibration attempts live under
   `processed/calibration/<attempt_id>/` and retain `request.json`,
   `progress.json`, `intrinsic_comparison.json`, `time_offset_search.json`,
@@ -338,22 +331,22 @@ not open hardware. Update it first when adding or renaming a sensor adapter.
 
 `posetestbot.sensors.frame_writer` owns shared capture output:
 
-- legacy `rgb/` and `depth/` PNG files,
-- compact `frame_metadata.jsonl` records,
-- camera sidecars via `write_legacy_camera_sidecars`.
+- `rgb/` and `depth/` PNG files,
+- compact current `frame_metadata.jsonl` records,
+- current camera sidecars.
 
 RealSense, OAK-D Pro, and ZED 2i capture scripts should write frames through
-`write_legacy_rgbd_frame` or `write_aligned_rgbd_frame`.
+`write_rgbd_frame` or `write_aligned_rgbd_frame`.
 
 The Devices-page operator alias is a reusable lab default in
 `working_data/sensor_aliases.json`. Workflow setup snapshots and may edit the
 run-owned `capture.sensors[].operator_alias` in `run_config.json`;
-`display_name` remains its effective compatibility label. Later lab-default
+`display_name` remains its effective label. Later lab-default
 changes must not rename an existing run. Capture planning mirrors the alias
 into `capture_plan.json` and `dataset_manifest.json`; physical identity and
 sensor-folder naming remain bound to sensor type and device ID.
 
-`run_config.v3` owns the exact `capture.synchronization` contract. The only
+`run_config.v4` owns the exact `capture.synchronization` contract. The only
 supported mode is `timestamp_aligned`; every enabled camera records its own
 timestamp evidence and is paired non-destructively with the robot pose stream.
 Reject other modes, implementations, scopes, roles, group identifiers, or
@@ -373,39 +366,18 @@ pre/post-motion frame counts only when diagnosing capture lifecycle or when
 the operator explicitly asks for them; never present them as a dataset-quality
 caveat.
 
-## Pipeline Sequences
+## Focused Orchestration
 
-Current acquisition sequences include:
+There is no generic stage or sequence registry. Keep these fixed recipes:
 
-- `real_full_capture_validation`
-- `sync_aruco`
-- `sync_aruco_calibration_observations`
-- `sync_aruco_calibration_candidates`
-- `sync_aruco_calibration_solver`
-- `sync_aruco_calibration_validation`
-- `sync_to_bop_dry_run`
-- `sync_to_bop_calibrated_dry_run`
-- `capture_to_bop_dataset_dry_run`
-- `aruco_grid_full_calibration`
-- `calibrated_capture_to_bop_dataset_dry_run`
+- Capture: plan → plan preflight → execution plan → supervised execution →
+  capture-completion validation.
+- Dataset processing: non-destructive sync → sync quality → rectification →
+  calibrated base BOP export.
+- Calibration: intent-level attempt → operator review → explicit promotion.
 
-Keep `sync_quality` immediately after `sync_run` in reusable sequences unless
-there is a clear operator-facing reason to bypass that gate.
-
-## Rewrite Gates
-
-The acquisition-only rewrite gates are:
-
-- `rewrite_full_capture.v1`
-- `rewrite_calibration_validation.v1`
-- `rewrite_bop_export_readiness.v1`
-
-Run them with:
-
-```bash
-uv run python scripts/run_rewrite_gate.py <run> --gate rewrite_full_capture.v1 --write
-uv run python scripts/run_rewrite_status.py <run> --write
-```
+Optional GT/mask generation is a separate deliberate dataset step. Do not add
+caller-supplied stage lists or turn Inspect evaluation into orchestration.
 
 ## Validation
 

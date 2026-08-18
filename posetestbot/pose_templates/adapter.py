@@ -24,7 +24,6 @@ import numpy as np
 
 
 POSETEMPLATECREATOR_REVISION = "97ddb9b7b756912deb8c2d2d6dde186b461e5d9d"
-LEGACY_POSETEMPLATECREATOR_REVISION = "450747bfee0e50b76f72ab38e1d0d04643124e02"
 POSETEMPLATECREATOR_RELATIVE_PATH = Path("third_party/PoseTemplateCreator")
 ADAPTER_VERSION = "posetestbot_posetemplatecreator_adapter.v4"
 TEMPLATE_PREVIEW_MAX_VERTICES = 160
@@ -90,9 +89,7 @@ def _quantized_preview_arrays(
         raise ValueError("Preview mesh has no finite spatial extent")
     decimals = int(
         np.clip(
-            CATALOG_PREVIEW_SIGNIFICANT_DIGITS
-            - 1
-            - math.floor(math.log10(scale)),
+            CATALOG_PREVIEW_SIGNIFICANT_DIGITS - 1 - math.floor(math.log10(scale)),
             -12,
             15,
         )
@@ -107,9 +104,7 @@ def _quantized_preview_arrays(
     ]
     if not len(mapped):
         raise ValueError("Quantized preview mesh has no triangles")
-    _keys, first_indices = np.unique(
-        np.sort(mapped, axis=1), axis=0, return_index=True
-    )
+    _keys, first_indices = np.unique(np.sort(mapped, axis=1), axis=0, return_index=True)
     mapped = mapped[np.sort(first_indices)]
     vectors = unique_points[mapped[:, 1:]] - unique_points[mapped[:, :1]]
     nondegenerate = np.linalg.norm(
@@ -169,9 +164,7 @@ def _cluster_preview_arrays(
     ]
     if not len(mapped):
         raise ValueError("Clustered preview mesh has no triangles")
-    _keys, first_indices = np.unique(
-        np.sort(mapped, axis=1), axis=0, return_index=True
-    )
+    _keys, first_indices = np.unique(np.sort(mapped, axis=1), axis=0, return_index=True)
     mapped = mapped[np.sort(first_indices)]
     vectors = clustered[mapped[:, 1:]] - clustered[mapped[:, :1]]
     nondegenerate = np.linalg.norm(

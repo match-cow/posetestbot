@@ -11,10 +11,10 @@ import numpy as np
 
 from posetestbot.sensors.contracts import CameraIntrinsics, SensorType
 from posetestbot.sensors.frame_writer import (
-    ensure_legacy_rgbd_folders,
+    ensure_rgbd_folders,
     sync_frame_metadata,
-    write_legacy_camera_sidecars,
-    write_legacy_rgbd_frame,
+    write_camera_sidecars,
+    write_rgbd_frame,
 )
 
 CAPTURE_SUMMARY_SCHEMA_VERSION = "zed_2i_capture_summary.v1"
@@ -171,9 +171,7 @@ def capture_zed_2i_rgbd(
 
     output = Path(output_path) if output_path is not None else None
     sl = sl_module or _import_zed()
-    cv2 = _cv2_for_preview(cv2_module) if preview else (
-        cv2_module or __import__("cv2")
-    )
+    cv2 = _cv2_for_preview(cv2_module) if preview else (cv2_module or __import__("cv2"))
     init_parameters = sl.InitParameters()
     init_parameters.camera_resolution = resolution_from_name(sl, resolution)
     init_parameters.camera_fps = fps
@@ -204,8 +202,8 @@ def capture_zed_2i_rgbd(
         resolved_device_id = _resolved_serial(camera_info, device_id)
         intrinsics = camera_intrinsics_from_zed(camera_info)
         if record and output is not None:
-            ensure_legacy_rgbd_folders(output)
-            written = write_legacy_camera_sidecars(output, intrinsics)
+            ensure_rgbd_folders(output)
+            written = write_camera_sidecars(output, intrinsics)
             sidecar_paths = {key: path.name for key, path in written.items()}
 
         runtime_parameters = sl.RuntimeParameters()
@@ -238,7 +236,7 @@ def capture_zed_2i_rgbd(
                 frame_stem_ms = host_wall_timestamp_ns // 1_000_000
                 if last_frame_stem_ms is not None:
                     frame_stem_ms = max(frame_stem_ms, last_frame_stem_ms + 1)
-                metadata = write_legacy_rgbd_frame(
+                metadata = write_rgbd_frame(
                     output,
                     rgb_image=rgb_image,
                     depth_image=depth_image,

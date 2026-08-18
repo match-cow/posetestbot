@@ -39,13 +39,11 @@ public class PoseTestBotFullCaptureApplication extends RoboticsAPIApplication {
 			"/PoseTestBot/CaptureStart";
 	private static final String CAPTURE_END_FRAME_PATH =
 			"/PoseTestBot/CaptureEnd";
-	private static final String DEFAULT_RECEIVER_IP = "172.31.1.169";
 	private static final Charset UTF_8 = Charset.forName("UTF-8");
 
 	private static final int SETTLE_TIME_MS = 1500;
 	private static final int COMMAND_BUFFER_BYTES = 4096;
 	private static final int ROBOT_PORT = 30300;
-	private static final int DEFAULT_RECEIVER_PORT = 8080;
 
 	private static final double REPOSITION_JOINT_VEL_REL = 0.08;
 	private static final double MAX_CAPTURE_A1_ANGULAR_VELOCITY_RAD_S =
@@ -333,8 +331,7 @@ public class PoseTestBotFullCaptureApplication extends RoboticsAPIApplication {
 						return null;
 					}
 
-					CaptureCommand command = captureCommand(
-							jsonObject, receivePacket);
+					CaptureCommand command = captureCommand(jsonObject);
 					if (command != null) {
 						getLogger().info("Accepted start command from "
 								+ receivePacket.getAddress().getHostAddress()
@@ -363,8 +360,12 @@ public class PoseTestBotFullCaptureApplication extends RoboticsAPIApplication {
 		}
 	}
 
-	private CaptureCommand captureCommand(JSONObject jsonObject,
-			DatagramPacket receivePacket) throws IOException {
+	private CaptureCommand captureCommand(JSONObject jsonObject)
+			throws IOException {
+		if (!"robot_command.v1".equals(jsonObject.get("schema_version"))) {
+			throw new IllegalArgumentException(
+					"schema_version must be robot_command.v1");
+		}
 		Double velocity = startValue(jsonObject);
 		if (velocity == null) {
 			return null;
@@ -376,35 +377,29 @@ public class PoseTestBotFullCaptureApplication extends RoboticsAPIApplication {
 					"cartesian_velocity_m_s must be finite and greater than zero");
 		}
 
-		String receiverIp = DEFAULT_RECEIVER_IP;
+		String receiverIp;
 		Object receiverIpValue = jsonObject.get("receiver_ip");
-		if (receiverIpValue != null) {
-			String requestedReceiverIp = receiverIpValue.toString().trim();
-			if (requestedReceiverIp.length() == 0
-					|| requestedReceiverIp.equals("0.0.0.0")
-					|| requestedReceiverIp.equals("::")) {
-				receiverIp = receivePacket.getAddress().getHostAddress();
-			} else {
-				receiverIp = requestedReceiverIp;
-			}
+		if (receiverIpValue == null
+				|| receiverIpValue.toString().trim().length() == 0) {
+			throw new IllegalArgumentException("receiver_ip is required");
 		}
+		receiverIp = receiverIpValue.toString().trim();
 
-		int receiverPort = DEFAULT_RECEIVER_PORT;
 		Object receiverPortValue = jsonObject.get("receiver_port");
-		if (receiverPortValue != null) {
-			receiverPort = integerValue(
-					receiverPortValue, "receiver_port");
+		if (receiverPortValue == null) {
+			throw new IllegalArgumentException("receiver_port is required");
 		}
+		int receiverPort = integerValue(receiverPortValue, "receiver_port");
 		if (receiverPort < 1 || receiverPort > 65535) {
 			throw new IllegalArgumentException(
 					"receiver_port must be between 1 and 65535");
 		}
 
-		String runId = "legacy-" + System.currentTimeMillis();
 		Object runIdValue = jsonObject.get("run_id");
-		if (runIdValue != null && runIdValue.toString().trim().length() > 0) {
-			runId = runIdValue.toString().trim();
+		if (runIdValue == null || runIdValue.toString().trim().length() == 0) {
+			throw new IllegalArgumentException("run_id is required");
 		}
+		String runId = runIdValue.toString().trim();
 
 		return new CaptureCommand(
 				velocity.doubleValue(),
@@ -414,11 +409,6 @@ public class PoseTestBotFullCaptureApplication extends RoboticsAPIApplication {
 	}
 
 	private Double startValue(JSONObject jsonObject) {
-		Object legacyStartValue = jsonObject.get("start");
-		if (legacyStartValue != null) {
-			return doubleValue(legacyStartValue);
-		}
-
 		if ("start_capture".equals(jsonObject.get("command"))) {
 			return doubleValue(jsonObject.get("cartesian_velocity_m_s"));
 		}
@@ -452,13 +442,8 @@ public class PoseTestBotFullCaptureApplication extends RoboticsAPIApplication {
 	}
 
 	private boolean isStopCommand(JSONObject jsonObject) {
-		if (Boolean.TRUE.equals(jsonObject.get("stop"))) {
-			return true;
-		}
-		Object command = jsonObject.get("command");
-		return "pause_capture".equals(command)
-				|| "stop_after_current_motion".equals(command)
-				|| "emergency_stop".equals(command);
+		return "robot_command.v1".equals(jsonObject.get("schema_version"))
+				&& "exit_idle_program".equals(jsonObject.get("command"));
 	}
 
 	private void sleepWithLogging(int millis, String reason) {

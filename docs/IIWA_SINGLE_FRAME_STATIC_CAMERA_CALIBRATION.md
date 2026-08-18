@@ -156,8 +156,8 @@ completed.
 - With explicit operator authorization, single-step the entire sequence in T1
   at reduced pendant override before a supervised capture. Do not infer
   readiness from a successful status request or repository test.
-- Retain v1 pose-stream identity/cadence evidence and the normal calibration
-  solver, validation, and promotion artifacts. The resulting primary profile
+- Retain `robot_pose.v1` identity/cadence evidence and the current attempt and
+  explicit promotion artifacts. The resulting primary profile
   remains `camera -> PoseTemplateBase`; the estimated
   `aruco_grid -> robot_flange` attachment is supporting evidence, not a runtime
   hand-tracking product.

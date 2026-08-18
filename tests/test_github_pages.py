@@ -104,8 +104,7 @@ def test_mkdocs_navigation_covers_every_markdown_source() -> None:
     config = yaml.safe_load(MKDOCS_CONFIG.read_text(encoding="utf-8"))
     nav_paths = _flatten_nav(config["nav"])
     source_paths = sorted(
-        path.relative_to(DOCS_ROOT).as_posix()
-        for path in DOCS_ROOT.rglob("*.md")
+        path.relative_to(DOCS_ROOT).as_posix() for path in DOCS_ROOT.rglob("*.md")
     )
 
     assert sorted(nav_paths) == source_paths
@@ -159,7 +158,8 @@ def test_strict_build_has_search_persistent_pages_and_resolved_links(
         "reference/api/capture-pipeline/index.html",
         "reference/run-config/index.html",
         "OPERATOR_WORKFLOWS/index.html",
-        "REWRITE_REMAINING_WORK/index.html",
+        "COMMISSIONING/index.html",
+        "STREAMLINING_PLAN/index.html",
     }
     for relative in expected_pages:
         assert (built_site / relative).is_file(), relative

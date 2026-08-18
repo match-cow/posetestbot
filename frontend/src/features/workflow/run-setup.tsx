@@ -23,22 +23,12 @@ const DEFAULT_CAPTURE_SPEED_M_S = 0.01
 const MAX_CALIBRATION_CAPTURE_SPEED_M_S = 0.03
 const MAX_DATASET_CAPTURE_SPEED_M_S = 1
 
-const defaultSunriseReferenceFramePath = () => POSE_TEMPLATE_BASE_SUNRISE_PATH
-
 const setupSchema = (maximumCaptureSpeedMps: number) => z.object({
   run_name: z.string().optional(),
   resolution: z.string().min(1),
   fps: z.number().int().min(1).max(60),
   velocity: z.number().min(0.01).max(maximumCaptureSpeedMps),
-  robot_pose_sunrise_reference_frame_path: z.string()
-    .trim()
-    .refine((value) => value.startsWith("/")
-      && !value.endsWith("/")
-      && !value.includes("//")
-      && !/\s/.test(value)
-      && value.split("/").slice(1).every((component) => component !== "." && component !== ".."), {
-      message: "Enter an absolute Sunrise frame path without empty, '.' or '..' components or a trailing slash.",
-    }),
+  annotation_mode: z.enum(["none", "pose", "pose_and_masks"]),
 })
 
 type SetupValues = z.infer<ReturnType<typeof setupSchema>>
@@ -53,7 +43,7 @@ type RunConfigResponse = {
   camera_contract?: { mutable: boolean; blockers: string[] }
   [key: string]: unknown
 }
-export type WorkflowIntent = "camera_calibration" | "object_dataset"
+export type WorkflowIntent = "calibration" | "dataset"
 
 type CalibrationIssue = { code: string; message: string; sensor_key?: string }
 
@@ -129,8 +119,7 @@ type CalibrationLibrarySelected =
 type CalibrationLibraryResponse = {
   selected: CalibrationLibrarySelected | null
   replacement_blockers?: string[]
-  calibrations?: CalibrationSource[]
-  sources?: CalibrationSource[]
+  calibrations: CalibrationSource[]
 }
 
 type CalibrationSelectionResponse = {
@@ -190,10 +179,6 @@ const TIMESTAMP_SYNCHRONIZATION: CaptureSynchronization = {
   mode: "timestamp_aligned",
 }
 
-const sequenceFor = (intent: WorkflowIntent) => intent === "camera_calibration"
-  ? "real_full_capture_validation"
-  : "calibrated_capture_to_bop_dataset_dry_run"
-
 function sharedResolutions(status: SensorStatus | undefined, enabledSensors: RunSensor[]) {
   let shared: string[] | null = null
   for (const sensor of enabledSensors) {
@@ -213,7 +198,7 @@ function defaultSetupValues(): SetupValues {
     resolution: "720p",
     fps: 6,
     velocity: DEFAULT_CAPTURE_SPEED_M_S,
-    robot_pose_sunrise_reference_frame_path: defaultSunriseReferenceFramePath(),
+    annotation_mode: "none",
   }
 }
 
@@ -226,25 +211,24 @@ function setupValuesFromConfig(
     resolution: config.capture.resolution,
     fps: config.capture.fps,
     velocity: Math.min(config.capture.velocity_m_s, maximumCaptureSpeedMps),
-    robot_pose_sunrise_reference_frame_path: config.frames?.robot_pose.sunrise_reference_frame_path
-      ?? defaultSunriseReferenceFramePath(),
+    annotation_mode: config.bop.annotation_mode,
   }
 }
 
-export function RunSetup({ intent = "camera_calibration" }: { intent?: WorkflowIntent }) {
+export function RunSetup({ intent = "calibration" }: { intent?: WorkflowIntent }) {
   const { selectedRun } = useOperator()
   return <RunSetupForContext key={`${intent}:${selectedRun}`} intent={intent} selectedRun={selectedRun} />
 }
 
 function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; selectedRun: string }) {
   const queryClient = useQueryClient()
-  const maximumCaptureSpeedMps = intent === "object_dataset"
+  const maximumCaptureSpeedMps = intent === "dataset"
     ? MAX_DATASET_CAPTURE_SPEED_M_S
     : MAX_CALIBRATION_CAPTURE_SPEED_M_S
-  const captureSpeedHelp = intent === "object_dataset"
-    ? "The dataset workflow passes requested tangential flange speeds up to 1.00 m/s without collapsing them to the conservative legacy range. Requests above 0.03 m/s use the structured robot_command.v1 protocol. Full capture uses an A1 joint PTP, and the commissioned Sunrise app independently caps A1 at 3°/s. These are ordinary software limits, not safety-rated limits."
-    : "Calibration raster legs use a scaled Cartesian LIN speed. The host never sends a numeric START value above 0.03, which also bounds a legacy app that interprets the value as relative joint speed. This is not a safety-rated limit."
-  const captureSpeedHint = intent === "object_dataset"
+  const captureSpeedHelp = intent === "dataset"
+    ? "The dataset workflow sends a structured robot_command.v1 request up to 1.00 m/s. Full capture uses an A1 joint PTP, and the commissioned Sunrise app independently caps A1 at 3°/s. These are ordinary software limits, not safety-rated limits."
+    : "Calibration raster legs use a scaled Cartesian LIN speed and a structured robot_command.v1 request capped at 0.03 m/s. This is not a safety-rated limit."
+  const captureSpeedHint = intent === "dataset"
     ? "Choose 0.01–1.00 m/s. Requests above 0.03 m/s require the commissioned structured-command app. Full capture is an A1 joint PTP; the commissioned app also caps A1 at 3°/s. Speed alone cannot guarantee sharp frames—exposure time and lighting still matter."
     : "Choose 0.01–0.03 m/s. Full capture is an A1 joint PTP; calibration motion remains in the conservative commissioned range. Speed alone cannot guarantee sharp frames—exposure time and lighting still matter."
   const sensors = useQuery({ queryKey: ["sensors", "status"], queryFn: () => api<SensorStatus>("/sensors/status"), staleTime: 10_000 })
@@ -252,10 +236,10 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
   const calibrations = useQuery({
     queryKey: ["calibration-library", selectedRun],
     queryFn: () => api<CalibrationLibraryResponse>(query("/ui/calibrations", { run_root: selectedRun })),
-    enabled: intent === "object_dataset",
+    enabled: intent === "dataset",
     retry: false,
   })
-  const calibrationSources = calibrations.data?.calibrations ?? calibrations.data?.sources ?? []
+  const calibrationSources = calibrations.data?.calibrations ?? []
   const form = useForm<SetupValues>({
     resolver: zodResolver(setupSchema(maximumCaptureSpeedMps)),
     defaultValues: existing.data?.config
@@ -285,18 +269,10 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
     const configured = existing.data?.config.capture.sensors ?? []
     const rows = configured.map((sensor) => {
       const detected = detectedByKey.get(sensorKey(sensor))
-      const legacyOperatorAlias = sensor.operator_alias !== undefined
-        ? sensor.operator_alias
-        : (
-            !detected
-            || sensor.display_name !== detected.display_name
-              ? sensor.display_name
-              : null
-          )
       return {
         ...detected,
         ...sensor,
-        operator_alias: legacyOperatorAlias,
+        operator_alias: sensor.operator_alias,
         enabled: sensor.enabled ?? true,
       } as RunSensor
     })
@@ -389,18 +365,10 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
     && savedEnabledSensorKeys.join("\n") !== selectedEnabledSensorKeys.join("\n")
   const hasResolutionChanges = Boolean(existing.data?.config)
     && selectedResolution !== existing.data?.config.capture.resolution
-  const selectedReferenceFramePath = useWatch({
-    control: form.control,
-    name: "robot_pose_sunrise_reference_frame_path",
-  })
-  const savedReferenceFramePath = existing.data?.config.frames?.robot_pose.sunrise_reference_frame_path ?? ""
-  const hasReferenceFrameChanges = Boolean(existing.data?.config)
-    && selectedReferenceFramePath !== savedReferenceFramePath
   const hasCameraContractChanges = hasMountingChanges
     || hasOrientationChanges
     || hasEnabledMembershipChanges
     || hasResolutionChanges
-    || hasReferenceFrameChanges
   const resolutionOptions = sharedResolutions(sensors.data, enabledSensors)
   const activeSourceBySensor = calibrationAssignments?.runRoot === selectedRun
     ? calibrationAssignments.sourceBySensor
@@ -417,7 +385,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
   const hasCalibrationDraft = calibrationAssignmentRows.some((row) => Boolean(activeSourceBySensor[row.key]))
   const calibrationAssignmentsComplete = calibrationAssignmentRows.length > 0
     && calibrationAssignmentRows.every((row) => Boolean(row.selectedSource && row.selectedMapping))
-  const existingConfig = intent === "object_dataset" ? existing.data?.config : undefined
+  const existingConfig = intent === "dataset" ? existing.data?.config : undefined
   const existingCalibration = existingConfig?.calibration_profiles ?? null
   const existingIntrinsicCalibration = existingConfig?.intrinsic_calibration_profiles ?? null
   const configuredSelectionHash = existingConfig?.calibration_profile_selection?.bundle_sha256 ?? null
@@ -430,7 +398,6 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
     && librarySelection?.valid === true
     && currentSelectedBundleHash === configuredSelectionHash
     && !hasCameraContractChanges
-  const hasUnverifiedLegacyCalibration = Boolean(existingCalibration || existingIntrinsicCalibration) && !existingSelectionComplete
   const hasInvalidExistingSelection = existingSelectionComplete
     && !calibrations.isPending
     && (!librarySelection || librarySelection.valid === false || currentSelectedBundleHash !== configuredSelectionHash)
@@ -438,7 +405,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
   const replacementBlockers = calibrations.data?.replacement_blockers ?? []
   const replacementBlocked = replacingSelection && replacementBlockers.length > 0
   const replacementConfirmed = !replacingSelection || confirmReplacement
-  const calibrationReady = cameraMountingReady && (intent === "camera_calibration"
+  const calibrationReady = cameraMountingReady && (intent === "calibration"
     || (hasCalibrationDraft
       ? calibrationAssignmentsComplete && replacementConfirmed && !replacementBlocked
       : existingCalibrationReady))
@@ -461,15 +428,13 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
       })
       if (unavailable.length) throw new Error(`Enabled cameras are not ready: ${unavailable.map(sensorKey).join(", ")}`)
       let calibrationProfiles = existing.data?.config.calibration_profiles ?? ""
-      let intrinsicProfiles = intent === "object_dataset"
-        ? existing.data?.config.intrinsic_calibration_profiles ?? String(existing.data?.config.pipeline.options?.camera_rectification && typeof existing.data.config.pipeline.options.camera_rectification === "object"
-          ? (existing.data.config.pipeline.options.camera_rectification as Record<string, unknown>).intrinsic_profiles ?? ""
-          : "")
+      let intrinsicProfiles = intent === "dataset"
+        ? existing.data?.config.intrinsic_calibration_profiles ?? ""
         : ""
       let sensorProfiles: Record<string, string> = {}
       let expectedCalibrationBundleSha256 = existingCalibrationReady ? configuredSelectionHash : null
 
-      if (intent === "object_dataset" && hasCalibrationDraft) {
+      if (intent === "dataset" && hasCalibrationDraft) {
         if (!calibrationAssignmentsComplete) throw new Error("Choose a calibration source for every enabled camera")
         if (replacingSelection && !confirmReplacement) throw new Error("Confirm that you want to replace the current calibration selection")
         const selectionsBySource = new Map<string, { source: CalibrationSource; sensorKeys: string[] }>()
@@ -496,7 +461,6 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
             expected_current_bundle_sha256: currentSelectedBundleHash,
             confirm_replace: replacingSelection && confirmReplacement,
             resolution: values.resolution,
-            robot_pose_sunrise_reference_frame_path: values.robot_pose_sunrise_reference_frame_path,
             sensors: enabledSensors.map((sensor) => ({
               sensor_type: sensor.sensor_type,
               device_id: sensor.device_id,
@@ -510,7 +474,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
         sensorProfiles = selected.sensor_profiles ?? selected.selection.sensor_profiles ?? Object.fromEntries(selected.sensor_profile_mapping.map((item) => [item.sensor_key, item.profile_id]))
         expectedCalibrationBundleSha256 = selected.selection.source.bundle_sha256
       }
-      if (intent === "object_dataset" && (!calibrationProfiles || !intrinsicProfiles || !expectedCalibrationBundleSha256)) {
+      if (intent === "dataset" && (!calibrationProfiles || !intrinsicProfiles || !expectedCalibrationBundleSha256)) {
         throw new Error("Choose a compatible saved calibration before saving this dataset setup")
       }
 
@@ -533,15 +497,11 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
           ),
         }
       })
-      const sequenceOptions = intent === "object_dataset" ? {
-        camera_rectification: { intrinsic_profiles: intrinsicProfiles },
-      } : {}
       const runValues = {
         run_name: values.run_name,
         resolution: values.resolution,
         fps: values.fps,
-        velocity: values.velocity,
-        robot_pose_sunrise_reference_frame_path: values.robot_pose_sunrise_reference_frame_path,
+        velocity_m_s: values.velocity,
       }
       return api<RunConfigResponse>("/run-config", {
         method: "POST",
@@ -549,19 +509,18 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
           run_root: selectedRun,
           ...runValues,
           sensors: selectedSensors,
-          from_detected_sensors: false,
-          sequence: sequenceFor(intent),
-          sequence_options: sequenceOptions,
+          intent,
+          annotation_mode: intent === "calibration" ? "none" : values.annotation_mode,
           calibration_profiles: calibrationProfiles || null,
-          ...(intent === "object_dataset" ? { expected_calibration_bundle_sha256: expectedCalibrationBundleSha256 } : {}),
-          dataset_mode: intent === "object_dataset" ? "pose_template" : "objectless",
-          plan_only: intent === "camera_calibration",
+          intrinsic_calibration_profiles: intrinsicProfiles || null,
+          ...(intent === "dataset" ? { expected_calibration_bundle_sha256: expectedCalibrationBundleSha256 } : {}),
+          dataset_mode: intent === "dataset" ? "pose_template" : "objectless",
           synchronization: TIMESTAMP_SYNCHRONIZATION,
         }),
       })
     },
     onSuccess: (data) => {
-      toast.success(intent === "camera_calibration" ? "Calibration recording setup saved" : "Object dataset setup saved")
+      toast.success(intent === "calibration" ? "Calibration recording setup saved" : "Object dataset setup saved")
       queryClient.setQueryData<RunConfigResponse>(["run-config", selectedRun], (current) => current ? { ...current, ...data } : data)
       setMountingModeDrafts((current) => Object.fromEntries(Object.entries(current).filter(([key, mountingMode]) => {
         const saved = data.config.capture.sensors.find((sensor) => sensorKey(sensor) === key)
@@ -581,40 +540,43 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
     },
     onError: (error) => toast.error("Setup was not saved", { description: errorMessage(error) }),
     onSettled: () => {
-      if (intent === "object_dataset") void queryClient.invalidateQueries({ queryKey: ["calibration-library", selectedRun] })
+      if (intent === "dataset") void queryClient.invalidateQueries({ queryKey: ["calibration-library", selectedRun] })
     },
   })
 
   return <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]" data-testid={`${intent}-run-setup`}>
     <Card>
-      <CardHeader><CardTitle>{intent === "camera_calibration" ? "Calibration recording setup" : "Object dataset recording setup"}</CardTitle><CardDescription>{intent === "camera_calibration" ? "Choose the cameras and capture settings used to record the printed grid." : "Choose the cameras, capture settings, and a previously saved calibration that covers every enabled camera."}</CardDescription></CardHeader>
+      <CardHeader><CardTitle>{intent === "calibration" ? "Calibration recording setup" : "Object dataset recording setup"}</CardTitle><CardDescription>{intent === "calibration" ? "Choose the cameras and capture settings used to record the printed grid." : "Choose the cameras, capture settings, and a previously saved calibration that covers every enabled camera."}</CardDescription></CardHeader>
       <CardContent><form className="space-y-6" aria-busy={setupLookupPending} onSubmit={form.handleSubmit((values) => {
         if (!setupControlsDisabled) save.mutate(values)
       })}>
         <fieldset className="space-y-6" disabled={setupControlsDisabled}>
         {cameraContractLocked && <div id="camera-contract-lock-reason" data-testid="camera-contract-lock" className="flex items-start gap-3 rounded-lg border border-warning/40 bg-warning/10 p-4 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" /><div><div className="font-semibold">Capture reference and camera contract fixed for this acquired run</div><p className="mt-1 leading-relaxed text-muted-foreground">Robot-pose Sunrise reference, camera identity, enabled membership, mounting, orientation, resolution, frame rate, and synchronization can no longer change because captured or derived evidence depends on them. Start a fresh run for a different arrangement.</p>{cameraContractBlockers.length > 0 && <ul className="mt-2 list-disc space-y-1 pl-4 font-mono text-[10px] text-muted-foreground">{cameraContractBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}</div></div>}
         <div className="grid gap-4 sm:grid-cols-2"><Field id="run-name" label="Run display name (optional)" hint="Human-readable metadata only. Leave blank to use the folder name; changing it does not select or rename storage." error={form.formState.errors.run_name?.message}><Input id="run-name" {...form.register("run_name")} placeholder="Defaults to folder name" /></Field><Field id="resolution" label="Image resolution" hint="Only modes shared by every enabled camera are offered."><Controller control={form.control} name="resolution" render={({ field }) => <Select value={field.value} onValueChange={field.onChange} disabled={cameraContractLocked}><SelectTrigger id="resolution" aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined}><SelectValue /></SelectTrigger><SelectContent>{resolutionOptions.map((resolution) => <SelectItem value={resolution} key={resolution}>{resolution === "720p" ? "1280 × 720" : resolution === "360p" ? "672 × 376" : resolution}</SelectItem>)}</SelectContent></Select>} /></Field></div>
-        <div className="grid gap-4 sm:grid-cols-2"><Field id="fps" label={<span className="inline-flex items-center gap-1">Frames per second <HelpTip label="frames per second">The requested RGB-D frame rate for each enabled camera. Higher rates create more data and may exceed a camera or USB connection's supported mode.</HelpTip></span>} hint="How many RGB-D frames each camera should request per second." error={form.formState.errors.fps?.message}><Input id="fps" type="number" min={1} max={60} disabled={cameraContractLocked} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined} {...form.register("fps", { valueAsNumber: true })} /></Field><Field id="velocity" label={<span className="inline-flex items-center gap-1">{intent === "object_dataset" ? "Requested robot capture speed (m/s)" : "Robot capture speed limit (m/s)"} <HelpTip label="robot capture speed">{captureSpeedHelp}</HelpTip></span>} hint={captureSpeedHint} error={form.formState.errors.velocity?.message}><Input id="velocity" type="number" min="0.01" max={maximumCaptureSpeedMps} step="0.01" {...form.register("velocity", { valueAsNumber: true })} /></Field></div>
+        <div className="grid gap-4 sm:grid-cols-2"><Field id="fps" label={<span className="inline-flex items-center gap-1">Frames per second <HelpTip label="frames per second">The requested RGB-D frame rate for each enabled camera. Higher rates create more data and may exceed a camera or USB connection's supported mode.</HelpTip></span>} hint="How many RGB-D frames each camera should request per second." error={form.formState.errors.fps?.message}><Input id="fps" type="number" min={1} max={60} disabled={cameraContractLocked} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined} {...form.register("fps", { valueAsNumber: true })} /></Field><Field id="velocity" label={<span className="inline-flex items-center gap-1">{intent === "dataset" ? "Requested robot capture speed (m/s)" : "Robot capture speed limit (m/s)"} <HelpTip label="robot capture speed">{captureSpeedHelp}</HelpTip></span>} hint={captureSpeedHint} error={form.formState.errors.velocity?.message}><Input id="velocity" type="number" min="0.01" max={maximumCaptureSpeedMps} step="0.01" {...form.register("velocity", { valueAsNumber: true })} /></Field></div>
 
         <section className="space-y-3 rounded-lg border bg-muted/15 p-4" data-testid="robot-pose-reference-setup" aria-labelledby="robot-pose-reference-heading">
-          <div><h3 id="robot-pose-reference-heading" className="text-sm font-semibold">PoseTemplateBase robot-pose reference <span className="text-destructive">Required</span></h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">The controller must report this exact absolute Application Data path in every <code>robot_pose.v1</code> packet. {intent === "camera_calibration" ? "For static cameras, this is the destination frame of the reusable camera → PoseTemplateBase result; the robot-mounted grid is only the moving calibration instrument." : "Static profiles are selectable only when their recorded path matches this dataset reference; robot-mounted camera profiles remain flange-relative."}</p></div>
-          <Field id="robot-pose-sunrise-reference-frame-path" label="Absolute Sunrise frame path" hint="Path equality is software provenance. It does not prove that a persistent Sunrise frame was never retaught; retain commissioning/read-back evidence separately." error={form.formState.errors.robot_pose_sunrise_reference_frame_path?.message}>
-            <Input id="robot-pose-sunrise-reference-frame-path" data-testid="robot-pose-reference-path" className="font-mono" disabled={cameraContractLocked} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined} {...form.register("robot_pose_sunrise_reference_frame_path")} />
-          </Field>
-          {intent === "camera_calibration" && <div className={`rounded border p-3 text-xs leading-relaxed ${selectedReferenceFramePath === POSE_TEMPLATE_BASE_SUNRISE_PATH ? "border-primary/25 bg-primary/5" : "border-warning/40 bg-warning/10"}`} data-testid="calibration-result-reference"><span className="font-semibold">Static-camera output:</span> The normal workcell contract is <code>camera → PoseTemplateBase</code>, bound to <code>{POSE_TEMPLATE_BASE_SUNRISE_PATH}</code>. The moving grid provides many observations and a jointly estimated attachment offset; it does not change the published destination frame.{selectedReferenceFramePath !== POSE_TEMPLATE_BASE_SUNRISE_PATH ? " This draft uses a different reference path, so it will not produce the normal PoseTemplateBase object-capture profile." : ""}</div>}
-          <div className="rounded border border-warning/35 bg-warning/5 p-3 text-xs leading-relaxed"><span className="font-semibold">Controller contract:</span> A configured path rejects legacy packets and a different reported path before capture evidence can be treated as valid. Change this value only before acquisition.</div>
+          <div><h3 id="robot-pose-reference-heading" className="text-sm font-semibold">Fixed PoseTemplateBase robot-pose reference</h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Every <code>robot_pose.v1</code> packet must report the commissioned Application Data path below together with this run's exact ID. The setting is not browser-editable.</p></div>
+          <div data-testid="robot-pose-reference-path" className="rounded border bg-background p-3 font-mono text-xs">{POSE_TEMPLATE_BASE_SUNRISE_PATH}</div>
+          {intent === "calibration" && <div className="rounded border border-primary/25 bg-primary/5 p-3 text-xs leading-relaxed" data-testid="calibration-result-reference"><span className="font-semibold">Static-camera output:</span> The reusable camera → PoseTemplateBase result is bound to this frame. The moving grid provides observations and a jointly estimated attachment offset; it does not change the published destination frame.</div>}
+          <div className="rounded border border-warning/35 bg-warning/5 p-3 text-xs leading-relaxed"><span className="font-semibold">Controller contract:</span> Packets with a different frame path, missing run ID, or a non-current schema are rejected before capture evidence can be accepted.</div>
         </section>
 
-        {intent === "object_dataset" && <section className="space-y-3 rounded-lg border bg-muted/15 p-4" data-testid="capture-synchronization-setup" aria-labelledby="capture-synchronization-heading">
+        {intent === "dataset" && <section className="space-y-3 rounded-lg border bg-muted/15 p-4" data-testid="capture-synchronization-setup" aria-labelledby="capture-synchronization-heading">
           <div><h3 id="capture-synchronization-heading" className="text-sm font-semibold">Cross-camera timing</h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">All PoseTestBot acquisitions use timestamp-aligned RGB-D streams.</p></div>
           <div className="rounded border border-primary/25 bg-primary/5 p-3 text-xs leading-relaxed"><div className="font-semibold">Timestamp association</div><p className="mt-1 text-muted-foreground">Each camera preserves its own RGB-D stream and timestamps. Processing associates frames and robot poses using the promoted calibration timing evidence; it does not claim simultaneous camera exposures.</p></div>
         </section>}
 
-        {intent === "object_dataset" && <section className="space-y-3" aria-labelledby="saved-calibration-heading">
+        {intent === "dataset" && <section className="space-y-3 rounded-lg border bg-muted/15 p-4" data-testid="bop-annotation-mode-setup" aria-labelledby="bop-annotation-mode-heading">
+          <div><h3 id="bop-annotation-mode-heading" className="text-sm font-semibold">BOP annotation outcome</h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">The base image/model export is always produced first. Ground-truth rendering remains a separate optional background job after processing.</p></div>
+          <Controller control={form.control} name="annotation_mode" render={({ field }) => <Select value={field.value} onValueChange={field.onChange}><SelectTrigger id="annotation-mode" aria-label="BOP annotation mode"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">Base BOP dataset only</SelectItem><SelectItem value="pose">Optional pose ground truth</SelectItem><SelectItem value="pose_and_masks">Optional pose + masks</SelectItem></SelectContent></Select>} />
+          <p className="text-[11px] leading-relaxed text-muted-foreground">This explicit run contract records the intended final dataset evidence. Selecting an annotated outcome does not queue rendering or authorize hardware.</p>
+        </section>}
+
+        {intent === "dataset" && <section className="space-y-3" aria-labelledby="saved-calibration-heading">
           <div><h3 id="saved-calibration-heading" className="text-sm font-semibold">Saved camera calibration <span className="text-destructive">Required</span></h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Choose a promoted source for each enabled camera. Static and robot-mounted cameras may come from different calibration runs; PoseTestBot combines only the assigned profile pairs into one immutable, run-owned snapshot.</p></div>
           {existingCalibrationReady && !hasCalibrationDraft && <div className="flex items-start gap-2 rounded-lg border border-success/35 bg-success/5 p-3 text-xs"><CheckCircle2 className="mt-0.5 size-4 shrink-0 text-success" /><div><div className="font-semibold">A verified calibration snapshot is selected</div><div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{existingCalibration}</div><p className="mt-1 text-muted-foreground">Both profile files and the selection record agree on bundle <span className="font-mono">{configuredSelectionHash?.slice(0, 16)}…</span>. Assign sources below only if you intend to replace it.</p></div></div>}
-          {hasCameraContractChanges && !hasCalibrationDraft && <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" /><div><div className="font-semibold">Camera or robot-pose reference changed for this run</div><p className="mt-1 text-muted-foreground">The previous calibration cannot be reused implicitly after a reference-frame path, camera membership, resolution, mounting, or image-orientation change. Assign a compatible promoted source to every enabled camera before saving.</p></div></div>}
-          {hasUnverifiedLegacyCalibration && !hasCalibrationDraft && <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" /><div><div className="font-semibold">Unverified legacy calibration path</div>{existingCalibration && <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">Camera profiles: {existingCalibration}</div>}{existingIntrinsicCalibration && <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">Lens profiles: {existingIntrinsicCalibration}</div>}<p className="mt-1 text-muted-foreground">These paths are not backed by a complete, hash-verified selection and do not satisfy this workflow. Assign a saved calibration to every camera below.</p></div></div>}
+          {hasCameraContractChanges && !hasCalibrationDraft && <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" /><div><div className="font-semibold">Camera contract changed for this run</div><p className="mt-1 text-muted-foreground">The previous calibration cannot be reused implicitly after camera membership, resolution, mounting, or image-orientation changes. Assign a compatible promoted source to every enabled camera before saving.</p></div></div>}
           {hasInvalidExistingSelection && !hasCalibrationDraft && <div className="flex items-start gap-2 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="font-semibold">Saved calibration selection needs attention</div><p className="mt-1 text-muted-foreground">{librarySelection?.valid === false && librarySelection.issues[0] ? librarySelection.issues[0].message : "The selected snapshot does not match the bundle recorded in run_config.json."} Assign and validate saved calibrations before recording.</p></div></div>}
           {calibrations.isPending ? <div className="flex items-center gap-2 rounded-lg border p-4 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Loading promoted calibrations…</div> : calibrationSources.length === 0 ? <div className="rounded-lg border border-dashed p-4 text-xs text-muted-foreground">No reusable promoted calibrations were found. Complete and promote the camera-calibration workflow first.</div> : <div className="space-y-3" data-testid="calibration-source-assignments">{calibrationAssignmentRows.map(({ sensor, key, eligibleSources, selectedSource, selectedMapping }) => {
             const selectId = `calibration-source-${key.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`
@@ -634,7 +596,6 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
           {replacingSelection && !replacementBlocked && <Label className="flex cursor-pointer items-start gap-3 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><Checkbox aria-label="Confirm replacing the current calibration selection" checked={confirmReplacement} onCheckedChange={(checked) => setConfirmReplacement(checked === true)} /><span><span className="block font-semibold">Replace the current calibration selection</span><span className="mt-1 block font-normal text-muted-foreground">I understand this replaces bundle <span className="font-mono">{currentSelectedBundleHash?.slice(0, 12)}…</span> with the camera-by-camera combination above. The server will reject the change if the current selection changed since this page loaded.</span></span></Label>}
         </section>}
 
-        <details className="rounded-lg border bg-muted/20"><summary className="cursor-pointer px-3 py-2 text-xs font-semibold">Advanced pipeline details</summary><div className="border-t px-3 py-3 text-xs text-muted-foreground"><div>Preset: <code>{sequenceFor(intent)}</code></div><div className="mt-1">{intent === "camera_calibration" ? "The reusable preset is stored in prepare-only mode. Physical recording is always a separate, freshly authorized action." : "After recording, this preset synchronizes, rectifies, and prepares a BOP dataset using the selected calibration."}</div></div></details>
         </fieldset>
         <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
           {setupLookupPending

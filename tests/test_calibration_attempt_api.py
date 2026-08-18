@@ -25,6 +25,7 @@ from posetestbot.io.artifacts import (
 from posetestbot.jobs.runner import ResourceBusyError
 from posetestbot.pipeline.run_config import (
     create_run_config,
+    load_run_config_for_run_root,
     sensor_configs_from_values,
     write_run_config_with_manifest,
 )
@@ -71,8 +72,17 @@ def _write_camera(run_root: Path, name: str) -> None:
     (run_root / name / FRAME_METADATA_JSONL).write_text(
         json.dumps(
             {
+                "schema_version": "frame_metadata.v1",
+                "sensor_type": (
+                    "realsense_d435" if name.startswith("realsense_") else "oak_d_pro"
+                ),
+                "sensor_id": name.split("_", 1)[1],
+                "frame_index": 0,
                 "frame_id": "1000.png",
+                "rgb_path": "rgb/1000.png",
+                "depth_path": "depth/1000.png",
                 "host_received_timestamp_ns": 1_000_000_000,
+                "host_wall_timestamp_ns": 10_000_000_000,
                 "sensor_timestamp_ns": 10_000_000_000,
                 "color_timestamp_domain": "global_time",
             }
@@ -87,6 +97,7 @@ def _write_robot_pose(
     reference_path: str = POSE_TEMPLATE_BASE_SUNRISE_PATH,
     relative_path: str = "raw_robot_ee_poses.json",
 ) -> None:
+    run_id = load_run_config_for_run_root(run_root)["run_id"]
     destination = run_root / relative_path
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(
@@ -98,6 +109,8 @@ def _write_robot_pose(
                     "host_wall_timestamp_ns": 10_000_000_000,
                     "source_packet": {
                         "schema_version": "robot_pose.v1",
+                        "packet_kind": "pose",
+                        "run_id": run_id,
                         "from_frame": "robot_flange",
                         "to_frame": "template_base",
                         "sunrise_reference_frame_path": reference_path,
@@ -132,9 +145,10 @@ def test_robot_pose_reference_binds_every_selected_source(tmp_path: Path) -> Non
     write_run_config_with_manifest(
         run_root,
         create_run_config(
+            capture_intent="calibration",
+            bop_annotation_mode="none",
             run_root=run_root,
             sensors=sensors,
-            robot_pose_sunrise_reference_frame_path=(POSE_TEMPLATE_BASE_SUNRISE_PATH),
         ),
     )
     paths = [
@@ -205,6 +219,8 @@ def calibration_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         },
     ]
     config = create_run_config(
+        capture_intent="calibration",
+        bop_annotation_mode="none",
         run_root=run_root,
         sensors=sensor_configs_from_values(sensors),
     )
@@ -285,10 +301,7 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
     assert (
         synchronization["search"]["warning_absolute_robot_pose_time_offset_ms"] == 150.0
     )
-    assert (
-        synchronization["search"]["time_offset_failure_policy"]
-        == "warn_keep_zero"
-    )
+    assert synchronization["search"]["time_offset_failure_policy"] == "warn_keep_zero"
     assert (
         synchronization["search"]["minimum_motion_count_per_cross_validation_fold"] == 4
     )
@@ -395,6 +408,7 @@ def test_setup_and_attempt_submission_exclude_disabled_camera(
             "mode": "eye_in_hand",
             "sensor_keys": ["oak_d_pro:2"],
             "target_id": bundle["target_id"],
+            "synchronization_policy": "auto_offset",
         },
     )
 
@@ -420,6 +434,7 @@ def test_attempt_submission_scopes_exact_cameras_and_queues_cpu_disk_parent_job(
             "mode": "eye_in_hand",
             "sensor_keys": ["oak_d_pro:2"],
             "target_id": bundle["target_id"],
+            "synchronization_policy": "auto_offset",
         },
     )
     payload = response.get_json()
@@ -474,9 +489,10 @@ def test_all_static_three_camera_attempt_uses_robot_mounted_unknown_target(
     write_run_config_with_manifest(
         run_root,
         create_run_config(
+            capture_intent="calibration",
+            bop_annotation_mode="none",
             run_root=run_root,
             sensors=sensors,
-            robot_pose_sunrise_reference_frame_path=(POSE_TEMPLATE_BASE_SUNRISE_PATH),
         ),
     )
     select_target_bundle(
@@ -505,6 +521,7 @@ def test_all_static_three_camera_attempt_uses_robot_mounted_unknown_target(
                 "realsense_d435:3",
             ],
             "target_id": bundle["target_id"],
+            "synchronization_policy": "auto_offset",
         },
     )
 
@@ -543,6 +560,7 @@ def test_all_static_three_camera_attempt_uses_robot_mounted_unknown_target(
         "from": "robot_flange",
         "to": "template_base",
         "sunrise_reference_frame_path": POSE_TEMPLATE_BASE_SUNRISE_PATH,
+        "run_id": load_run_config_for_run_root(run_root)["run_id"],
         "artifacts": ["raw_robot_ee_poses.json"],
         "pose_counts": {"raw_robot_ee_poses.json": 1},
         "artifact_bindings": [
@@ -599,31 +617,11 @@ def test_attempt_worker_rejects_robot_pose_mutation_after_request_creation(
     assert "changed after calibration attempt creation" in progress["message"]
 
 
-@pytest.mark.parametrize(
-    ("configured_path", "captured_path", "expected_message"),
-    [
-        (
-            "/PoseTestBot/TemplateBase",
-            "/PoseTestBot/TemplateBase",
-            "Static camera calibration must declare",
-        ),
-        (
-            POSE_TEMPLATE_BASE_SUNRISE_PATH,
-            "/PoseTestBot/TemplateBase",
-            "does not match run config",
-        ),
-    ],
-)
 def test_static_attempt_rejects_non_pose_template_base_robot_pose_reference(
     calibration_client,
-    configured_path: str,
-    captured_path: str,
-    expected_message: str,
 ) -> None:
     client, runner, fixture_run, bundle, library = calibration_client
-    run_root = fixture_run.parent / (
-        "wrong-static-reference-" + configured_path.rsplit("/", 1)[-1]
-    )
+    run_root = fixture_run.parent / ("wrong-static-reference")
     sensors = sensor_configs_from_values(
         [
             {
@@ -637,9 +635,10 @@ def test_static_attempt_rejects_non_pose_template_base_robot_pose_reference(
     write_run_config_with_manifest(
         run_root,
         create_run_config(
+            capture_intent="calibration",
+            bop_annotation_mode="none",
             run_root=run_root,
             sensors=sensors,
-            robot_pose_sunrise_reference_frame_path=configured_path,
         ),
     )
     select_target_bundle(
@@ -650,7 +649,7 @@ def test_static_attempt_rejects_non_pose_template_base_robot_pose_reference(
         library_root=library,
     )
     _write_camera(run_root, "realsense_1")
-    _write_robot_pose(run_root, reference_path=captured_path)
+    _write_robot_pose(run_root, reference_path="/PoseTestBot/TemplateBase")
 
     before = len(runner.submissions)
     response = client.post(
@@ -660,11 +659,12 @@ def test_static_attempt_rejects_non_pose_template_base_robot_pose_reference(
             "mode": "eye_to_hand",
             "sensor_keys": ["realsense_d435:1"],
             "target_id": bundle["target_id"],
+            "synchronization_policy": "auto_offset",
         },
     )
 
     assert response.status_code == 400
-    assert expected_message in response.get_json()["output"]
+    assert "does not use" in response.get_json()["output"]
     assert POSE_TEMPLATE_BASE_SUNRISE_PATH in response.get_json()["output"]
     assert len(runner.submissions) == before
 
@@ -687,9 +687,10 @@ def test_static_attempt_rejects_known_template_base_target_selection(
     write_run_config_with_manifest(
         run_root,
         create_run_config(
+            capture_intent="calibration",
+            bop_annotation_mode="none",
             run_root=run_root,
             sensors=eye_in_hand,
-            robot_pose_sunrise_reference_frame_path=(POSE_TEMPLATE_BASE_SUNRISE_PATH),
         ),
     )
     select_target_bundle(
@@ -714,6 +715,7 @@ def test_static_attempt_rejects_known_template_base_target_selection(
             "mode": "eye_to_hand",
             "sensor_keys": ["realsense_d435:1"],
             "target_id": bundle["target_id"],
+            "synchronization_policy": "auto_offset",
         },
     )
 
@@ -743,24 +745,26 @@ def test_attempt_rejects_legacy_target_selection_without_mounting_frame(
     write_run_config_with_manifest(
         run_root,
         create_run_config(
+            capture_intent="calibration",
+            bop_annotation_mode="none",
             run_root=run_root,
             sensors=sensors,
-            robot_pose_sunrise_reference_frame_path=(POSE_TEMPLATE_BASE_SUNRISE_PATH),
         ),
     )
     select_target_bundle(
         run_root=run_root,
         target_id=bundle["target_id"],
         placement_mode="unknown",
+        mounting_frame="robot_flange",
         library_root=library,
     )
     _write_camera(run_root, "realsense_1")
     _write_robot_pose(run_root)
+    config_path = run_root / "run_config.json"
+    config = json.loads(config_path.read_text())
+    config["calibration_target"]["placement"].pop("mounting_frame")
+    config_path.write_text(json.dumps(config))
 
-    setup = client.get(
-        "/calibration/setup",
-        query_string={"run_root": run_root.as_posix()},
-    ).get_json()
     before = len(runner.submissions)
     response = client.post(
         "/calibration/attempts",
@@ -769,13 +773,14 @@ def test_attempt_rejects_legacy_target_selection_without_mounting_frame(
             "mode": "eye_to_hand",
             "sensor_keys": ["realsense_d435:1"],
             "target_id": bundle["target_id"],
+            "synchronization_policy": "auto_offset",
         },
     )
 
-    assert setup["saved_targets"][0]["selected_placement"] == {"mode": "unknown"}
     assert response.status_code == 400
-    assert "mounting_frame is missing" in response.get_json()["output"]
-    assert "explicitly reselect" in response.get_json()["output"]
+    assert "placement mounting_frame must be robot_flange or template_base" in (
+        response.get_json()["output"]
+    )
     assert len(runner.submissions) == before
 
 
@@ -790,6 +795,7 @@ def test_attempt_validation_rejects_identity_methods_and_target_conflicts(
             "mode": "eye_in_hand",
             "sensor_keys": ["realsense_d435:not-this-camera"],
             "target_id": bundle["target_id"],
+            "synchronization_policy": "auto_offset",
         },
     )
     unsuitable_method = client.post(
@@ -799,6 +805,7 @@ def test_attempt_validation_rejects_identity_methods_and_target_conflicts(
             "mode": "eye_in_hand",
             "sensor_keys": ["realsense_d435:1"],
             "target_id": bundle["target_id"],
+            "synchronization_policy": "auto_offset",
             "pnp_methods": ["IPPE_SQUARE"],
         },
     )
@@ -809,6 +816,7 @@ def test_attempt_validation_rejects_identity_methods_and_target_conflicts(
             "mode": "eye_in_hand",
             "sensor_keys": ["realsense_d435:1"],
             "target_id": bundle["target_id"],
+            "synchronization_policy": "auto_offset",
             "pnp_methods": ["IPPE", "IPPE"],
         },
     )
@@ -819,6 +827,7 @@ def test_attempt_validation_rejects_identity_methods_and_target_conflicts(
             "mode": "eye_to_hand",
             "sensor_keys": ["realsense_d435:1"],
             "target_id": bundle["target_id"],
+            "synchronization_policy": "auto_offset",
         },
     )
     escaped_root = client.get(
@@ -859,6 +868,7 @@ def test_attempt_validation_rejects_identity_methods_and_target_conflicts(
             "mode": "eye_in_hand",
             "sensor_keys": ["realsense_d435:1"],
             "target_id": second["target_id"],
+            "synchronization_policy": "auto_offset",
         },
     )
 
@@ -886,6 +896,7 @@ def test_attempt_history_is_immutable_and_promotion_accepts_partial_results(
                 "mode": mode,
                 "sensor_keys": [sensor_key],
                 "target_id": bundle["target_id"],
+                "synchronization_policy": "auto_offset",
             },
         )
         assert response.status_code == 202
@@ -899,14 +910,6 @@ def test_attempt_history_is_immutable_and_promotion_accepts_partial_results(
         (run_root / "processed" / "calibration" / first_id / "request.json").read_text()
     )
     assert first_request["mode"] == "eye_in_hand"
-    # This fixture fabricates an old completed ranking rather than running the
-    # current five-phase job. Mark its request as historical so promotion does
-    # not accept it as a new report-backed fixed-zero attempt.
-    first_request.pop("synchronization_policy")
-    (run_root / "processed" / "calibration" / first_id / "request.json").write_text(
-        json.dumps(first_request)
-    )
-
     attempt_root = run_root / "processed" / "calibration" / first_id
     progress = json.loads((attempt_root / "progress.json").read_text())
     progress["status"] = "complete"
@@ -946,12 +949,8 @@ def test_attempt_history_is_immutable_and_promotion_accepts_partial_results(
         },
     )
 
-    assert promoted.status_code == 202
-    assert promoted.get_json()["selections"] == {"realsense_d435:1": candidate_id}
-    assert runner.submissions[-1]["resources"] == ["cpu", "disk_io"]
-    assert runner.submissions[-1]["scope_kind"] == "run"
-    assert runner.submissions[-1]["run_root"] == run_root.as_posix()
-    assert runner.submissions[-1]["command"][-1] == "--promote"
+    assert promoted.status_code == 400
+    assert "current time-alignment evidence" in promoted.get_json()["output"]
 
 
 def test_parent_queue_conflict_is_recorded_on_the_immutable_attempt(
@@ -972,6 +971,7 @@ def test_parent_queue_conflict_is_recorded_on_the_immutable_attempt(
             "mode": "eye_in_hand",
             "sensor_keys": ["realsense_d435:1"],
             "target_id": bundle["target_id"],
+            "synchronization_policy": "auto_offset",
         },
     )
 

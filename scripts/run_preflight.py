@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preflight a PoseTestBot run configuration before queueing a sequence."""
+"""Write readiness evidence for a configured canonical capture workflow."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from posetestbot.pipeline.preflight import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Load run_config.json, build the configured sequence plan, and "
-            "summarize robot/sensor/runtime readiness without launching stages."
+            "Load run_config.json and summarize robot, sensor, runtime, and "
+            "workflow-input readiness without starting physical capture."
         )
     )
     parser.add_argument("run_root", help="Run root containing run_config.json.")

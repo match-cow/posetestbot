@@ -12,12 +12,7 @@ from posetestbot.io.artifacts import (
     BLENDERPROC_RENDER_PLAN,
     BOP_DIR,
     BOP_EXPORT_MANIFEST,
-    CALIBRATION_CANDIDATES,
-    CALIBRATION_OBSERVATIONS,
-    CALIBRATION_PREFLIGHT_REPORT,
-    CALIBRATION_PROFILES,
-    CALIBRATION_SOLVER_REPORT,
-    CALIBRATION_VALIDATION_REPORT,
+    CALIBRATION_PROFILE_SELECTION,
     CAMERA_RECTIFICATION_REPORT,
     CAPTURE_EXECUTION_PLAN,
     CAPTURE_EXECUTION_REPORT,
@@ -29,11 +24,7 @@ from posetestbot.io.artifacts import (
     RUN_PREFLIGHT_REPORT,
     SYNC_QUALITY_REPORT,
 )
-from posetestbot.pipeline.recommendations import build_pipeline_recommendations
-from posetestbot.pipeline.run_config import (
-    load_run_config_for_run_root,
-    sequence_plan_from_run_config,
-)
+from posetestbot.pipeline.run_config import load_run_config_for_run_root
 from posetestbot.sync.calibration_policy import (
     resolve_calibration_profile_sync_policy,
 )
@@ -87,14 +78,7 @@ WORKFLOW_SECTIONS = [
     {
         "id": "calibration",
         "label": "Calibration",
-        "artifacts": [
-            CALIBRATION_PREFLIGHT_REPORT,
-            CALIBRATION_OBSERVATIONS,
-            CALIBRATION_CANDIDATES,
-            CALIBRATION_SOLVER_REPORT,
-            CALIBRATION_VALIDATION_REPORT,
-            CALIBRATION_PROFILES,
-        ],
+        "artifacts": [CALIBRATION_PROFILE_SELECTION],
     },
     {
         "id": "bop",
@@ -226,20 +210,10 @@ def _validated_artifact_status(relative_path: str, value: Mapping[str, Any]) -> 
         ):
             return "invalid"
         return str(declared) if declared in {"ok", "warning", "error"} else "invalid"
-    if relative_path == CALIBRATION_PROFILES:
-        profiles = value.get("profiles")
-        if (
-            value.get("schema_version") != "calibration.v2"
-            or not isinstance(profiles, list)
-            or not profiles
-            or not all(isinstance(profile, Mapping) for profile in profiles)
-        ):
+    if relative_path == CALIBRATION_PROFILE_SELECTION:
+        if value.get("schema_version") != "calibration_profile_selection.v2":
             return "invalid"
-        return (
-            "complete"
-            if all(profile.get("status") == "valid" for profile in profiles)
-            else "needs_validation"
-        )
+        return "complete"
     if relative_path == CAMERA_RECTIFICATION_REPORT:
         if (
             value.get("schema_version") != "camera_rectification.v1"
@@ -253,12 +227,7 @@ def _validated_artifact_status(relative_path: str, value: Mapping[str, Any]) -> 
     if relative_path == f"{BOP_DIR}/{BOP_EXPORT_MANIFEST}":
         exports = value.get("exports")
         if (
-            value.get("schema_version")
-            not in {
-                "bop_export_manifest.v3",
-                "bop_export_manifest.v4",
-                "bop_export_manifest.v5",
-            }
+            value.get("schema_version") != "bop_export_manifest.v5"
             or not isinstance(exports, list)
             or not exports
             or not all(isinstance(item, Mapping) for item in exports)
@@ -310,52 +279,6 @@ def _section_summaries(root: Path) -> list[dict[str, Any]]:
     return sections
 
 
-def _sequence_steps(
-    config: Mapping[str, Any] | None, root: Path
-) -> list[dict[str, Any]]:
-    if not config:
-        return []
-    try:
-        plan = sequence_plan_from_run_config(config)
-    except ValueError:
-        return []
-    steps = []
-    artifact_lookup = {
-        "run_preflight": [RUN_PREFLIGHT_REPORT],
-        "capture_plan": [CAPTURE_PLAN],
-        "capture_plan_preflight": [CAPTURE_PLAN_PREFLIGHT_REPORT],
-        "capture_execution_plan": [CAPTURE_EXECUTION_PLAN],
-        "capture_execution": [CAPTURE_EXECUTION_REPORT],
-        "sync_run": [SYNC_QUALITY_REPORT],
-        "sync_quality": [SYNC_QUALITY_REPORT],
-        "calibration_preflight": [CALIBRATION_PREFLIGHT_REPORT],
-        "calibration_observations": [CALIBRATION_OBSERVATIONS],
-        "calibration_candidates": [CALIBRATION_CANDIDATES],
-        "calibration_solver": [CALIBRATION_SOLVER_REPORT],
-        "calibration_validation": [CALIBRATION_VALIDATION_REPORT],
-        "camera_rectification": [CAMERA_RECTIFICATION_REPORT],
-        "blenderproc_render": [BLENDERPROC_RENDER_PLAN],
-        "bop_export": [f"{BOP_DIR}/{BOP_EXPORT_MANIFEST}"],
-    }
-    for index, step in enumerate(plan.steps, start=1):
-        artifact_paths = artifact_lookup.get(step.stage_id, [])
-        chips = [_artifact_chip(root, path) for path in artifact_paths]
-        steps.append(
-            {
-                "index": index,
-                "id": step.id,
-                "stage_id": step.stage_id,
-                "label": step.stage_label,
-                "description": step.stage_id,
-                "status": _section_status(chips) if chips else "available",
-                "artifacts": chips,
-                "resources": list(step.resources),
-                "command": list(step.command),
-            }
-        )
-    return steps
-
-
 @overview_bp.get("/ui/overview")
 def ui_overview():
     run_root = request.args.get("run_root")
@@ -374,16 +297,6 @@ def ui_overview():
     else:
         config_error = f"Run root not found: {root}"
 
-    recommendations = []
-    recommendation_error = None
-    if root.exists():
-        try:
-            recommendations = build_pipeline_recommendations(root).get(
-                "recommendations", []
-            )
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            recommendation_error = str(exc)
-
     return jsonify(
         {
             "run_root": root.as_posix(),
@@ -391,8 +304,5 @@ def ui_overview():
             "config_error": config_error,
             "calibration_sync": _calibration_sync_overview(root, config),
             "sidebar": _section_summaries(root),
-            "steps": _sequence_steps(config, root),
-            "recommendations": recommendations,
-            "recommendation_error": recommendation_error,
         }
     )

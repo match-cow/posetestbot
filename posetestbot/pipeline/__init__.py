@@ -1,2 +1,1 @@
-"""Pipeline stage configuration helpers for the PoseTestBot rewrite."""
-
+"""Current run configuration, capture, preflight, and fixed orchestration."""

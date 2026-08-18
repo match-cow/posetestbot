@@ -51,7 +51,6 @@ public class PoseTestBotNineFrameCalibrationApplication
 	private static final String CALIBRATION_COVERAGE_LOWER_LEFT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerLeft";
 	private static final String CALIBRATION_COVERAGE_LOWER_CENTER_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerCenter";
 	private static final String CALIBRATION_COVERAGE_LOWER_RIGHT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerRight";
-	private static final String DEFAULT_RECEIVER_IP = "172.31.1.169";
 	private static final Charset UTF_8 = Charset.forName("UTF-8");
 
 	/* Commission one phase at a time before enabling both together. */
@@ -60,7 +59,6 @@ public class PoseTestBotNineFrameCalibrationApplication
 
 	private static final int SETTLE_TIME_MS = 1500;
 	private static final int ROBOT_PORT = 30300;
-	private static final int DEFAULT_RECEIVER_PORT = 8080;
 	private static final int SETTLED_PACKET_COUNT = 3;
 	private static final int SETTLED_PACKET_INTERVAL_MS = 50;
 
@@ -362,8 +360,7 @@ public class PoseTestBotNineFrameCalibrationApplication
 				JSONObject jsonObject = (JSONObject) new JSONParser().parse(
 						jsonMessage);
 
-				CaptureCommand command = captureCommand(
-						jsonObject, receivePacket);
+				CaptureCommand command = captureCommand(jsonObject);
 				if (command != null) {
 					getLogger().info("Pose receiver target: "
 							+ command.receiverIp + ":"
@@ -386,11 +383,6 @@ public class PoseTestBotNineFrameCalibrationApplication
 	}
 
 	private Double startValue(JSONObject jsonObject) {
-		Object startValue = jsonObject.get("start");
-		if (startValue != null) {
-			return doubleValue(startValue);
-		}
-
 		if ("start_capture".equals(jsonObject.get("command"))) {
 			return doubleValue(jsonObject.get("cartesian_velocity_m_s"));
 		}
@@ -408,8 +400,11 @@ public class PoseTestBotNineFrameCalibrationApplication
 		return Double.valueOf(value.toString());
 	}
 
-	private CaptureCommand captureCommand(JSONObject jsonObject,
-			DatagramPacket receivePacket) {
+	private CaptureCommand captureCommand(JSONObject jsonObject) {
+		if (!"robot_command.v1".equals(jsonObject.get("schema_version"))) {
+			throw new IllegalArgumentException(
+					"schema_version must be robot_command.v1");
+		}
 		Double velocity = startValue(jsonObject);
 		if (velocity == null) {
 			return null;
@@ -421,36 +416,30 @@ public class PoseTestBotNineFrameCalibrationApplication
 					"cartesian_velocity_m_s must be finite and greater than zero");
 		}
 
-		String requestedReceiverIp = DEFAULT_RECEIVER_IP;
 		Object receiverIpValue = jsonObject.get("receiver_ip");
-		if (receiverIpValue != null) {
-			String value = receiverIpValue.toString().trim();
-			if (value.length() == 0 || value.equals("0.0.0.0")
-					|| value.equals("::")) {
-				requestedReceiverIp =
-						receivePacket.getAddress().getHostAddress();
-			} else {
-				requestedReceiverIp = value;
-			}
+		if (receiverIpValue == null
+				|| receiverIpValue.toString().trim().length() == 0) {
+			throw new IllegalArgumentException("receiver_ip is required");
 		}
+		String requestedReceiverIp = receiverIpValue.toString().trim();
 
-		int requestedReceiverPort = DEFAULT_RECEIVER_PORT;
 		Object receiverPortValue = jsonObject.get("receiver_port");
-		if (receiverPortValue != null) {
-			requestedReceiverPort = integerValue(
-					receiverPortValue, "receiver_port");
+		if (receiverPortValue == null) {
+			throw new IllegalArgumentException("receiver_port is required");
 		}
+		int requestedReceiverPort = integerValue(
+				receiverPortValue, "receiver_port");
 		if (requestedReceiverPort < 1 || requestedReceiverPort > 65535) {
 			throw new IllegalArgumentException(
 					"receiver_port must be between 1 and 65535");
 		}
 
-		String requestedRunId = "legacy-" + System.currentTimeMillis();
 		Object runIdValue = jsonObject.get("run_id");
-		if (runIdValue != null
-				&& runIdValue.toString().trim().length() > 0) {
-			requestedRunId = runIdValue.toString().trim();
+		if (runIdValue == null
+				|| runIdValue.toString().trim().length() == 0) {
+			throw new IllegalArgumentException("run_id is required");
 		}
+		String requestedRunId = runIdValue.toString().trim();
 		return new CaptureCommand(
 				velocity.doubleValue(),
 				requestedReceiverIp,
@@ -475,14 +464,8 @@ public class PoseTestBotNineFrameCalibrationApplication
 	}
 
 	private boolean isStopCommand(JSONObject jsonObject) {
-		if (Boolean.TRUE.equals(jsonObject.get("stop"))) {
-			return true;
-		}
-
-		Object command = jsonObject.get("command");
-		return "pause_capture".equals(command)
-				|| "stop_after_current_motion".equals(command)
-				|| "emergency_stop".equals(command);
+		return "robot_command.v1".equals(jsonObject.get("schema_version"))
+				&& "exit_idle_program".equals(jsonObject.get("command"));
 	}
 
 	private void sleep(int millis) {

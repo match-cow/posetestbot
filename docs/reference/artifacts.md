@@ -1,113 +1,100 @@
 # Artifact index
 
-Canonical artifact names are interfaces between acquisition stages, the web
-console, validation gates, and downstream BOP consumers. Paths below are
-relative to a run unless stated otherwise.
+Run artifacts are governed evidence, not loose cache files. Writers validate
+inputs, write atomically where required, and update `dataset_manifest.json`.
+Raw acquisition evidence is preserved; processing writes derived output.
 
-## Run and capture
+## Run, preflight, and capture
 
-| Artifact | Role |
+| Path | Contract |
 | --- | --- |
-| `dataset_manifest.json` | Run artifact ledger and provenance |
-| `run_config.json` | Validated `run_config.v3` intent |
-| `run_preflight_report.json` | Run-level readiness evidence |
-| `hardware_status_report.json` | Run-owned hardware/runtime snapshot |
-| `capture_plan.json` | Planned camera/robot capture contract |
-| `capture_plan_preflight_report.json` | Fresh capture-plan readiness evidence |
-| `capture_execution_plan.json` | Gated execution plan |
-| `capture_execution_status.json` | Current durable execution state |
-| `capture_execution_report.json` | Terminal capture evidence |
-| `capture_execution_logs/` | Per-process capture logs |
+| `run_config.json` | Strict `run_config.v4` intent and hardware/data contract |
+| `dataset_manifest.json` | Run-level artifact ledger and provenance bindings |
+| `run_preflight_report.json` | Current configuration/readiness evidence |
+| `hardware_status_report.json` | Read-only hardware snapshot |
+| `capture_plan.json` | Canonical camera/robot plan |
+| `capture_plan_preflight_report.json` | Fresh plan-specific checks |
+| `capture_execution_plan.json` | Gated supervised execution plan |
+| `capture_execution_status.json` | Live/recoverable execution state |
+| `capture_execution_report.json` | Child-process and completion validation |
+| `capture_execution_logs/` | Per-child stdout/stderr evidence |
+
+Capture completion requires every enabled sensor to have balanced nonempty
+RGB/depth/current metadata, strict timestamp evidence, a nonempty current
+robot-pose stream, successful children, and clean resource release.
 
 ## Raw and synchronized evidence
 
-| Artifact | Role |
+| Path | Contract |
 | --- | --- |
-| per-sensor `rgb/`, `depth/` | Preserved legacy-compatible raw frame PNGs |
-| `frame_metadata.jsonl` | Compact frame timestamp and acquisition sidecar |
-| `raw_robot_ee_poses.json` | Original robot pose stream |
-| `processed/robot_pose_cadence_report.json` | Optional derived cadence evidence |
-| `match_robot_ee_poses.json` | Frame-matched robot poses |
-| `sync_report.json` | Non-destructive pairing report |
-| `sync_quality_report.json` | In-motion timestamp-alignment quality (`v2`) |
+| per-sensor `rgb/`, `depth/` | Preserved raw PNG frames |
+| per-sensor `frame_metadata.jsonl` | Current timestamp and frame identity records |
+| camera sidecars | Current intrinsic/depth/alignment evidence required by consumers |
+| `raw_robot_ee_poses.json` | Strict `robot_pose.v1` packets with run/frame provenance |
+| `processed/robot_pose_cadence_report.json` | Optional derived delivery-cadence evidence |
+| per-sensor `match_robot_ee_poses.json` | Non-destructive nearest-pose matches |
+| `sync_report.json` | Matching decisions and exclusions |
+| `sync_quality_report.json` | In-motion coverage, deltas, packet loss, and blockers |
 
-Lead-in/tail frames remain raw context. Their presence is not a synchronization
-failure and is not included in the eligible in-motion coverage denominator.
+Lead-in and tail camera frames remain raw context. They are not counted as
+failed in-motion matches.
 
 ## Calibration
 
-| Artifact | Role |
+| Path | Contract |
 | --- | --- |
-| `calibration_preflight_report.json` | Calibration input/readiness evidence |
-| `calibration_target.json` | Selected run-owned target |
-| `intrinsic_calibration_profiles.json` | Current exact intrinsic profiles |
-| `aruco_detections.json` | Per-sensor target detections |
-| `camera_rectification_report.json` | Rectification results/provenance |
-| `calibration_observations.json` | Normalized solver observations |
-| `calibration_candidates.json` | Candidate transforms/residuals |
-| `calibration_profiles_from_observations.json` | Candidate profile projection |
-| `calibration_solver_report.json` | Solver method and evidence |
-| `calibration_profiles_solved.json` | Solver-produced profiles |
-| `calibration_validation_report.json` | Validation checks/warnings/blockers |
-| `calibration_profiles.json` | Promoted `calibration.v2` profiles |
-| `calibration_profile_selection.json` | Immutable source bundle and per-sensor selection binding |
-| `processed/calibration_inputs/<bundle_sha256>/` | Exact combined profile snapshots |
-| `processed/calibration/<attempt_id>/` | Intent request, progress, search, candidates, ranking, checks, profiles, and promotion evidence |
+| `calibration_target.json` | Run-owned selected target bundle and hashes |
+| `calibration_profile_selection.json` | Current v2 per-sensor reusable selection |
+| `processed/calibration_inputs/<bundle_sha256>/` | Exact combined extrinsic/intrinsic snapshots |
+| `processed/calibration/<attempt_id>/request.json` | Immutable attempt intent |
+| `processed/calibration/<attempt_id>/progress.json` | Five-phase attempt status |
+| `processed/calibration/<attempt_id>/intrinsic_comparison.json` | Factory/OpenCV evidence |
+| `processed/calibration/<attempt_id>/time_offset_search.json` | Explicit fixed-zero or automatic timing evidence |
+| `processed/calibration/<attempt_id>/pnp_candidates.json` | Current PnP evidence |
+| `processed/calibration/<attempt_id>/extrinsic_candidates.json` | Mount-aware transform candidates |
+| `processed/calibration/<attempt_id>/ranking.json` | Candidate ranking/recommendation |
+| `processed/calibration/<attempt_id>/checks.json` | Blocking checks and retained warnings |
+| `processed/calibration/<attempt_id>/candidate_profiles.json` | Profiles eligible for review/promotion |
+| `calibration_profiles.json` | Explicitly promoted `calibration.v2` profiles |
 
-## Reusable workpieces and templates
+There are no root-level preflight/observations/candidates/solver/validation
+artifacts from the removed staged calibration implementation.
 
-These are global, normally below `working_data/`, rather than run-relative.
+## Reusable libraries and run snapshots
 
-| Artifact | Role |
+| Path | Contract |
 | --- | --- |
-| `object_catalog/object_catalog.json` | Serialized `object_catalog.v1` manifest and tombstones |
-| `object_catalog/objects/<uuid>/` | Retained source CAD, canonical revisions, and optional texture |
+| `object_catalog/object_catalog.json` | Serialized global catalogue and tombstones |
+| `object_catalog/objects/<uuid>/` | Retained source, canonical geometry revisions, texture, and bounded derived caches |
 | `object_catalog/revisions/` | Numbered atomic catalogue manifests |
-| object `derived/pose_template_orientation_analysis.json` | Reproducible stable-orientation cache |
-| object `derived/pose_template_orientation_thumbnail.json` | Bounded card-read cache |
-| `pose_templates/<uuid>/pose_template_bundle.json` | Immutable published template bundle |
-| template `pose_template_preview.json` | Exact slicing preview |
-| template `pose_template_thumbnail.json` | Bounded library-card cache |
-| `pose_templates/.deleted/` | Retained template deletion cleanup trees |
+| `pose_templates/<uuid>/pose_template_bundle.json` | Immutable published bundle |
+| `pose_templates/<uuid>/pose_template_preview.json` | Exact planar preview |
+| `pose_templates/<uuid>/pose_template_thumbnail.json` | Bounded card-read cache |
+| `pose_template_selection.json` | Run-owned immutable bundle selection |
+| `.pose_template_selection.transaction.json` | Durable replacement journal while a selection changes |
+| `object_instances.json` | Run-owned object-instance mapping |
 
-Run-owned template artifacts are `pose_template_selection.json`, the hidden
-`.pose_template_selection.transaction.json` journal while replacement is in
-progress, and `object_instances.json`.
+## BOP export and optional annotations
 
-## BOP export and annotations
-
-| Artifact | Role |
+| Path | Contract |
 | --- | --- |
-| `bop/bop_export_manifest.json` | Export inputs, outputs, hashes, and annotation mode |
-| `bop/posetestbot_bop_frame_map.json` | PoseTestBot-to-BOP frame identity |
-| `bop/test_targets_bop19.json` | Standard target list |
-| `bop/models/models_info.json` | BOP object dimensions/diameters |
+| `bop/bop_export_manifest.json` | Current `bop_export_manifest.v5` and capability declaration |
+| `bop/posetestbot_bop_frame_map.json` | Source-to-BOP frame identity |
+| `bop/test_targets_bop19.json` | Standard BOP19 targets |
+| `bop/models/models_info.json` | Model dimensions and identity |
 | `bop/posetestbot_pose_template.json` | Pose-template provenance |
-| `bop/posetestbot_instance_map.json` | Run instance to BOP object/scene identity |
-| `bop/posetestbot_coco_annotations.json` | Optional compact COCO annotations |
+| `bop/posetestbot_instance_map.json` | Run instance to BOP object mapping |
+| `bop/posetestbot_coco_annotations.json` | Optional COCO view of generated annotations |
 | `processed/bop_annotations/generation_report.json` | Optional GT/mask generation evidence |
-| BOP scene `scene_gt.json` | Object poses in pose modes |
-| BOP scene `scene_gt_info.json`, `mask/`, `mask_visib/` | Pose-plus-mask evidence |
+| scene `scene_gt.json` | Pose annotations for `pose` or `pose_and_masks` |
+| scene `scene_gt_info.json`, `mask/`, `mask_visib/` | Additional mask/visibility product |
 
 ## Inspect-only evaluation
 
-| Path | Role |
+| Path | Contract |
 | --- | --- |
 | `processed/bop_evaluation/results/<result_id>/` | Immutable imported/simulated CSV, validation result, and provenance |
-| `processed/bop_evaluation/evaluations/<evaluation_id>/` | Immutable request, progress, resolved inputs, official toolkit output, and report |
+| `processed/bop_evaluation/evaluations/<evaluation_id>/` | Request, progress, dataset adapter, official toolkit output, and report |
 
-Evaluation never writes into raw capture data and is not a pipeline stage.
-
-## Rewrite gates
-
-The acquisition boundary is summarized by:
-
-- `rewrite_full_capture.v1`
-- `rewrite_calibration_validation.v1`
-- `rewrite_bop_export_readiness.v1`
-
-```bash
-uv run python scripts/run_rewrite_gate.py working_data/example \
-  --gate rewrite_full_capture.v1 --write
-uv run python scripts/run_rewrite_status.py working_data/example --write
-```
+Evaluation never mutates raw capture or the exported dataset and is not an
+acquisition stage.

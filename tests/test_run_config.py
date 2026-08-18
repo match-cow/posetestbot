@@ -1,197 +1,247 @@
 from __future__ import annotations
 
 import json
-
 import subprocess
-
+import uuid
 from pathlib import Path
 
 import pytest
 
-from posetestbot.io.artifacts import DATASET_MANIFEST, RUN_CONFIG
-
 from posetestbot.config import DEFAULT_CAPTURE_VELOCITY_M_S
-
+from posetestbot.io.artifacts import DATASET_MANIFEST, RUN_CONFIG
 from posetestbot.pipeline.run_config import (
     CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
-    FixedFrameTransform,
     SCHEMA_VERSION,
-    build_sequence_job_from_run_config,
+    FixedFrameTransform,
+    SensorRunConfig,
     create_run_config,
     load_run_config_for_run_root,
     sensor_config_from_mapping,
-    sensor_configs_from_status,
     sensor_config_from_token,
-    sequence_plan_from_run_config,
+    sensor_configs_from_status,
     validate_run_config,
     write_run_config,
 )
+from posetestbot.robot.reference_frames import POSE_TEMPLATE_BASE_SUNRISE_PATH
 
 
-def test_default_run_config_uses_real_robot_and_lab_sensors(tmp_path: Path) -> None:
-    run_root = tmp_path / "run-1"
-
-    config = create_run_config(run_root=run_root)
-    data = config.to_dict()
-
-    assert data["schema_version"] == SCHEMA_VERSION
-    assert data["robot_profile"]["mode"] == "real"
-    assert data["robot_profile"]["robot_ip"] == "172.31.1.147"
-    assert (
-        data["robot_profile"]["cartesian_velocity_m_s"] == DEFAULT_CAPTURE_VELOCITY_M_S
+def _create(run_root: Path, **overrides):
+    return create_run_config(
+        run_root=run_root,
+        capture_intent=overrides.pop("capture_intent", "dataset"),
+        bop_annotation_mode=overrides.pop("bop_annotation_mode", "none"),
+        **overrides,
     )
+
+
+def test_v4_config_is_explicit_and_has_no_generic_pipeline(tmp_path: Path) -> None:
+    data = _create(tmp_path / "run").to_dict()
+
+    assert data["schema_version"] == SCHEMA_VERSION == "run_config.v4"
+    assert str(uuid.UUID(data["run_id"])) == data["run_id"]
+    assert data["capture"]["intent"] == "dataset"
+    assert data["bop"] == {"annotation_mode": "none"}
     assert data["capture"]["velocity_m_s"] == DEFAULT_CAPTURE_VELOCITY_M_S
-    assert data["dataset_mode"] == "objectless"
-    assert "object_folder" not in data
-    assert "selected_objects" not in data
-    assert data["pipeline"]["sequence_id"] == "real_full_capture_validation"
-    assert data["pipeline"]["plan_only"] is True
+    assert "pipeline" not in data
     assert data["frames"]["robot_pose"] == {
         "from": "robot_flange",
         "to": "template_base",
         "convention": "kuka_abc_radians",
+        "sunrise_reference_frame_path": POSE_TEMPLATE_BASE_SUNRISE_PATH,
     }
-    assert data["frames"]["dataset_reference_frame"] == "template_base"
-    sensors = data["capture"]["sensors"]
-    assert [sensor["sensor_type"] for sensor in sensors].count("realsense_d435") == 3
-    assert [sensor["sensor_type"] for sensor in sensors].count("oak_d_pro") == 1
-    assert [sensor["sensor_type"] for sensor in sensors].count("zed_2i") == 1
-    assert all(sensor["enabled"] is True for sensor in sensors)
-    assert all(sensor["inverted"] is False for sensor in sensors)
     assert data["capture"]["synchronization"] == {
         "schema_version": CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION,
         "mode": "timestamp_aligned",
     }
+    assert [item["sensor_type"] for item in data["capture"]["sensors"]] == [
+        "realsense_d435",
+        "realsense_d435",
+        "realsense_d435",
+        "oak_d_pro",
+        "zed_2i",
+    ]
 
-    plan = sequence_plan_from_run_config(data)
 
-    assert plan.sequence_id == "real_full_capture_validation"
-    assert plan.plan_only is True
-    assert plan.steps[0].command[:3] == ["uv", "run", "python"]
+def test_v3_and_retired_pipeline_fields_fail_closed(tmp_path: Path) -> None:
+    value = _create(tmp_path / "run").to_dict()
+    value["schema_version"] = "run_config.v3"
+    with pytest.raises(ValueError, match="run_config.v4"):
+        validate_run_config(value)
 
-
-def test_run_config_records_and_validates_expected_sunrise_reference_path(
-    tmp_path: Path,
-) -> None:
-    value = create_run_config(
-        run_root=tmp_path / "referenced-run",
-        robot_pose_sunrise_reference_frame_path="/PoseTestBot/PoseTemplateBase",
-    ).to_dict()
-
-    assert value["frames"]["robot_pose"]["sunrise_reference_frame_path"] == (
-        "/PoseTestBot/PoseTemplateBase"
-    )
-    validate_run_config(value)
-
-    value["frames"]["robot_pose"]["sunrise_reference_frame_path"] = (
-        "PoseTestBot/PoseTemplateBase"
-    )
-    with pytest.raises(ValueError, match="sunrise_reference_frame_path is invalid"):
+    value["schema_version"] = SCHEMA_VERSION
+    value["pipeline"] = {"sequence_id": "sync_aruco"}
+    with pytest.raises(ValueError, match="retired fields: pipeline"):
         validate_run_config(value)
 
 
-@pytest.mark.parametrize("velocity", [float("nan")])
-def test_run_config_rejects_non_positive_or_non_finite_velocity(
-    tmp_path: Path,
-    velocity: float,
+def test_config_requires_exact_lab_robot_and_reference_contract(tmp_path: Path) -> None:
+    value = _create(tmp_path / "run").to_dict()
+    value["robot_profile"]["robot_ip"] = "127.0.0.1"
+    with pytest.raises(ValueError, match="sole lab iiwa profile"):
+        validate_run_config(value)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    [
+        ("fps", "6", "capture.fps must be positive"),
+        ("fps", True, "capture.fps must be positive"),
+        ("resolution", 720, "capture.resolution must be a non-empty string"),
+        (
+            "velocity_m_s",
+            "0.2",
+            "capture.velocity_m_s must be a finite positive number",
+        ),
+        (
+            "velocity_m_s",
+            True,
+            "capture.velocity_m_s must be a finite positive number",
+        ),
+    ],
+)
+def test_config_rejects_coerced_capture_scalars(
+    tmp_path: Path, field: str, replacement: object, message: str
+) -> None:
+    value = _create(tmp_path / "run").to_dict()
+    value["capture"][field] = replacement
+
+    with pytest.raises(ValueError, match=message):
+        validate_run_config(value)
+
+
+def test_config_rejects_noncurrent_selection_pointer_shapes(tmp_path: Path) -> None:
+    value = _create(tmp_path / "run").to_dict()
+    value["calibration_profiles"] = "processed/calibration_profiles.json"
+    value["intrinsic_calibration_profiles"] = (
+        "processed/intrinsic_calibration_profiles.json"
+    )
+    value["calibration_profile_selection"] = {
+        "selection_artifact": "calibration_profile_selection.json",
+        "bundle_sha256": "a" * 64,
+        "selected_at": "2026-08-18T10:00:00+00:00",
+        "source_run": "retired",
+    }
+    with pytest.raises(ValueError, match="fields must be exactly"):
+        validate_run_config(value)
+
+    value = _create(tmp_path / "template", dataset_mode="pose_template").to_dict()
+    value["pose_template"] = {
+        "template_uuid": "11111111-1111-4111-8111-111111111111",
+        "selection_artifact": "pose_template_selection.json",
+        "bundle_sha256": "b" * 64,
+        "placement_confirmed": "true",
+    }
+    with pytest.raises(ValueError, match="placement_confirmed must be a boolean"):
+        validate_run_config(value)
+
+    value = _create(tmp_path / "target").to_dict()
+    value["calibration_target"] = {
+        "target_id": "11111111-1111-4111-8111-111111111111",
+        "bundle_path": "calibration_targets/11111111-1111-4111-8111-111111111111",
+        "source_sha256": "a" * 64,
+        "spec_sha256": "b" * 64,
+        "pdf_sha256": "c" * 64,
+        "configuration_sha256": "d" * 64,
+        "geometry_sha256": "e" * 64,
+        "placement": {"mode": "unknown"},
+    }
+    with pytest.raises(ValueError, match="mounting_frame must be"):
+        validate_run_config(value)
+
+    value = _create(tmp_path / "run-2").to_dict()
+    value["frames"]["robot_pose"]["sunrise_reference_frame_path"] = (
+        "/PoseTestBot/TemplateBase"
+    )
+    with pytest.raises(ValueError, match="canonical"):
+        validate_run_config(value)
+
+
+@pytest.mark.parametrize("velocity", [0.0, -0.1, float("nan")])
+def test_config_rejects_nonpositive_or_nonfinite_velocity(
+    tmp_path: Path, velocity: float
 ) -> None:
     with pytest.raises(ValueError, match="finite positive"):
-        create_run_config(
-            run_root=tmp_path / "bad-velocity",
-            velocity_m_s=velocity,
+        _create(tmp_path / "run", velocity_m_s=velocity)
+
+
+def test_calibration_intent_rejects_dataset_and_annotation_modes(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="dataset_mode=objectless"):
+        _create(
+            tmp_path / "calibration-template",
+            capture_intent="calibration",
+            dataset_mode="pose_template",
+        )
+    with pytest.raises(ValueError, match="annotation_mode=none"):
+        _create(
+            tmp_path / "calibration-gt",
+            capture_intent="calibration",
+            bop_annotation_mode="pose",
         )
 
 
-def test_sensor_config_token_accepts_alias_and_mounting_mode() -> None:
-    sensor = sensor_config_from_token("luxonis:mxid-1:static:Cell OAK-D Pro")
-
+def test_sensor_tokens_require_exact_registry_identifiers() -> None:
+    sensor = sensor_config_from_token("oak_d_pro:mxid-1:static:Cell OAK-D Pro")
     assert sensor.sensor_type == "oak_d_pro"
-    assert sensor.device_id == "mxid-1"
-    assert sensor.mounting_mode == "static"
-    assert sensor.display_name == "Cell OAK-D Pro"
     assert sensor.operator_alias == "Cell OAK-D Pro"
-    assert sensor.inverted is False
+
+    with pytest.raises(ValueError, match="exact registry identifier"):
+        sensor_config_from_token("luxonis:mxid-1:static:Cell OAK-D Pro")
+    with pytest.raises(ValueError, match="exact registry identifier"):
+        sensor_config_from_token("realsense:123:static:Cell D435")
 
 
-def test_sensor_config_normalizes_explicit_run_operator_alias() -> None:
-    sensor = sensor_config_from_mapping(
-        {
-            "sensor_type": "realsense",
-            "device_id": "123",
-            "mounting_mode": "eye_in_hand",
-            "display_name": "Intel RealSense 123",
-            "operator_alias": "  Run wrist camera  ",
-        }
-    )
-
-    assert sensor.operator_alias == "Run wrist camera"
-    assert sensor.display_name == "Run wrist camera"
-    assert sensor.to_dict()["operator_alias"] == "Run wrist camera"
-
-
-def test_sensor_mapping_requires_explicit_mount_or_explicit_default() -> None:
-    value = {
-        "sensor_type": "realsense",
+def test_sensor_mapping_rejects_unknown_fields_and_truthy_booleans() -> None:
+    base = {
+        "sensor_type": "realsense_d435",
         "device_id": "123",
-        "display_name": "Intel RealSense 123",
+        "display_name": "D435",
+        "mounting_mode": "static",
     }
-
-    with pytest.raises(ValueError, match="mounting_mode is required"):
-        sensor_config_from_mapping(value)
-
-    sensor = sensor_config_from_mapping(value, default_mounting_mode="static")
-    assert sensor.mounting_mode == "static"
-
-
-def test_sensor_config_accepts_realsense_inverted_orientation() -> None:
-    token_sensor = sensor_config_from_token(
-        "realsense:123:static:Cell RealSense:inverted"
-    )
-    mapping_sensor = sensor_config_from_mapping(
-        {
-            "sensor_type": "realsense",
-            "device_id": "456",
-            "mounting_mode": "eye_in_hand",
-            "display_name": "Wrist RealSense",
-            "inverted": "true",
-        }
-    )
-
-    assert token_sensor.sensor_type == "realsense_d435"
-    assert token_sensor.inverted is True
-    assert mapping_sensor.device_id == "456"
-    assert mapping_sensor.inverted is True
+    with pytest.raises(ValueError, match="unsupported fields: alias"):
+        sensor_config_from_mapping({**base, "alias": "old"})
+    with pytest.raises(ValueError, match="inverted must be a literal JSON boolean"):
+        sensor_config_from_mapping({**base, "inverted": "true"})
+    with pytest.raises(ValueError, match="enabled must be a literal JSON boolean"):
+        sensor_config_from_mapping({**base, "enabled": 1})
 
 
-def test_sensor_config_preserves_literal_disabled_flag() -> None:
+def test_sensor_mapping_preserves_explicit_operator_alias_and_disabled_state() -> None:
     sensor = sensor_config_from_mapping(
         {
-            "sensor_type": "realsense",
-            "device_id": "456",
+            "sensor_type": "realsense_d435",
+            "device_id": "123",
+            "display_name": "D435",
+            "operator_alias": "  Wrist camera  ",
             "mounting_mode": "eye_in_hand",
-            "display_name": "Wrist RealSense",
             "enabled": False,
+            "inverted": True,
+            "metadata": {"model": "D435"},
         }
     )
-
+    assert sensor.display_name == "Wrist camera"
+    assert sensor.operator_alias == "Wrist camera"
     assert sensor.enabled is False
+    assert sensor.inverted is True
 
 
-@pytest.mark.parametrize("enabled", [None])
-def test_sensor_config_rejects_non_literal_enabled_values(enabled: object) -> None:
-    with pytest.raises(ValueError, match="literal JSON boolean"):
-        sensor_config_from_mapping(
-            {
-                "sensor_type": "realsense",
-                "device_id": "456",
-                "mounting_mode": "eye_in_hand",
-                "display_name": "Wrist RealSense",
-                "enabled": enabled,
-            }
-        )
+def test_current_config_rejects_alias_normalization_on_read(tmp_path: Path) -> None:
+    value = _create(
+        tmp_path / "run",
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Wrist camera"),),
+    ).to_dict()
+    value["capture"]["sensors"][0]["operator_alias"] = " Wrist camera "
+    with pytest.raises(ValueError, match="trimmed non-empty string"):
+        validate_run_config(value)
+
+    value["capture"]["sensors"][0]["operator_alias"] = "Wrist camera"
+    value["capture"]["sensors"][0]["display_name"] = "D435"
+    with pytest.raises(ValueError, match="must match operator_alias"):
+        validate_run_config(value)
 
 
-def test_sensor_configs_from_status_uses_alias_defaults() -> None:
+def test_sensor_status_uses_only_current_device_identity() -> None:
     sensors = sensor_configs_from_status(
         {
             "families": [
@@ -212,183 +262,31 @@ def test_sensor_configs_from_status_uses_alias_defaults() -> None:
             ]
         }
     )
-
     assert len(sensors) == 1
-    assert sensors[0].device_id == "123"
-    assert sensors[0].display_name == "Wrist Camera"
-    assert sensors[0].operator_alias == "Wrist Camera"
-    assert sensors[0].mounting_mode == "static"
-    assert sensors[0].inverted is True
+    assert sensors[0].to_dict()["operator_alias"] == "Wrist Camera"
     assert sensors[0].metadata == {"model": "D435"}
 
 
-def test_sensor_config_rejects_non_realsense_inverted_orientation() -> None:
-    with pytest.raises(ValueError, match="only supported for RealSense"):
-        sensor_config_from_token("oak:auto:static:Cell OAK-D Pro:inverted")
-
-    with pytest.raises(ValueError, match="only supported for RealSense"):
-        sensor_config_from_mapping(
-            {
-                "sensor_type": "zed_2i",
-                "device_id": "auto",
-                "mounting_mode": "static",
-                "display_name": "Cell ZED 2i",
-                "inverted": True,
-            }
-        )
+def test_config_rejects_duplicate_sensor_identity(tmp_path: Path) -> None:
+    sensor = SensorRunConfig("realsense_d435", "123", "D435", "static")
+    with pytest.raises(ValueError, match="repeat identity"):
+        _create(tmp_path / "run", sensors=(sensor, sensor))
 
 
-def test_run_config_loads_from_run_root_and_builds_sequence_job(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "run-job"
-    config = create_run_config(
-        run_root=run_root,
-        sequence_id="sync_aruco",
-        sequence_options={"aruco": {"save_images": True}},
-    )
-    write_run_config(run_root, config)
+def test_run_config_load_is_bound_to_its_current_root(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    write_run_config(run_root, _create(run_root))
+    assert load_run_config_for_run_root(run_root)["run_root"] == run_root.as_posix()
 
-    loaded = load_run_config_for_run_root(run_root)
-    job = build_sequence_job_from_run_config(loaded)
-
-    assert loaded["run_root"] == run_root.as_posix()
-    assert job.sequence_id == "sync_aruco"
-    assert job.command[:4] == [
-        "uv",
-        "run",
-        "python",
-        "scripts/run_pipeline_sequence.py",
-    ]
-    assert "--plan-only" in job.command
-    assert job.parameters["options"] == {"aruco": {"save_images": True}}
+    moved = tmp_path / "moved"
+    run_root.rename(moved)
+    with pytest.raises(ValueError, match="does not match requested run_root"):
+        load_run_config_for_run_root(moved)
 
 
-def test_run_config_rejects_persisted_execution_acknowledgements(
-    tmp_path: Path,
-) -> None:
-    with pytest.raises(ValueError, match="must not persist execution gate"):
-        create_run_config(
-            run_root=tmp_path / "unsafe-reusable-config",
-            sequence_options={
-                "capture_execution": {
-                    "allow_cameras": True,
-                    "allow_real_robot": True,
-                }
-            },
-        )
-
-
-def test_run_config_calibration_profiles_flow_to_calibrated_sequence(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "run-calibrated"
-    profiles_path = run_root / "profiles" / "lab_profiles.json"
-    config = create_run_config(
-        run_root=run_root,
-        sequence_id="sync_to_bop_calibrated_dry_run",
-        calibration_profiles=profiles_path.as_posix(),
-    )
-
-    plan = sequence_plan_from_run_config(config.to_dict())
-    export_step = next(step for step in plan.steps if step.id == "bop_export")
-
-    assert export_step.options["calibration_profiles"] == profiles_path.as_posix()
-    assert export_step.options["annotation_source"] == "none"
-    assert profiles_path.as_posix() in export_step.command
-
-
-def test_create_run_config_cli_writes_config_manifest_and_plan(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "run-cli"
-    repo_root = Path(__file__).resolve().parents[1]
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            "scripts/create_run_config.py",
-            run_root.as_posix(),
-            "--sensor",
-            "realsense:123:static:Cell RealSense",
-            "--sequence",
-            "sync_aruco",
-            "--sequence-options-json",
-            '{"aruco": {"save_images": true}}',
-            "--print-sequence-plan",
-        ],
-        cwd=repo_root,
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-    assert f"Wrote {run_root / RUN_CONFIG}" in result.stdout
-    assert '"sequence_id": "sync_aruco"' in result.stdout
-    config = json.loads((run_root / RUN_CONFIG).read_text())
-    assert config["frames"]["robot_pose"]["sunrise_reference_frame_path"] == (
-        "/PoseTestBot/PoseTemplateBase"
-    )
-    assert config["capture"]["sensors"] == [
-        {
-            "calibration_profile_id": None,
-            "device_id": "123",
-            "display_name": "Cell RealSense",
-            "enabled": True,
-            "inverted": False,
-            "metadata": {},
-            "mounting_mode": "static",
-            "operator_alias": "Cell RealSense",
-            "sensor_type": "realsense_d435",
-        }
-    ]
-    assert config["dataset_mode"] == "objectless"
-    assert "object_folder" not in config
-    assert config["pipeline"]["options"] == {"aruco": {"save_images": True}}
-    manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
-    stage = next(stage for stage in manifest["stages"] if stage["name"] == "run_config")
-    assert stage["status"] == "succeeded"
-    assert stage["artifacts"][RUN_CONFIG] == RUN_CONFIG
-
-
-def test_create_run_config_cli_rejects_unknown_sequence(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-
-    result = subprocess.run(
-        [
-            "uv",
-            "run",
-            "python",
-            "scripts/create_run_config.py",
-            (tmp_path / "run-bad-sequence").as_posix(),
-            "--sequence",
-            "not_a_sequence",
-        ],
-        cwd=repo_root,
-        text=True,
-        capture_output=True,
-    )
-
-    assert result.returncode != 0
-    assert "invalid choice" in result.stderr
-    assert not (tmp_path / "run-bad-sequence" / RUN_CONFIG).exists()
-
-
-def test_run_config_rejects_retired_fake_robot_profile(tmp_path: Path) -> None:
-    run_root = tmp_path / "retired-fake-config"
-    value = create_run_config(run_root=run_root).to_dict()
-    value["robot_profile"]["mode"] = "fake"
-    run_root.mkdir()
-    (run_root / RUN_CONFIG).write_text(json.dumps(value))
-
-    with pytest.raises(ValueError, match="must be 'real'"):
-        load_run_config_for_run_root(run_root)
-
-
-def test_create_run_config_records_typed_fixed_frame_edges(tmp_path: Path) -> None:
-    config = create_run_config(
-        run_root=tmp_path / "fixed-run",
+def test_fixed_frame_edges_remain_typed(tmp_path: Path) -> None:
+    data = _create(
+        tmp_path / "run",
         fixed_transforms=(
             FixedFrameTransform(
                 from_frame="robot_flange",
@@ -399,8 +297,7 @@ def test_create_run_config_records_typed_fixed_frame_edges(tmp_path: Path) -> No
             ),
         ),
     ).to_dict()
-
-    assert config["frames"]["fixed_transforms"] == [
+    assert data["frames"]["fixed_transforms"] == [
         {
             "from": "robot_flange",
             "to": "tcp",
@@ -409,3 +306,55 @@ def test_create_run_config_records_typed_fixed_frame_edges(tmp_path: Path) -> No
             "source": "tool_measurement",
         }
     ]
+
+
+def test_create_run_config_cli_requires_explicit_outcome(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    missing = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "scripts/create_run_config.py",
+            (tmp_path / "missing").as_posix(),
+        ],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+    )
+    assert missing.returncode != 0
+    assert "--intent" in missing.stderr
+    assert "--annotation-mode" in missing.stderr
+
+
+def test_create_run_config_cli_writes_v4_config_and_manifest(tmp_path: Path) -> None:
+    run_root = tmp_path / "run-cli"
+    repo_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "scripts/create_run_config.py",
+            run_root.as_posix(),
+            "--intent",
+            "dataset",
+            "--annotation-mode",
+            "pose",
+            "--sensor",
+            "realsense_d435:123:static:Cell RealSense",
+        ],
+        cwd=repo_root,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    assert f"Wrote {run_root / RUN_CONFIG}" in result.stdout
+    config = json.loads((run_root / RUN_CONFIG).read_text())
+    assert config["schema_version"] == "run_config.v4"
+    assert config["capture"]["intent"] == "dataset"
+    assert config["bop"] == {"annotation_mode": "pose"}
+    assert "pipeline" not in config
+    manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
+    stage = next(item for item in manifest["stages"] if item["name"] == "run_config")
+    assert stage["status"] == "succeeded"

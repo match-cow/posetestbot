@@ -70,9 +70,9 @@ checked-in Markdown and `mkdocs.yml` before deployment.
 ## Plan without executing
 
 ```bash
-uv run python scripts/create_run_config.py working_data/test_run
-uv run python scripts/run_pipeline_sequence.py working_data/test_run \
-  --sequence real_full_capture_validation --plan-only
+uv run python scripts/create_run_config.py working_data/test_run \
+  --intent dataset --annotation-mode none
+uv run python scripts/plan_capture.py working_data/test_run --json
 ```
 
 Planning is safe to run without physical authorization. It does not weaken the

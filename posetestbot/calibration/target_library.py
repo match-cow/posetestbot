@@ -28,22 +28,13 @@ from posetestbot.calibration.targets import (
 )
 from posetestbot.io.atomic import atomic_write_bytes, atomic_write_json
 from posetestbot.io.artifacts import (
-    ARUCO_COVERAGE_REPORT,
     ARUCO_DETECTIONS,
-    ARUCO_POSE_ESTIMATION,
     BOP_DIR,
     CAPTURE_EXECUTION_LOGS_DIR,
     CAPTURE_EXECUTION_REPORT,
     CAPTURE_EXECUTION_STATUS,
-    CALIBRATION_CANDIDATES,
-    CALIBRATION_OBSERVATIONS,
     CALIBRATION_PROFILES,
-    CALIBRATION_PROFILES_FROM_OBSERVATIONS,
-    CALIBRATION_PROFILES_SOLVED,
-    CALIBRATION_SOLVER_REPORT,
     CALIBRATION_TARGET,
-    CALIBRATION_TARGET_POSE_ESTIMATION,
-    CALIBRATION_VALIDATION_REPORT,
     CAMERA_RECTIFICATION_REPORT,
     DATASET_MANIFEST,
     DEPTH_DIR,
@@ -84,17 +75,8 @@ _FILE_CONTRACT = {
 }
 _TARGET_DEPENDENT_NAMES = {
     ARUCO_DETECTIONS,
-    ARUCO_POSE_ESTIMATION,
-    CALIBRATION_TARGET_POSE_ESTIMATION,
-    ARUCO_COVERAGE_REPORT,
     INTRINSIC_CALIBRATION_PROFILES,
     CAMERA_RECTIFICATION_REPORT,
-    CALIBRATION_OBSERVATIONS,
-    CALIBRATION_CANDIDATES,
-    CALIBRATION_PROFILES_FROM_OBSERVATIONS,
-    CALIBRATION_SOLVER_REPORT,
-    CALIBRATION_PROFILES_SOLVED,
-    CALIBRATION_VALIDATION_REPORT,
     CALIBRATION_PROFILES,
 }
 
@@ -509,15 +491,15 @@ def _raw_capture_replacement_blockers(root: Path) -> list[str]:
 def normalize_target_mounting_frame(
     placement_mode: str,
     mounting_frame: str | None,
-) -> str | None:
-    """Validate an optional physical target mounting while retaining legacy absence."""
+) -> str:
+    """Validate the explicit physical target mounting contract."""
 
     if placement_mode not in PLACEMENT_MODES:
         raise ValueError(
             "placement mode must be one of: " + ", ".join(sorted(PLACEMENT_MODES))
         )
     if mounting_frame is None:
-        return None
+        raise ValueError("mounting_frame is required")
     frame = str(mounting_frame).strip()
     if frame not in TARGET_MOUNTING_FRAMES:
         raise ValueError(
@@ -534,12 +516,10 @@ def normalize_target_mounting_frame(
 
 def validate_configured_target_mounting(
     config: Mapping[str, Any],
-    mounting_frame: str | None,
+    mounting_frame: str,
 ) -> None:
     """Bind a new explicit target mounting to one homogeneous camera group."""
 
-    if mounting_frame is None:
-        return
     capture = config.get("capture")
     raw_sensors = capture.get("sensors") if isinstance(capture, Mapping) else None
     if not isinstance(raw_sensors, list):
@@ -570,7 +550,6 @@ def validate_run_target_selection(
     run_root: str | Path,
     *,
     require_placement: bool = False,
-    require_mounting_frame: bool = False,
 ) -> dict[str, Any]:
     """Cross-check run config, copied bundle, root target, hashes, and placement."""
 
@@ -619,12 +598,6 @@ def validate_run_target_selection(
             else None
         ),
     )
-    if require_mounting_frame and explicit_mounting_frame is None:
-        raise ValueError(
-            "Calibration-target mounting_frame is missing from this legacy run "
-            "selection; explicitly reselect the target arrangement before recording "
-            "or calibration analysis"
-        )
     placement = active.get("placement")
     if mode == "unknown":
         if placement is not None:
@@ -648,9 +621,7 @@ def validate_run_target_selection(
         "configuration_sha256": bundle["configuration_sha256"],
         "placement_mode": mode,
         "mounting_frame": explicit_mounting_frame,
-        "effective_mounting_frame": (
-            explicit_mounting_frame or ("template_base" if mode != "unknown" else None)
-        ),
+        "effective_mounting_frame": explicit_mounting_frame,
         "placement": dict(placement_selection),
         "selection": dict(selection),
         "target": active,
@@ -714,7 +685,7 @@ def validate_bundle_placement(
     bundle: Mapping[str, Any],
     mode: str,
     *,
-    mounting_frame: str | None = None,
+    mounting_frame: str,
 ) -> None:
     normalize_target_mounting_frame(mode, mounting_frame)
     bundle_path = Path(str(bundle.get("bundle_path", "")))
@@ -771,7 +742,7 @@ def select_target_bundle(
     run_root: str | Path,
     target_id: str,
     placement_mode: str,
-    mounting_frame: str | None = None,
+    mounting_frame: str,
     library_root: str | Path | None = None,
 ) -> dict[str, Any]:
     root = Path(run_root).resolve()
@@ -790,7 +761,7 @@ def _select_target_bundle_locked(
     run_root: str | Path,
     target_id: str,
     placement_mode: str,
-    mounting_frame: str | None = None,
+    mounting_frame: str,
     library_root: str | Path | None = None,
 ) -> dict[str, Any]:
     root = Path(run_root)
@@ -808,9 +779,10 @@ def _select_target_bundle_locked(
         mounting_frame=normalized_mounting_frame,
     )
     records = bundle["files"]
-    selection_placement = {"mode": placement_mode}
-    if normalized_mounting_frame is not None:
-        selection_placement["mounting_frame"] = normalized_mounting_frame
+    selection_placement = {
+        "mode": placement_mode,
+        "mounting_frame": normalized_mounting_frame,
+    }
     existing = config.get("calibration_target")
     if isinstance(existing, Mapping):
         existing_mode = (
@@ -884,7 +856,7 @@ def _select_target_bundle_locked(
         run_root=root,
         message=(
             f"Selected immutable calibration target {target_uuid} ({placement_mode}, "
-            f"mounting={normalized_mounting_frame or 'legacy_unspecified'})."
+            f"mounting={normalized_mounting_frame})."
         ),
     )
     manifest["updated_at"] = utc_now_iso()

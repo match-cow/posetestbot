@@ -58,7 +58,7 @@ def page():
                 "`UV_CACHE_DIR=/tmp/uv-cache uv run playwright install chromium`. "
                 f"Original error: {exc}"
             )
-        page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
         try:
             yield page
         finally:
@@ -73,9 +73,15 @@ def fulfill_json(route, value: object, *, status: int = 200) -> None:
     )
 
 
-def run_config(*, plan_only: bool = True, sensors: list[dict] | None = None) -> dict:
+def run_config(
+    *,
+    intent: str = "calibration",
+    annotation_mode: str = "none",
+    sensors: list[dict] | None = None,
+) -> dict:
     return {
-        "schema_version": "run_config.v3",
+        "schema_version": "run_config.v4",
+        "run_id": "11111111-1111-4111-8111-111111111111",
         "run_name": "new-run",
         "run_root": RUN_ROOT,
         "robot_profile": {
@@ -87,6 +93,7 @@ def run_config(*, plan_only: bool = True, sensors: list[dict] | None = None) -> 
             "cartesian_velocity_m_s": 0.2,
         },
         "capture": {
+            "intent": intent,
             "resolution": "720p",
             "fps": 6,
             "velocity_m_s": 0.2,
@@ -101,6 +108,7 @@ def run_config(*, plan_only: bool = True, sensors: list[dict] | None = None) -> 
                 "from": "robot_flange",
                 "to": "template_base",
                 "convention": "kuka_abc_radians",
+                "sunrise_reference_frame_path": "/PoseTestBot/PoseTemplateBase",
             },
             "dataset_reference_frame": "template_base",
             "fixed_transforms": [],
@@ -108,12 +116,9 @@ def run_config(*, plan_only: bool = True, sensors: list[dict] | None = None) -> 
         "dataset_mode": "objectless",
         "pose_template": None,
         "calibration_profiles": None,
+        "intrinsic_calibration_profiles": None,
         "calibration_target": None,
-        "pipeline": {
-            "sequence_id": "real_full_capture_validation",
-            "plan_only": plan_only,
-            "options": {},
-        },
+        "bop": {"annotation_mode": annotation_mode},
     }
 
 
@@ -148,7 +153,7 @@ def run_folder_inventory() -> dict:
         folder: str,
         run_name: str,
         modified_at: str,
-        sequence: str,
+        intent: str,
         object_names: list[str],
         object_count: int,
         size_bytes: int,
@@ -172,8 +177,13 @@ def run_folder_inventory() -> dict:
                 "valid": True,
                 "error": None,
                 "run_name": run_name,
-                "sequence": sequence,
-                "plan_only": True,
+                "run_id": (
+                    "11111111-1111-4111-8111-111111111111"
+                    if folder == "new-run"
+                    else "22222222-2222-4222-8222-222222222222"
+                ),
+                "intent": intent,
+                "annotation_mode": "none",
             },
             "contents": {
                 "dataset_mode": "pose_template" if object_count else "objectless",
@@ -184,7 +194,7 @@ def run_folder_inventory() -> dict:
                 "enabled_sensor_count": 1,
                 "sensors": [
                     {
-                        "sensor_type": "realsense",
+                        "sensor_type": "realsense_d435",
                         "device_id": "123",
                         "name": "Front D435",
                         "mounting_mode": "static",
@@ -249,7 +259,7 @@ def run_folder_inventory() -> dict:
                 folder="new-run",
                 run_name="Calibration baseline",
                 modified_at="2026-08-06T09:00:00Z",
-                sequence="real_full_capture_validation",
+                intent="calibration",
                 object_names=[],
                 object_count=0,
                 size_bytes=2 * gib,
@@ -258,7 +268,7 @@ def run_folder_inventory() -> dict:
                 folder="old-run",
                 run_name="Object A capture",
                 modified_at="2026-08-05T09:00:00Z",
-                sequence="sync_aruco",
+                intent="dataset",
                 object_names=["Object A"],
                 object_count=1,
                 size_bytes=gib,
@@ -286,14 +296,23 @@ def calibration_selection_artifact(
     source_run_name: str = "Reusable calibration",
 ) -> dict:
     return {
-        "schema_version": "calibration_profile_selection.v1",
+        "schema_version": "calibration_profile_selection.v2",
         "selected_at": "2026-07-22T12:00:00+00:00",
         "operator": "web_operator",
         "source": {
-            "run_root": source_run_root,
-            "run_name": source_run_name,
+            "kind": "composite",
+            "run_name": f"Combined calibration from {source_run_name}",
+            "source_count": 1,
             "bundle_sha256": bundle_sha256,
         },
+        "sources": [
+            {
+                "run_root": source_run_root,
+                "run_name": source_run_name,
+                "bundle_sha256": bundle_sha256,
+                "selected_sensor_keys": ["realsense_d435:wrist-1"],
+            }
+        ],
         "snapshot": {
             "calibration_profiles": {
                 "relative_path": calibration_profiles,
@@ -307,6 +326,14 @@ def calibration_selection_artifact(
         "sensor_profiles": {
             "realsense_d435:wrist-1": "profile-wrist-1",
         },
+        "sensor_profile_mapping": [
+            {
+                "sensor_key": "realsense_d435:wrist-1",
+                "sensor_type": "realsense_d435",
+                "device_id": "wrist-1",
+                "profile_id": "profile-wrist-1",
+            }
+        ],
     }
 
 
@@ -358,14 +385,6 @@ def overview_payload(config: dict | None = None) -> dict:
             {"id": id_, "label": label, "status": status, "artifacts": []}
             for id_, label, status in sections
         ],
-        "steps": [],
-        "recommendations": [
-            {
-                "label": "Run preflight",
-                "description": "Create fresh readiness evidence before capture.",
-            }
-        ],
-        "recommendation_error": None,
     }
 
 
@@ -606,8 +625,9 @@ def install_common_mocks(
                         "path": RUN_ROOT,
                         "name": "new-run",
                         "run_name": "Calibration baseline",
-                        "sequence": "real_full_capture_validation",
-                        "plan_only": True,
+                        "run_id": "11111111-1111-4111-8111-111111111111",
+                        "intent": "calibration",
+                        "annotation_mode": "none",
                         "config_valid": True,
                         "config_error": None,
                         "modified_at": "2026-07-10T12:00:00Z",
@@ -616,8 +636,9 @@ def install_common_mocks(
                         "path": "/tmp/posetestbot-console/old-run",
                         "name": "old-run",
                         "run_name": "Object A capture",
-                        "sequence": "sync_aruco",
-                        "plan_only": True,
+                        "run_id": "22222222-2222-4222-8222-222222222222",
+                        "intent": "dataset",
+                        "annotation_mode": "none",
                         "config_valid": True,
                         "config_error": None,
                         "modified_at": "2026-07-09T12:00:00Z",
@@ -853,7 +874,7 @@ def install_common_mocks(
             {
                 "job": {"id": "monitor-1", "status": "failed"},
                 "webrtc_status": {
-                    "schema_version": "monitor_webrtc.v1",
+                    "schema_version": "monitor_webrtc.v2",
                     "transport": "webrtc",
                     "status": "failed",
                     "signaling_ready": False,
@@ -862,39 +883,6 @@ def install_common_mocks(
                     "selected_node": None,
                     "error": "mock camera offline",
                 },
-            },
-        ),
-    )
-    page.route(
-        "**/pipeline/sequences",
-        lambda route: fulfill_json(
-            route,
-            {
-                "sequences": [
-                    {
-                        "id": "real_full_capture_validation",
-                        "label": "Real Full Capture Validation",
-                        "description": "Safe plan",
-                        "steps": [],
-                    }
-                ]
-            },
-        ),
-    )
-    page.route(
-        "**/pipeline/stages",
-        lambda route: fulfill_json(
-            route,
-            {
-                "stages": [
-                    {
-                        "id": "capture_plan",
-                        "label": "Capture Plan",
-                        "description": "Write a command plan without hardware.",
-                        "resources": ["disk_io"],
-                        "parameters": [],
-                    }
-                ]
             },
         ),
     )
@@ -918,13 +906,6 @@ def install_common_mocks(
 
     page.route("**/run-config**", config_handler)
 
-    def pipeline_handler(route) -> None:
-        requests.append({"path": "/pipeline/run", "body": route.request.post_data_json})
-        fulfill_json(
-            route, {"job_id": f"job-{len(requests)}", "status": "queued"}, status=202
-        )
-
-    page.route("**/pipeline/run", pipeline_handler)
     page.route(
         "**/sensors/previews/stop",
         lambda route: (
@@ -1081,15 +1062,15 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     assert (
         page.evaluate("localStorage.getItem('posetestbot.selectedRun')") == custom_run
     )
-    page.get_by_role("button", name="Open operator console guide").click()
-    expect(page.get_by_role("heading", name="Operator console guide")).to_be_visible()
-    expect(
-        page.get_by_text("Choose an outcome in Workflow", exact=True)
-    ).to_be_visible()
-    expect(
-        page.get_by_text("IIWA STOP is not a safety stop", exact=False)
-    ).to_be_visible()
-    page.keyboard.press("Escape")
+    documentation = page.get_by_role("link", name="Documentation", exact=True)
+    expect(documentation).to_have_attribute(
+        "href", "https://match-cow.github.io/posetestbot/"
+    )
+    expect(documentation).to_have_attribute("target", "_blank")
+    expect(page.get_by_text("Operator console guide", exact=False)).to_have_count(0)
+    expect(page.get_by_text("Trusted lab network", exact=False)).to_have_count(0)
+    expect(page.get_by_text("Advanced tools", exact=False)).to_have_count(0)
+    expect(page.locator('a[href*="workflow/advanced"]')).to_have_count(0)
     theme_toggle = page.get_by_role("button", name="Switch to light theme")
     theme_toggle_box = theme_toggle.bounding_box()
     assert theme_toggle_box is not None
@@ -1102,9 +1083,7 @@ def test_navigation_run_fallback_persistence_and_both_themes(
         "src", "/assets/cow_light.png"
     )
     assert page.evaluate("localStorage.getItem('posetestbot.theme')") == "light"
-    expect(
-        page.get_by_role("link", name="Open PoseTestBot on GitHub")
-    ).to_have_attribute("href", "https://github.com/match-cow/PoseTestBot")
+    expect(page.get_by_role("link", name="Open PoseTestBot on GitHub")).to_have_count(0)
     sidebar_rgb = page.get_by_role(
         "complementary", name="Application sidebar"
     ).evaluate(
@@ -1129,6 +1108,9 @@ def test_navigation_run_fallback_persistence_and_both_themes(
         "background-color", "rgba(0, 0, 0, 0)"
     )
     expect(page.get_by_role("img", name="PoseTestBot")).to_have_css("padding", "0px")
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
 
 
 def test_active_run_header_alignment_and_change_affordance(
@@ -1151,6 +1133,31 @@ def test_active_run_header_alignment_and_change_affordance(
     )
     expect(change_run).to_have_css("background-color", "rgb(177, 203, 33)")
     expect(change_run).to_contain_text("Change run")
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
+@pytest.mark.parametrize("viewport", [(1920, 1080), (1440, 900)])
+def test_canonical_workflow_chooser_has_two_outcomes_without_primary_overflow(
+    console_server,
+    page,
+    viewport: tuple[int, int],
+) -> None:
+    install_common_mocks(page)
+    page.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+    page.goto(f"{console_server.url}/#/workflow/setup", wait_until="networkidle")
+
+    expect(page.get_by_role("heading", name="What do you want to do?")).to_be_visible()
+    expect(page.get_by_role("heading", name="Calibrate cameras")).to_be_visible()
+    expect(page.get_by_role("heading", name="Record an object dataset")).to_be_visible()
+    expect(page.get_by_text("Advanced tools", exact=False)).to_have_count(0)
+    expect(
+        page.locator('[data-stage-id], [data-testid="advanced-stage-tools"]')
+    ).to_have_count(0)
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
 
 
 def test_top_right_restart_controls_reload_frontend_backend_or_both(
@@ -2087,8 +2094,16 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
     def readiness_job_payload(status: str) -> dict:
         return {
             "id": "readiness-1",
-            "name": "pipeline:run_preflight",
-            "command": ["uv", "run", "python", "scripts/run_pipeline_stage.py"],
+            "name": "Run preflight",
+            "command": [
+                "uv",
+                "run",
+                "python",
+                "scripts/run_preflight.py",
+                RUN_ROOT,
+                "--check",
+                "--write",
+            ],
             "cwd": "/repo",
             "status": status,
             "created_at": "2026-07-27T11:00:00Z",
@@ -2097,10 +2112,10 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
             "returncode": 0 if status == "succeeded" else None,
             "message": None,
             "tail": [],
-            "resources": ["disk_io"],
+            "resources": ["camera", "disk_io"],
             "parameters": {
                 "run_root": RUN_ROOT,
-                "pipeline_stage": "run_preflight",
+                "purpose": "preflight",
             },
             "scope_kind": "run",
             "run_root": RUN_ROOT,
@@ -2108,7 +2123,9 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
         }
 
     def readiness_submit_handler(route) -> None:
-        requests.append({"path": "/pipeline/run", "body": route.request.post_data_json})
+        requests.append(
+            {"path": "/preflight/jobs", "body": route.request.post_data_json}
+        )
         readiness_job_status["value"] = "queued"
         fulfill_json(route, {"job_id": "readiness-1", "status": "queued"}, status=202)
 
@@ -2122,8 +2139,8 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
             },
         )
 
-    page.route("**/pipeline/run", readiness_submit_handler)
-    page.route("**/jobs", jobs_handler)
+    page.route("**/preflight/jobs", readiness_submit_handler)
+    page.route(LOCAL_JOBS_URL_RE, jobs_handler)
 
     def calibration_setup_handler(route) -> None:
         cameras = []
@@ -2178,6 +2195,33 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
                     "default_extrinsic_methods": ["tsai", "park"],
                     "intrinsics_policy": "compare_factory_opencv",
                     "intrinsics_policies": [],
+                    "synchronization": {
+                        "implementation_revision": (
+                            "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5"
+                        ),
+                        "default_policy": "auto_offset",
+                        "policies": [
+                            {
+                                "id": "auto_offset",
+                                "label": "Auto-estimate robot-pose offset — recommended",
+                                "description": "Estimate effective per-camera latency.",
+                            },
+                            {
+                                "id": "fixed_zero",
+                                "label": "Use captured timestamps (0 ms)",
+                                "description": "Use the recorded pairing.",
+                            },
+                        ],
+                        "search": {
+                            "minimum_robot_pose_time_offset_ms": -300.0,
+                            "maximum_robot_pose_time_offset_ms": 300.0,
+                            "step_ms": 5.0,
+                            "max_nearest_pose_delta_ms": 150.0,
+                            "warning_nearest_pose_delta_ms": 20.0,
+                            "warning_absolute_robot_pose_time_offset_ms": 150.0,
+                            "time_offset_failure_policy": "warn_keep_zero",
+                        },
+                    },
                     "thresholds": {
                         "min_pnp_common_inliers": 12,
                         "min_pnp_common_inlier_ratio": 0.5,
@@ -2201,6 +2245,18 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
         )
 
     def capture_jobs_handler(route) -> None:
+        if route.request.method == "POST":
+            body = route.request.post_data_json
+            requests.append({"path": "/capture/jobs", "body": body})
+            capture_setup["queued"] = True
+            capture_setup["job_id"] = f"capture-{len(requests)}"
+            capture_setup["status"] = "queued"
+            fulfill_json(
+                route,
+                {"job_id": capture_setup["job_id"], "status": "queued"},
+                status=202,
+            )
+            return
         status = capture_setup["status"]
         job_id = capture_setup["job_id"]
         fulfill_json(
@@ -2215,11 +2271,10 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
                             "id": job_id,
                             "name": "Calibration capture",
                             "status": status,
-                            "kind": "pipeline_sequence",
-                            "stage": None,
-                            "sequence": "real_full_capture_validation",
+                            "kind": "capture",
+                            "intent": "calibration",
                             "run_root": RUN_ROOT,
-                            "resources": ["cameras", "robot", "disk_io"],
+                            "resources": ["camera", "disk_io", "robot_command"],
                             "message": None,
                             "created_at": "2026-07-27T12:00:00Z",
                             "started_at": None,
@@ -2237,21 +2292,8 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
             },
         )
 
-    def pipeline_sequence_handler(route) -> None:
-        body = route.request.post_data_json
-        requests.append({"path": "/pipeline/run-sequence", "body": body})
-        capture_setup["queued"] = True
-        capture_setup["job_id"] = f"job-{len(requests)}"
-        capture_setup["status"] = "queued"
-        fulfill_json(
-            route,
-            {"job_id": capture_setup["job_id"], "status": "queued"},
-            status=202,
-        )
-
     page.route("**/calibration/setup?**", calibration_setup_handler)
     page.route("**/capture/jobs**", capture_jobs_handler)
-    page.route("**/pipeline/run-sequence", pipeline_sequence_handler)
     page.add_init_script(
         "localStorage.setItem('posetestbot.selectedSensors', "
         "JSON.stringify(['realsense_d435:wrist-1', 'realsense_d435:static-1']))"
@@ -2286,8 +2328,10 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
     page.get_by_role("button", name="Save setup").click()
     expect(page.get_by_text("Calibration recording setup saved")).to_be_visible()
     written = next(item["body"] for item in requests if item["path"] == "/run-config")
-    assert written["plan_only"] is True
-    assert written["velocity"] == 0.03
+    assert written["intent"] == "calibration"
+    assert written["annotation_mode"] == "none"
+    assert written["velocity_m_s"] == 0.03
+    assert "pipeline" not in written
     assert "mounting_mode" not in written
     assert [sensor["mounting_mode"] for sensor in written["sensors"]] == [
         "eye_in_hand",
@@ -2306,9 +2350,9 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
     expect(readiness).to_contain_text("Readiness has not been checked")
     readiness.get_by_role("button", name="Check readiness", exact=True).click()
     preflight_request = next(
-        item["body"] for item in requests if item["path"] == "/pipeline/run"
+        item["body"] for item in requests if item["path"] == "/preflight/jobs"
     )
-    assert preflight_request["stage"] == "run_preflight"
+    assert preflight_request == {"run_root": RUN_ROOT}
     assert "allow_cameras" not in json.dumps(preflight_request)
     readiness_job = readiness.get_by_test_id("calibration-readiness-job-status")
     expect(readiness_job).to_contain_text("Readiness check is queued", timeout=5_000)
@@ -2344,29 +2388,13 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
     submit.click()
     expect(page.get_by_text("Calibration capture queued")).to_be_visible()
     capture_request = [
-        item["body"] for item in requests if item["path"] == "/pipeline/run-sequence"
+        item["body"] for item in requests if item["path"] == "/capture/jobs"
     ][-1]
     assert capture_request == {
-        "sequence": "real_full_capture_validation",
         "run_root": RUN_ROOT,
-        "plan_only": False,
-        "options": {
-            "capture_plan_preflight": {"allow_real_robot": True},
-            "capture_execution_plan": {
-                "allow_cameras": True,
-                "allow_real_robot": True,
-                "include_sensors": True,
-            },
-            "capture_execution": {
-                "allow_cameras": True,
-                "allow_real_robot": True,
-                "include_sensors": True,
-                "timeout_s": 720,
-                "startup_wait_s": 15,
-                "receive_start_timeout_s": 120,
-                "receive_idle_timeout_s": 60,
-            },
-        },
+        "intent": "calibration",
+        "allow_cameras": True,
+        "allow_real_robot": True,
     }
     assert any(item["path"] == "/sensors/previews/stop" for item in requests)
     capture_job = page.get_by_test_id("capture-active-job")
@@ -2378,10 +2406,7 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
     expect(
         page.get_by_role("button", name="Review and start capture", exact=True)
     ).to_have_count(0)
-    assert (
-        len([item for item in requests if item["path"] == "/pipeline/run-sequence"])
-        == 1
-    )
+    assert len([item for item in requests if item["path"] == "/capture/jobs"]) == 1
     page.get_by_role("navigation", name="Workflow steps").get_by_role("button").filter(
         has_text="Calculate, review, and publish"
     ).click()
@@ -2412,7 +2437,7 @@ def test_dataset_processing_is_one_ordered_operator_action(
         "processed/calibration_inputs/current/intrinsic_calibration_profiles.json"
     )
     configured = run_config(
-        plan_only=False,
+        intent="dataset",
         sensors=[
             {
                 "sensor_type": "realsense_d435",
@@ -2515,12 +2540,13 @@ def test_dataset_processing_is_one_ordered_operator_action(
             else [
                 {
                     "id": "dataset-processing-1",
-                    "name": "pipeline-run-config:calibrated_capture_to_bop_dataset_dry_run",
+                    "name": "Dataset processing",
                     "command": [
                         "uv",
                         "run",
                         "python",
-                        "scripts/run_pipeline_sequence.py",
+                        "scripts/process_dataset.py",
+                        RUN_ROOT,
                     ],
                     "cwd": "/repo",
                     "status": status,
@@ -2540,7 +2566,7 @@ def test_dataset_processing_is_one_ordered_operator_action(
                     "tail": ["processing"],
                     "resources": ["cpu", "disk_io"],
                     "parameters": {
-                        "pipeline_sequence": "calibrated_capture_to_bop_dataset_dry_run",
+                        "purpose": "dataset_processing",
                         "run_root": RUN_ROOT,
                     },
                     "scope_kind": "run",
@@ -2552,8 +2578,8 @@ def test_dataset_processing_is_one_ordered_operator_action(
         )
         fulfill_json(route, {"jobs": jobs, "resources": {}})
 
-    page.route("**/pipeline/run-config", processing_handler)
-    page.route("**/jobs", jobs_handler)
+    page.route("**/dataset-processing/jobs", processing_handler)
+    page.route(LOCAL_JOBS_URL_RE, jobs_handler)
     page.goto(
         f"{console_server.url}/#/workflow/dataset?step=sync",
         wait_until="networkidle",
@@ -2621,7 +2647,7 @@ def test_dataset_processing_is_one_ordered_operator_action(
         )
     ).to_be_visible()
     expect(processing).to_contain_text(
-        "One queued job runs five backend stages grouped into the four operator outcomes below"
+        "One queued job runs the fixed four-command recipe below"
     )
     expect(processing).to_contain_text(
         "Ground-truth generation is chosen separately in optional step 6"
@@ -2704,7 +2730,7 @@ def test_dataset_processing_is_one_ordered_operator_action(
     )
 
 
-def test_robot_controls_validate_and_confirm_start_and_stop(
+def test_robot_controls_are_dashboard_only_fixed_target_and_acknowledged(
     console_server, page
 ) -> None:
     commands: list[dict] = []
@@ -2716,58 +2742,55 @@ def test_robot_controls_validate_and_confirm_start_and_stop(
             route, {"job_id": f"robot-{len(commands)}", "status": "queued"}, status=202
         )
 
-    page.route("**/run-command", command_handler)
+    page.route("**/robot/commands", command_handler)
     page.goto(f"{console_server.url}/#/devices", wait_until="networkidle")
+    expect(page.get_by_test_id("iiwa-quick-controls")).to_have_count(0)
+    expect(page.get_by_role("button", name="Start IIWA")).to_have_count(0)
+    expect(page.get_by_label("Robot IP")).to_have_count(0)
+    expect(page.get_by_label("Command port")).to_have_count(0)
+    expect(
+        page.get_by_role("heading", name="RGB-D sensor lab defaults")
+    ).to_be_visible()
 
-    page.get_by_label("Robot IP").fill("")
+    page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
+    controls = page.get_by_test_id("iiwa-quick-controls")
+    expect(controls).to_contain_text("172.31.1.147:30300")
+    stop_warning = controls.get_by_test_id("iiwa-stop-warning")
+    expect(stop_warning).to_contain_text("cannot interrupt active motion")
+    expect(stop_warning).to_contain_text("not an emergency stop")
     page.get_by_role("button", name="Start IIWA").click()
-    expect(page.get_by_text("Enter a valid robot IP and port")).to_be_visible()
-    expect(page.get_by_role("dialog")).to_have_count(0)
-    assert commands == []
-
-    page.get_by_label("Robot IP").fill("172.31.1.200")
-    page.get_by_label("Command port").fill("30301")
-    page.get_by_role("button", name="Start IIWA").click()
-    expect(page.get_by_role("dialog")).to_contain_text("172.31.1.200:30301")
+    expect(page.get_by_role("dialog")).to_contain_text("172.31.1.147:30300")
     expect(page.get_by_role("dialog")).to_contain_text(
         "Manual test request: 0.1 m/s (100 mm/s)"
     )
     expect(page.get_by_role("button", name="Queue start")).to_be_disabled()
-    expect(page.get_by_role("dialog").get_by_role("checkbox")).to_have_count(1)
-    page.get_by_text("I confirm this is the intended lab IIWA target.").click()
-    expect(
-        page.get_by_text("I authorize motion of the real lab IIWA for this start.")
-    ).to_be_visible()
-    expect(
-        page.get_by_text("I confirm the capture cameras and pose receiver are ready.")
-    ).to_be_visible()
+    expect(page.get_by_role("dialog").get_by_role("checkbox")).to_have_count(2)
+    page.get_by_test_id("iiwa-robot-acknowledgement").click()
+    page.get_by_test_id("iiwa-camera-acknowledgement").click()
     expect(page.get_by_role("button", name="Queue start")).to_be_enabled()
     page.get_by_role("button", name="Queue start").click()
     expect(page.get_by_text("IIWA start queued")).to_be_visible()
 
-    page.get_by_role("button", name="Stop IIWA").click()
-    stop_warning = page.get_by_test_id("iiwa-stop-warning")
-    expect(stop_warning).to_contain_text("IIWA STOP is not a safety stop")
-    expect(stop_warning).to_contain_text("cannot interrupt active motion")
-    expect(stop_warning).to_contain_text(
-        "Sunrise must be restarted manually before another START"
+    page.get_by_role("button", name="Stop / exit idle IIWA program").click()
+    expect(page.get_by_role("dialog")).to_contain_text("not a motion stop")
+    expect(page.get_by_role("dialog")).to_contain_text(
+        "requires a manual Sunrise restart"
     )
-    expect(page.get_by_role("button", name="Queue stop")).to_be_disabled()
+    expect(page.get_by_role("button", name="Queue idle-program exit")).to_be_disabled()
     expect(page.get_by_role("dialog").get_by_role("checkbox")).to_have_count(1)
-    assert [item["command"] for item in commands] == ["start_iiwa"]
-    page.get_by_text("I confirm this is the intended lab IIWA target.").click()
-    page.get_by_role("button", name="Queue stop").click()
-    expect(page.get_by_text("IIWA stop queued")).to_be_visible()
+    assert [item["command"] for item in commands] == ["start"]
+    page.get_by_test_id("iiwa-idle-exit-confirmation").click()
+    page.get_by_role("button", name="Queue idle-program exit").click()
+    expect(page.get_by_text("IIWA idle-program exit queued")).to_be_visible()
 
     assert commands == [
         {
-            "command": "start_iiwa",
-            "robot_ip": "172.31.1.200",
-            "robot_port": 30301,
+            "command": "start",
+            "run_root": RUN_ROOT,
             "allow_real_robot": True,
             "allow_cameras": True,
         },
-        {"command": "stop_iiwa", "robot_ip": "172.31.1.200", "robot_port": 30301},
+        {"command": "stop", "confirm_idle_program_exit": True},
     ]
 
 
@@ -2776,6 +2799,7 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
     page.add_init_script(
         """
         window.__copiedDebugTexts = [];
+        window.__execCommandCalls = 0;
         Object.defineProperty(navigator, "clipboard", {
           configurable: true,
           value: {
@@ -2784,14 +2808,8 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
             },
           },
         });
-        document.execCommand = (command) => {
-          if (command !== "copy") return false;
-          const target = document.activeElement;
-          if (!(target instanceof HTMLTextAreaElement)) return false;
-          if (!target.closest('[role="dialog"]')) return false;
-          window.__copiedDebugTexts.push(
-            target.value.slice(target.selectionStart, target.selectionEnd)
-          );
+        document.execCommand = () => {
+          window.__execCommandCalls += 1;
           return true;
         };
         """
@@ -2799,7 +2817,7 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
     canceled: list[str] = []
     job = {
         "id": "capture-1",
-        "name": "pipeline:sync_run",
+        "name": "Dataset processing",
         "command": ["uv"],
         "cwd": "/repo",
         "status": "running",
@@ -2811,7 +2829,7 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
         "message": None,
         "tail": ["working"],
         "resources": ["disk_io"],
-        "parameters": {"pipeline_stage": "sync_run", "run_root": RUN_ROOT},
+        "parameters": {"purpose": "dataset_processing", "run_root": RUN_ROOT},
         "scope_kind": "run",
         "run_root": RUN_ROOT,
     }
@@ -2846,16 +2864,26 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
     page.get_by_role("button", name="Log").click()
     expect(page.locator('[data-testid="job-log"]')).to_contain_text("line two")
     page.get_by_role("button", name="Copy output").click()
-    expect(page.get_by_text("Job output copied")).to_be_visible()
+    expect(page.get_by_text("Job output could not be copied")).to_be_visible()
+    assert page.evaluate("window.__execCommandCalls") == 0
+    page.evaluate(
+        """
+        Object.defineProperty(navigator, "clipboard", {
+          configurable: true,
+          value: {
+            writeText: async (text) => window.__copiedDebugTexts.push(text),
+          },
+        })
+        """
+    )
     page.get_by_role("button", name="Copy context").click()
     expect(page.get_by_text("Job context copied")).to_be_visible()
     copied = page.evaluate("window.__copiedDebugTexts")
-    assert copied[0] == "line one\nline two\n"
-    context = json.loads(copied[1])
+    context = json.loads(copied[0])
     assert context["schema_version"] == "posetestbot_job_debug_context.v1"
     assert context["job"]["id"] == "capture-1"
     assert context["job"]["parameters"] == {
-        "pipeline_stage": "sync_run",
+        "purpose": "dataset_processing",
         "run_root": RUN_ROOT,
     }
     assert context["job"]["scope_kind"] == "run"
@@ -3577,7 +3605,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     oak_alignment = alignment.locator('[data-time-offset-sensor="oak_d_pro:static-1"]')
     expect(oak_alignment).to_contain_text("Applied with 1 warning")
     expect(oak_alignment).to_contain_text("reference method sensitivity")
-    alignment.get_by_text("Advanced offset evidence · Wrist RGB-D").click()
+    alignment.get_by_text("Technical offset evidence · Wrist RGB-D").click()
     expect(alignment).to_contain_text("cross validation offset stability")
     motion_consistency = page.get_by_test_id(
         "timing-motion-consistency-realsense_d435:wrist-1"
@@ -3628,7 +3656,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     expect(
         page.get_by_text("All attempted solutions and failures").first
     ).to_be_visible()
-    wrist_result.get_by_text("Alternative solution (advanced)", exact=True).click()
+    wrist_result.get_by_text("Alternative passing solution", exact=True).click()
     wrist_result.get_by_label("Alternative solution", exact=True).click()
     page.get_by_role("option", name="SQPNP + tsai · score 0.2000").click()
     page.get_by_role("button", name="Save selected calibrations").click()
@@ -3753,88 +3781,6 @@ def calibration_time_alignment_setup(
     }
 
 
-def test_calibration_workflow_explains_immutable_legacy_timing_attempt(
-    console_server,
-    page,
-) -> None:
-    attempt_id = "e" * 32
-    setup = calibration_time_alignment_setup(
-        latest_attempt_id=attempt_id,
-        latest_status="failed",
-    )
-    install_common_mocks(page, config_payload=eye_in_hand_calibration_config())
-    page.route("**/calibration/setup?**", lambda route: fulfill_json(route, setup))
-    attempt = {
-        "schema_version": "calibration_attempt.v1",
-        "attempt_id": attempt_id,
-        "request": {
-            "mode": "eye_in_hand",
-            "sensor_keys": ["realsense_d435:wrist-1"],
-            "target_id": setup["saved_targets"][0]["target_id"],
-            "solver_policy": "auto_compare",
-            "intrinsics_policy": "compare_factory_opencv",
-            "synchronization_policy": "auto_offset",
-        },
-        "progress": calibration_attempt_progress(
-            status="failed",
-            time_alignment_status="failed",
-            message="ValueError: Auto-sync evidence failed closed",
-        ),
-        "results": None,
-        "intrinsic_comparison": None,
-        "time_offset_search": {
-            "implementation_revision": "constant_latency_nearest_pose_motion_cv.v1",
-            "policy": "auto_offset",
-            "status": "failed",
-            "sign_convention": {
-                "operator_equation": "robot_pose_query_time = frame_time + offset",
-                "positive_operator_value": (
-                    "pair the frame with a robot pose recorded later"
-                ),
-                "conversion": "sync_delta_ms = -robot_pose_time_offset_ms",
-            },
-            "search": {
-                "minimum_robot_pose_time_offset_ms": -150.0,
-                "maximum_robot_pose_time_offset_ms": 150.0,
-                "step_ms": 5.0,
-            },
-            "sensors": [
-                {
-                    "sensor_key": "realsense_d435:wrist-1",
-                    "status": "failed",
-                    "decision_reason": "candidate_failed_safety_or_stability_checks",
-                    "selected_robot_pose_time_offset_ms": 0.0,
-                    "selected_sync_delta_ms": 0.0,
-                    "candidate_robot_pose_time_offset_ms": 45.0,
-                    "evidence_strength": "insufficient",
-                    "boundary_hit": False,
-                    "checks": [],
-                    "curve": [],
-                }
-            ],
-        },
-        "promotion": None,
-    }
-    page.route(
-        f"**/calibration/attempts/{attempt_id}?**",
-        lambda route: fulfill_json(route, attempt),
-    )
-
-    page.goto(
-        f"{console_server.url}/#/workflow/calibration?step=calculate",
-        wait_until="networkidle",
-    )
-
-    expect(page.get_by_test_id("calibration-backend-restart-required")).to_have_count(0)
-    warning = page.get_by_test_id("calibration-attempt-legacy-timing-revision")
-    expect(warning).to_be_visible()
-    expect(warning).to_contain_text("Historical timing evidence · inspection only")
-    expect(warning).to_contain_text("cannot be rerun or promoted")
-    expect(page.get_by_test_id("calibration-time-alignment-failed")).to_contain_text(
-        "decided by the recorded legacy rule"
-    )
-
-
 def calibration_attempt_progress(
     *,
     status: str,
@@ -3921,7 +3867,9 @@ def test_failed_auto_sync_evidence_remains_visible_without_solver_results(
         "results": None,
         "intrinsic_comparison": None,
         "time_offset_search": {
-            "implementation_revision": "constant_latency_nearest_pose_motion_lomo_cv.v2",
+            "implementation_revision": (
+                "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5"
+            ),
             "policy": "auto_offset",
             "status": "failed",
             "sign_convention": {
@@ -4206,7 +4154,9 @@ def test_fixed_zero_policy_is_submitted_and_reported(
         "results": calibration_failed_results(setup["cameras"][0]),
         "intrinsic_comparison": None,
         "time_offset_search": {
-            "implementation_revision": "constant_latency_nearest_pose_motion_lomo_cv.v2",
+            "implementation_revision": (
+                "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5"
+            ),
             "policy": "fixed_zero",
             "status": "complete",
             "sign_convention": {
@@ -4776,18 +4726,12 @@ def test_cell_static_calibration_uses_pose_template_base_and_target_trajectory(
     scene["coordinate_system"].pop("reference_frame_label")
     page.reload(wait_until="networkidle")
 
-    expect(page.get_by_role("heading", name="Cell View", exact=True)).to_be_visible()
-    expect(page.get_by_test_id("cell-scene-version-warning")).to_contain_text(
-        "Cell backend restart required"
-    )
-    legacy_trajectory_control = page.get_by_test_id("cell-trajectory-control")
-    expect(legacy_trajectory_control).to_contain_text(
-        "Robot flange trajectory · PoseTemplateBase"
-    )
-    legacy_canvas = page.get_by_test_id("cell-webgl-canvas")
-    expect(legacy_canvas).to_have_attribute(
-        "data-trajectory-entity-id", "robot_flange"
-    )
-    expect(legacy_canvas).to_have_attribute(
-        "data-trajectory-reference-frame", "template_base"
-    )
+    expect(
+        page.get_by_role("heading", name="Cell scene unavailable", exact=True)
+    ).to_be_visible()
+    expect(
+        page.get_by_text("current cell_scene.v1 contract", exact=False)
+    ).to_be_visible()
+    expect(page.get_by_test_id("cell-scene-version-warning")).to_have_count(0)
+    expect(page.get_by_test_id("cell-trajectory-control")).to_have_count(0)
+    expect(page.get_by_test_id("cell-webgl-canvas")).to_have_count(0)

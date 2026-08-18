@@ -78,29 +78,15 @@ def load_camera_transformations(path: str | Path) -> Mapping[str, object]:
     return _read_json_mapping(Path(path), "camera transformations")
 
 
-def _sensor_type_key(sensor_name: str) -> str:
-    name = sensor_name.lower()
-    if name.startswith("realsense"):
-        return "realsense"
-    if name.startswith(("luxonis", "oak")):
-        return "luxonis"
-    if name.startswith(("zed_2i", "zed")):
-        return "zed_2i"
-    return name.split("_")[0]
-
-
 def camera_transform_for_sensor(
     camera_transforms: Mapping[str, object], sensor_name: str
 ) -> Mapping[str, object]:
     value = camera_transforms.get(sensor_name)
-    fallback_key = _sensor_type_key(sensor_name)
-    if value is None:
-        value = camera_transforms.get(fallback_key)
     if not isinstance(value, Mapping):
         available = ", ".join(sorted(str(key) for key in camera_transforms))
         raise KeyError(
-            f"No camera transform for sensor {sensor_name!r} or fallback "
-            f"{fallback_key!r}. Available keys: {available}"
+            f"No exact camera transform for sensor {sensor_name!r}. "
+            f"Available keys: {available}"
         )
     return value
 
@@ -447,7 +433,7 @@ def prepare_sensor_folders(
     object_instances: Mapping[str, Any] | None = None,
     run_root: str | Path | None = None,
     sensor_names: Sequence[str] | None = None,
-    annotation_mode: str = "pose_and_masks",
+    annotation_mode: str,
 ) -> list[PreparedSensor]:
     """Prepare every sensor in staging and promote only after all validate."""
 

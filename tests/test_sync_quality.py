@@ -7,6 +7,11 @@ from pathlib import Path
 import pytest
 
 from posetestbot.io.artifacts import DATASET_MANIFEST, SYNC_QUALITY_REPORT, SYNC_REPORT
+from posetestbot.pipeline.run_config import (
+    SensorRunConfig,
+    create_run_config,
+    write_run_config,
+)
 from posetestbot.sync.quality import (
     build_sync_quality_report,
     calibration_sync_provenance,
@@ -29,6 +34,16 @@ def write_sync_report(
     schema_version: str = "sync_report.v3",
     calibration_sync: dict | None = None,
 ) -> Path:
+    if not (run_root / "run_config.json").is_file():
+        write_run_config(
+            run_root,
+            create_run_config(
+                run_root=run_root,
+                capture_intent="dataset",
+                bop_annotation_mode="none",
+                sensors=(SensorRunConfig("realsense_d435", "123", "D435"),),
+            ),
+        )
     report_path = run_root / "processed" / "synchronized" / sensor_name / SYNC_REPORT
     report_path.parent.mkdir(parents=True, exist_ok=True)
     value = {

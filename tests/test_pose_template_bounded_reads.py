@@ -190,8 +190,8 @@ def test_synchronous_bundle_routes_hash_only_the_requested_artifact(
     assert catalog_hashes == []
 
 
-def test_oversized_legacy_manifest_uses_one_strict_integrity_fallback(
-    tmp_path: Path, monkeypatch: Any
+def test_oversized_manifest_fails_closed_without_full_asset_fallback(
+    tmp_path: Path,
 ) -> None:
     library, bundle = _bundle(tmp_path)
     manifest_path = Path(bundle["bundle_path"]) / "pose_template_bundle.json"
@@ -204,23 +204,8 @@ def test_oversized_legacy_manifest_uses_one_strict_integrity_fallback(
     )
     manifest_path.write_text(json.dumps(manifest))
 
-    original_hash = library_module._sha256
-    hashed: list[str] = []
-
-    def recording_hash(path: Path) -> str:
-        hashed.append(Path(path).name)
-        return original_hash(path)
-
-    monkeypatch.setattr(library_module, "_sha256", recording_hash)
-    loaded = load_template_bundle_detail(bundle["template_uuid"], library_root=library)
-
-    assert loaded["template_uuid"] == bundle["template_uuid"]
-    assert hashed == [
-        "pose_template.pdf",
-        "pose_template_preview.json",
-        "pose_template_thumbnail.json",
-        "canonical.ply",
-    ]
+    with pytest.raises(ValueError, match="exceeds the current size limit"):
+        load_template_bundle_detail(bundle["template_uuid"], library_root=library)
 
 
 def test_bundle_validation_rejects_undeclared_files_and_symlinks(

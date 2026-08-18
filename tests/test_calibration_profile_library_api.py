@@ -64,6 +64,24 @@ INTRINSIC_ID = "D435-123_1280x720_normal_opencv"
 STATIC_REFERENCE_PATH = POSE_TEMPLATE_BASE_SUNRISE_PATH
 
 
+def test_v1_calibration_selection_is_rejected_without_migration(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    atomic_write_json(
+        run_root / CALIBRATION_PROFILE_SELECTION,
+        {
+            "schema_version": "calibration_profile_selection.v1",
+            "source": {"bundle_sha256": "a" * 64},
+            "snapshot": {},
+        },
+    )
+
+    with pytest.raises(ValueError, match="calibration_profile_selection.v2"):
+        verify_calibration_profile_selection(run_root, verify_run_config=False)
+
+
 def _camera_intrinsics() -> CameraIntrinsics:
     return CameraIntrinsics(
         cam_k=(900.0, 0.0, 640.0, 0.0, 900.0, 360.0, 0.0, 0.0, 1.0),
@@ -220,6 +238,8 @@ def _write_source(
     write_run_config(
         source,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
             run_root=source,
             run_name="Reusable camera calibration",
             sensors=(
@@ -239,17 +259,16 @@ def _write_destination(
     write_run_config(
         destination,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
             run_root=destination,
             sensors=(_sensor(mounting_mode=mounting_mode),),
-            sequence_id="calibrated_capture_to_bop_dataset_dry_run",
-            robot_pose_sunrise_reference_frame_path=(
-                STATIC_REFERENCE_PATH if mounting_mode == "static" else None
-            ),
         ),
     )
 
 
 def _write_raw_pose_reference(run_root: Path, reference_path: str) -> None:
+    run_id = load_run_config_for_run_root(run_root)["run_id"]
     atomic_write_json(
         run_root / RAW_ROBOT_EE_POSES,
         {
@@ -258,6 +277,8 @@ def _write_raw_pose_reference(run_root: Path, reference_path: str) -> None:
                 "pose": {"X": 0, "Y": 0, "Z": 0, "A": 0, "B": 0, "C": 0},
                 "source_packet": {
                     "schema_version": "robot_pose.v1",
+                    "packet_kind": "pose",
+                    "run_id": run_id,
                     "from_frame": "robot_flange",
                     "to_frame": "template_base",
                     "sunrise_reference_frame_path": reference_path,
@@ -298,7 +319,7 @@ def _composite_selection_request(
     }
 
 
-def test_library_selection_snapshots_both_files_and_drives_sequence_options(
+def test_library_selection_snapshots_both_files_and_binds_current_run_config(
     tmp_path: Path, monkeypatch
 ) -> None:
     runs = tmp_path / "runs"
@@ -345,10 +366,6 @@ def test_library_selection_snapshots_both_files_and_drives_sequence_options(
         source / INTRINSIC_CALIBRATION_PROFILES
     ).read_bytes()
     assert (destination / CALIBRATION_PROFILE_SELECTION).is_file()
-    assert result["stage_options"]["camera_rectification"] == {
-        "intrinsic_profiles": intrinsic_relative
-    }
-
     original_snapshot = (destination / full_relative).read_bytes()
     atomic_write_json(source / CALIBRATION_PROFILES, {"changed": True})
     assert (destination / full_relative).read_bytes() == original_snapshot
@@ -358,14 +375,14 @@ def test_library_selection_snapshots_both_files_and_drives_sequence_options(
         json={
             "run_root": destination.as_posix(),
             "run_name": "object_run",
+            "intent": "dataset",
+            "annotation_mode": "none",
             "resolution": "720p",
             "fps": 6,
             "velocity_m_s": 0.2,
             "sensors": [_sensor().to_dict()],
             "dataset_mode": "objectless",
             "calibration_profiles": full_relative,
-            "sequence_id": "calibrated_capture_to_bop_dataset_dry_run",
-            "plan_only": True,
         },
     )
     assert saved.status_code == 201, saved.get_json()
@@ -376,14 +393,6 @@ def test_library_selection_snapshots_both_files_and_drives_sequence_options(
     assert config["calibration_profile_selection"]["selection_artifact"] == (
         CALIBRATION_PROFILE_SELECTION
     )
-    steps = {item["id"]: item for item in saved.get_json()["sequence_plan"]["steps"]}
-    assert steps["camera_rectification"]["options"]["intrinsic_profiles"] == (
-        intrinsic_relative
-    )
-    assert steps["bop_export"]["options"]["calibration_profiles"] == full_relative
-    assert steps["bop_export"]["options"]["annotation_source"] == "none"
-    assert "blenderproc_prepare" not in steps
-    assert "blenderproc_render" not in steps
 
 
 def test_composite_selection_combines_static_and_robot_mounted_source_runs(
@@ -448,7 +457,6 @@ def test_composite_selection_combines_static_and_robot_mounted_source_runs(
                     "sensor_keys": [mobile_key],
                 }
             ],
-            "robot_pose_sunrise_reference_frame_path": STATIC_REFERENCE_PATH,
             **intended_setup,
         },
     )
@@ -478,7 +486,6 @@ def test_composite_selection_combines_static_and_robot_mounted_source_runs(
                     "sensor_keys": [static_key],
                 },
             ],
-            "robot_pose_sunrise_reference_frame_path": STATIC_REFERENCE_PATH,
             **intended_setup,
         },
     )
@@ -489,10 +496,6 @@ def test_composite_selection_combines_static_and_robot_mounted_source_runs(
     assert result["schema_version"] == "calibration_profile_selection.v2"
     assert selection["source"]["kind"] == "composite"
     assert selection["source"]["source_count"] == 2
-    assert (
-        selection["intended_setup"]["robot_pose_sunrise_reference_frame_path"]
-        == STATIC_REFERENCE_PATH
-    )
     assert {
         item["run_root"]: item["selected_sensor_keys"] for item in selection["sources"]
     } == {
@@ -519,6 +522,8 @@ def test_composite_selection_combines_static_and_robot_mounted_source_runs(
         json={
             "run_root": destination.as_posix(),
             "run_name": "mixed-camera-object-run",
+            "intent": "dataset",
+            "annotation_mode": "none",
             "resolution": "720p",
             "fps": 6,
             "velocity_m_s": 0.2,
@@ -526,9 +531,6 @@ def test_composite_selection_combines_static_and_robot_mounted_source_runs(
             "dataset_mode": "objectless",
             "calibration_profiles": result["calibration_profiles"],
             "expected_calibration_bundle_sha256": selection["source"]["bundle_sha256"],
-            "robot_pose_sunrise_reference_frame_path": STATIC_REFERENCE_PATH,
-            "sequence_id": "calibrated_capture_to_bop_dataset_dry_run",
-            "plan_only": True,
         },
     )
     assert saved.status_code == 201, saved.get_json()
@@ -576,10 +578,8 @@ def test_composite_selection_combines_static_and_robot_mounted_source_runs(
             "robot_pose_sunrise_reference_frame_path": ("/PoseTestBot/TemplateBase"),
         },
     )
-    assert changed_reference.status_code == 409
-    assert changed_reference.get_json()["issues"][0]["code"] == (
-        "calibration_selection_setup_mismatch"
-    )
+    assert changed_reference.status_code == 400
+    assert "unsupported fields" in changed_reference.get_json()["output"]
     assert (
         load_run_config_for_run_root(destination)["frames"]["robot_pose"][
             "sunrise_reference_frame_path"
@@ -680,6 +680,8 @@ def test_library_selected_status_requires_current_run_config_binding(
         json={
             "run_root": destination.as_posix(),
             "run_name": "object_run",
+            "intent": "dataset",
+            "annotation_mode": "none",
             "resolution": "720p",
             "fps": 6,
             "velocity_m_s": 0.2,
@@ -687,8 +689,6 @@ def test_library_selected_status_requires_current_run_config_binding(
             "dataset_mode": "objectless",
             "calibration_profiles": selected["calibration_profiles"],
             "expected_calibration_bundle_sha256": candidate["bundle_sha256"],
-            "sequence_id": "calibrated_capture_to_bop_dataset_dry_run",
-            "plan_only": True,
         },
     )
     assert saved.status_code == 201, saved.get_json()
@@ -744,14 +744,14 @@ def test_static_selection_rechecks_destination_raw_pose_reference(
     verify_calibration_profile_selection(destination, verify_run_config=False)
 
     _write_raw_pose_reference(destination, "/PoseTestBot/TemplateBase")
-    with pytest.raises(ValueError, match="does not match the selected static"):
+    with pytest.raises(ValueError, match="does not use /PoseTestBot/PoseTemplateBase"):
         verify_calibration_profile_selection(destination, verify_run_config=False)
     listed = client.get(
         "/ui/calibrations", query_string={"run_root": destination}
     ).get_json()
     assert listed["selected"]["valid"] is False
     assert (
-        "raw robot-pose Sunrise reference frame"
+        "does not use /PoseTestBot/PoseTemplateBase"
         in listed["selected"]["issues"][0]["message"]
     )
 
@@ -912,6 +912,8 @@ def test_auto_device_id_does_not_wildcard_match_a_physical_profile(
     write_run_config(
         destination,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
             run_root=destination,
             sensors=(
                 SensorRunConfig(

@@ -102,10 +102,10 @@ def read_camera_matrix(path: Path) -> list[float]:
 
 def read_depth_scale(path: Path) -> float:
     if not path.is_file():
-        return 1.0
+        raise FileNotFoundError(f"Missing depth-scale sidecar: {path}")
     values = path.read_text().split()
     if not values:
-        return 1.0
+        raise ValueError(f"Depth-scale sidecar is empty: {path}")
     return float(values[0])
 
 
@@ -690,25 +690,16 @@ def mask_pixels(path: Path) -> np.ndarray | None:
 
 def resolve_annotation_mode(
     annotation_source: str,
-    annotation_mode: str | None = None,
+    annotation_mode: str,
 ) -> str:
-    """Resolve the explicit GT capability while preserving the legacy CLI.
-
-    Before annotation modes existed, ``annotation_source=blenderproc`` meant
-    that the caller requested the complete pose, mask, and visibility bundle.
-    Retaining that interpretation keeps old saved workflow options compatible.
-    """
+    """Validate one explicit current GT capability and source pair."""
 
     if annotation_source not in ANNOTATION_SOURCES:
         raise ValueError(
             "BOP annotation_source must be one of: "
             + ", ".join(sorted(ANNOTATION_SOURCES))
         )
-    resolved = (
-        ("pose_and_masks" if annotation_source == "blenderproc" else "none")
-        if annotation_mode is None
-        else annotation_mode
-    )
+    resolved = annotation_mode
     if resolved not in ANNOTATION_MODES:
         raise ValueError(
             "BOP annotation_mode must be one of: " + ", ".join(sorted(ANNOTATION_MODES))
@@ -1474,8 +1465,8 @@ def export_sensor_scene_to_bop(
     authoritative_source_sensor_folder: str | None = None,
     input_fingerprint_sha256: str | None = None,
     authoritative_source_fingerprint_sha256: str | None = None,
-    annotation_source: str = "blenderproc",
-    annotation_mode: str | None = None,
+    annotation_source: str = "none",
+    annotation_mode: str,
 ) -> BopSceneExport:
     sensor_folder = Path(sensor_folder)
     output_root = Path(output_root)
@@ -1543,11 +1534,6 @@ def export_sensor_scene_to_bop(
     source_depth_scale = read_depth_scale(source_depth_scale_path)
     depth_scale = depth_scale_from_profile(calibration_profile)
     if calibration_profile is not None:
-        if not source_depth_scale_path.is_file():
-            raise FileNotFoundError(
-                "BOP input depth scale is missing for the selected calibration "
-                f"profile: {source_depth_scale_path}"
-            )
         if not math.isclose(
             float(source_depth_scale),
             float(depth_scale),
@@ -2398,20 +2384,13 @@ def write_bop_export_manifest(
     pose_template_provenance: Mapping[str, object] | None = None,
     instance_map_path: str | Path | None = None,
     pose_template_path: str | Path | None = None,
-    annotation_source: str | None = None,
-    annotation_mode: str | None = None,
+    annotation_source: str,
+    annotation_mode: str,
     annotation_provenance: Mapping[str, object] | None = None,
 ) -> Path:
     output_root = Path(output_root)
     manifest_path = output_root / BOP_EXPORT_MANIFEST
     export_annotation_sources = {export.annotation_source for export in exports}
-    if annotation_source is None:
-        if len(export_annotation_sources) != 1:
-            raise ValueError(
-                "BOP scene exports must use one annotation source before the "
-                "manifest annotation source can be inferred"
-            )
-        annotation_source = next(iter(export_annotation_sources))
     if annotation_source not in ANNOTATION_SOURCES:
         raise ValueError(
             "BOP annotation_source must be one of: "
@@ -2424,13 +2403,6 @@ def write_bop_export_manifest(
             f"{annotation_source!r}"
         )
     export_annotation_modes = {export.annotation_mode for export in exports}
-    if annotation_mode is None:
-        if len(export_annotation_modes) != 1:
-            raise ValueError(
-                "BOP scene exports must use one annotation mode before the "
-                "manifest annotation mode can be inferred"
-            )
-        annotation_mode = next(iter(export_annotation_modes))
     annotation_mode = resolve_annotation_mode(annotation_source, annotation_mode)
     if export_annotation_modes != {annotation_mode}:
         raise ValueError(

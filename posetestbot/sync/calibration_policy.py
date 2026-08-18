@@ -1,6 +1,6 @@
 """Resolve hash-bound synchronization policy from a selected calibration.
 
-The resolver is deliberately separate from the legacy/manual synchronizer.
+The resolver binds current promoted calibration timing to dataset sync.
 When a run config has no explicit ``calibration_profile_selection`` pointer it
 returns ``None`` and does not infer profile use from files that happen to exist.
 When a selection is present, every enabled sensor and every timing field is
@@ -320,10 +320,6 @@ def _profile_timing_policy(
         raise ValueError(
             f"Selected profile {profile.profile_id} must forbid timestamp fallback"
         )
-    if synchronization.get("historical_per_sensor_offsets_allowed") is not False:
-        raise ValueError(
-            f"Selected profile {profile.profile_id} has ambiguous historical timing"
-        )
     required_domain = synchronization.get("required_frame_timestamp_domain")
     if required_domain is not None and (
         not isinstance(required_domain, str) or not required_domain.strip()
@@ -460,8 +456,7 @@ def resolve_calibration_profile_sync_policy(
     """Resolve exact per-sensor synchronization from an explicit selection.
 
     ``None`` means the run config did not request a managed calibration
-    selection; callers must preserve their historical/manual synchronization
-    behavior in that case.  A present pointer is never ignored or downgraded.
+    selection. A present pointer is never ignored or downgraded.
     """
 
     root = Path(run_root).resolve()

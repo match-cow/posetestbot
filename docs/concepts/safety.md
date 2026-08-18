@@ -54,12 +54,12 @@ artifact-integrity validation.
 
 ```bash
 uv run python scripts/robot_status.py --json
+uv run python scripts/sensor_status.py --json
 uv run python scripts/sensor_adapters.py --json
 uv run python scripts/runtime_status.py --json
-uv run python scripts/run_pipeline_sequence.py working_data/test_run \
-  --sequence real_full_capture_validation --plan-only
+uv run python scripts/plan_capture.py working_data/test_run --json
 ```
 
 Sensor discovery may query attached devices but does not start a physical
-capture sequence. Hardware-touching or long-running work submitted through the
+capture. Hardware-touching or long-running work submitted through the
 web console remains visible in **Jobs**.

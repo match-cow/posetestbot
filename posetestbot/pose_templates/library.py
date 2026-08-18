@@ -18,7 +18,6 @@ import numpy as np
 from posetestbot.io.atomic import atomic_write_bytes, atomic_write_json
 from posetestbot.pose_templates.adapter import (
     ADAPTER_VERSION,
-    LEGACY_POSETEMPLATECREATOR_REVISION,
     POSETEMPLATECREATOR_REVISION,
     load_posetemplatecreator_backend,
 )
@@ -61,16 +60,9 @@ THUMBNAIL_MAX_POINTS_PER_CONTOUR = 48
 THUMBNAIL_MAX_JSON_BYTES = 2 * 1024 * 1024
 ARCHIVE_STATE_MAX_JSON_BYTES = 64 * 1024
 CARD_MANIFEST_MAX_JSON_BYTES = 4 * 1024 * 1024
-SUPPORTED_SOURCE_REVISIONS = {
-    LEGACY_POSETEMPLATECREATOR_REVISION,
-    POSETEMPLATECREATOR_REVISION,
-}
+SUPPORTED_SOURCE_REVISIONS = {POSETEMPLATECREATOR_REVISION}
 _LOCK = threading.RLock()
 _LIBRARY_LOCK_STATE = threading.local()
-
-
-class BundleCardMetadataTooLarge(ValueError):
-    """A legacy manifest is too large for a synchronous card-metadata read."""
 
 
 @contextmanager
@@ -202,9 +194,7 @@ def _assert_template_uuid_not_retired(library: Path, template_uuid: str) -> None
 
 
 def _load_archive_state_lightweight(bundle_dir: Path) -> dict[str, Any]:
-    archive_path = _bundle_file(
-        bundle_dir, ARCHIVE_STATE, label="Bundle archive state"
-    )
+    archive_path = _bundle_file(bundle_dir, ARCHIVE_STATE, label="Bundle archive state")
     archive = _read_bounded_json(
         archive_path,
         maximum_bytes=ARCHIVE_STATE_MAX_JSON_BYTES,
@@ -296,11 +286,13 @@ def _finite_pose(
 
 
 def _points(contours: list[Any]) -> list[list[dict[str, float]]]:
-    """Normalize either upstream ContourV2 values or legacy point arrays."""
+    """Normalize current upstream ContourV2 values."""
 
     result: list[list[dict[str, float]]] = []
     for contour in contours:
-        raw_points = contour.get("points") if isinstance(contour, Mapping) else contour
+        if not isinstance(contour, Mapping):
+            raise ValueError("Stable orientation contour must be a ContourV2 object")
+        raw_points = contour.get("points")
         if not isinstance(raw_points, list) or len(raw_points) < 3:
             raise ValueError("Stable orientation contains an invalid closed contour")
         points = [
@@ -314,6 +306,37 @@ def _points(contours: list[Any]) -> list[list[dict[str, float]]]:
         result.append(points)
     if not result:
         raise ValueError("Stable orientation does not contain a closed contour")
+    return result
+
+
+def _preview_points(contours: Any) -> list[list[dict[str, float]]]:
+    """Validate the exact point-list contour shape stored in current previews."""
+
+    if not isinstance(contours, list):
+        raise ValueError("Template preview contours must be a list")
+    result: list[list[dict[str, float]]] = []
+    for contour in contours:
+        if not isinstance(contour, list) or len(contour) < 3:
+            raise ValueError("Template preview contains an invalid closed contour")
+        points: list[dict[str, float]] = []
+        for point in contour:
+            if not isinstance(point, Mapping):
+                raise ValueError("Template preview contour point must be an object")
+            try:
+                normalized = {
+                    "x_mm": float(point["x_mm"]),
+                    "y_mm": float(point["y_mm"]),
+                }
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Template preview contour point must contain numeric x_mm/y_mm"
+                ) from exc
+            if not np.isfinite(list(normalized.values())).all():
+                raise ValueError("Template preview contour must be finite")
+            points.append(normalized)
+        result.append(points)
+    if not result:
+        raise ValueError("Template preview does not contain a closed contour")
     return result
 
 
@@ -422,7 +445,9 @@ def build_template_thumbnail(
     if not isinstance(source_instances, list) or not source_instances:
         raise ValueError("Template preview must contain at least one instance")
     if len(source_instances) > MAX_INSTANCES:
-        raise ValueError(f"Template thumbnail supports at most {MAX_INSTANCES} instances")
+        raise ValueError(
+            f"Template thumbnail supports at most {MAX_INSTANCES} instances"
+        )
 
     prepared: list[tuple[Mapping[str, Any], list[list[dict[str, float]]], int]] = []
     source_contour_count = 0
@@ -430,9 +455,10 @@ def build_template_thumbnail(
     for item in source_instances:
         if not isinstance(item, Mapping):
             raise ValueError("Template preview instance must be an object")
-        contours = _points(item.get("compensated_contours", []))
+        contours = _preview_points(item.get("compensated_contours"))
         primary_index = max(
-            range(len(contours)), key=lambda index: (_contour_area(contours[index]), -index)
+            range(len(contours)),
+            key=lambda index: (_contour_area(contours[index]), -index),
         )
         prepared.append((item, contours, primary_index))
         source_contour_count += len(contours)
@@ -474,7 +500,9 @@ def build_template_thumbnail(
         [index for index in range(len(contours)) if index != primary_index]
         for _, contours, primary_index in prepared
     ]
-    maximum_secondary_depth = max((len(value) for value in secondary_indices), default=0)
+    maximum_secondary_depth = max(
+        (len(value) for value in secondary_indices), default=0
+    )
     for depth in range(maximum_secondary_depth):
         for instance_index, (_, contours, _) in enumerate(prepared):
             if (
@@ -591,7 +619,9 @@ def _validate_template_thumbnail_content(
         not isinstance(value, Mapping)
         or value.get("schema_version") != THUMBNAIL_SCHEMA_VERSION
     ):
-        raise ValueError(f"Template thumbnail schema must be {THUMBNAIL_SCHEMA_VERSION}")
+        raise ValueError(
+            f"Template thumbnail schema must be {THUMBNAIL_SCHEMA_VERSION}"
+        )
     if template_uuid and value.get("template_uuid") != _uuid(
         template_uuid, label="template_uuid"
     ):
@@ -628,10 +658,13 @@ def _validate_template_thumbnail_content(
                 raise ValueError(
                     "Template thumbnail contour must contain numeric points"
                 ) from exc
-            if len(coordinates) != len(contour) * 2 or not np.isfinite(
-                coordinates
-            ).all():
-                raise ValueError("Template thumbnail contour must contain finite points")
+            if (
+                len(coordinates) != len(contour) * 2
+                or not np.isfinite(coordinates).all()
+            ):
+                raise ValueError(
+                    "Template thumbnail contour must contain finite points"
+                )
             point_count += len(contour)
     if contour_count > THUMBNAIL_MAX_CONTOURS:
         raise ValueError("Template thumbnail exceeds its contour limit")
@@ -657,9 +690,7 @@ def _validate_template_thumbnail_content(
     page = value.get("page", {})
     configuration = value.get("configuration", {})
     page_configuration = (
-        configuration.get("page", {})
-        if isinstance(configuration, Mapping)
-        else {}
+        configuration.get("page", {}) if isinstance(configuration, Mapping) else {}
     )
     compensation = (
         configuration.get("print_compensation", {})
@@ -681,7 +712,9 @@ def _validate_template_thumbnail_content(
     if len(origin) != 2 or len(numeric) != 6 or not np.isfinite(numeric).all():
         raise ValueError("Template thumbnail page metadata must be finite")
     if numeric[0] <= 0 or numeric[1] <= 0 or numeric[2] <= 0 or numeric[3] <= 0:
-        raise ValueError("Template thumbnail page dimensions and scales must be positive")
+        raise ValueError(
+            "Template thumbnail page dimensions and scales must be positive"
+        )
     return dict(value)
 
 
@@ -733,43 +766,28 @@ def _normalize_configuration(value: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("Template instance UUIDs must be unique")
         seen.add(instance_uuid)
         catalog_uuid = _uuid(item.get("catalog_uuid"), label="catalog_uuid")
-        pose = item.get("pose", item.get("planar_pose", {}))
+        pose = item.get("pose")
         if not isinstance(pose, Mapping):
             raise ValueError(f"Template instance {index} pose must be an object")
         orientation_id = str(item.get("orientation_id", "")).strip()
-        if orientation_id:
-            if len(orientation_id) > 128:
-                raise ValueError(
-                    f"Template instance {index} orientation_id is too long"
-                )
-            pose_value = _finite_pose(
-                pose,
-                ("x_mm", "y_mm", "rotation_deg"),
-                label=f"Template instance {index} planar pose",
+        if not orientation_id or len(orientation_id) > 128:
+            raise ValueError(
+                f"Template instance {index} requires a current orientation_id"
             )
-            normalized.append(
-                {
-                    "instance_uuid": instance_uuid,
-                    "catalog_uuid": catalog_uuid,
-                    "orientation_id": orientation_id,
-                    "placement_mode": "stable_orientation",
-                    "pose": pose_value,
-                }
-            )
-        else:
-            pose_value = _finite_pose(
-                pose,
-                ("x_mm", "y_mm", "z_mm", "roll_deg", "pitch_deg", "yaw_deg"),
-                label=f"Template instance {index} pose",
-            )
-            normalized.append(
-                {
-                    "instance_uuid": instance_uuid,
-                    "catalog_uuid": catalog_uuid,
-                    "placement_mode": "legacy_arbitrary_pose",
-                    "pose": pose_value,
-                }
-            )
+        pose_value = _finite_pose(
+            pose,
+            ("x_mm", "y_mm", "rotation_deg"),
+            label=f"Template instance {index} planar pose",
+        )
+        normalized.append(
+            {
+                "instance_uuid": instance_uuid,
+                "catalog_uuid": catalog_uuid,
+                "orientation_id": orientation_id,
+                "placement_mode": "stable_orientation",
+                "pose": pose_value,
+            }
+        )
     normalized.sort(key=lambda item: item["instance_uuid"])
     return {
         "display_name": name,
@@ -814,62 +832,47 @@ def build_template_preview(
             raise ValueError(f"Unknown catalog object: {item['catalog_uuid']}")
         if record["state"] != "active":
             raise ValueError(f"Archived object cannot be added: {record['name']}")
-        canonical_path = root / record["assets"]["canonical_ply"]["path"]
         pose = item["pose"]
         try:
-            if item["placement_mode"] == "stable_orientation":
-                analysis = analyses.get(item["catalog_uuid"])
-                if analysis is None:
-                    analysis = ensure_catalog_orientation_analysis(
-                        item["catalog_uuid"], catalog_root=root
-                    )
-                    analyses[item["catalog_uuid"]] = analysis
-                orientation = select_orientation(analysis, item["orientation_id"])
-                planar = matrix_from_xyz_rpy(
-                    x_mm=pose["x_mm"],
-                    y_mm=pose["y_mm"],
-                    z_mm=0.0,
-                    roll_deg=0.0,
-                    pitch_deg=0.0,
-                    yaw_deg=pose["rotation_deg"],
+            analysis = analyses.get(item["catalog_uuid"])
+            if analysis is None:
+                analysis = ensure_catalog_orientation_analysis(
+                    item["catalog_uuid"], catalog_root=root
                 )
-                source_to_placed = validate_rigid_matrix(
-                    orientation["source_to_placed"], label="source_to_placed"
-                )
-                matrix = planar @ source_to_placed
-                nominal = _transform_planar_contours(
-                    orientation["contours"], planar
-                )
-                layout_contours = _points(orientation["contours"])
-                layout_pose = pose
-                orientation_snapshot: dict[str, Any] | None = {
-                    "orientation_id": orientation["orientation_id"],
-                    "label": orientation["label"],
-                    "rank": orientation["rank"],
-                    "probability": orientation["probability"],
-                    "slice_z_mm": orientation["slice_z_mm"],
-                    "source_to_placed": orientation["source_to_placed"],
-                    "analysis_schema_version": analysis["schema_version"],
-                    "analysis_generated_at": analysis["generated_at"],
-                    "analysis_provenance": analysis["provenance"],
-                }
-                preview_meshes.setdefault(
-                    record["canonical_ply_sha256"], analysis["preview_mesh"]
-                )
-                layout_label = str(orientation["label"])
-                layout_slice_z = float(orientation["slice_z_mm"])
-                layout_source_to_placed = orientation["source_to_placed"]
-            else:
-                matrix = matrix_from_xyz_rpy(**pose)
-                nominal = backend.posed_contours(
-                    "canonical.ply", canonical_path.read_bytes(), matrix
-                )
-                layout_contours = nominal
-                layout_pose = {"x_mm": 0.0, "y_mm": 0.0, "rotation_deg": 0.0}
-                orientation_snapshot = None
-                layout_label = "Legacy arbitrary 6-DoF placement"
-                layout_slice_z = 0.0
-                layout_source_to_placed = matrix.tolist()
+                analyses[item["catalog_uuid"]] = analysis
+            orientation = select_orientation(analysis, item["orientation_id"])
+            planar = matrix_from_xyz_rpy(
+                x_mm=pose["x_mm"],
+                y_mm=pose["y_mm"],
+                z_mm=0.0,
+                roll_deg=0.0,
+                pitch_deg=0.0,
+                yaw_deg=pose["rotation_deg"],
+            )
+            source_to_placed = validate_rigid_matrix(
+                orientation["source_to_placed"], label="source_to_placed"
+            )
+            matrix = planar @ source_to_placed
+            nominal = _transform_planar_contours(orientation["contours"], planar)
+            layout_contours = _points(orientation["contours"])
+            layout_pose = pose
+            orientation_snapshot: dict[str, Any] | None = {
+                "orientation_id": orientation["orientation_id"],
+                "label": orientation["label"],
+                "rank": orientation["rank"],
+                "probability": orientation["probability"],
+                "slice_z_mm": orientation["slice_z_mm"],
+                "source_to_placed": orientation["source_to_placed"],
+                "analysis_schema_version": analysis["schema_version"],
+                "analysis_generated_at": analysis["generated_at"],
+                "analysis_provenance": analysis["provenance"],
+            }
+            preview_meshes.setdefault(
+                record["canonical_ply_sha256"], analysis["preview_mesh"]
+            )
+            layout_label = str(orientation["label"])
+            layout_slice_z = float(orientation["slice_z_mm"])
+            layout_source_to_placed = orientation["source_to_placed"]
         except Exception as exc:
             detail = getattr(exc, "message", str(exc))
             code = getattr(exc, "code", "invalid_intersection")
@@ -936,8 +939,8 @@ def build_template_preview(
                 "name": record["name"],
                 "canonical_ply_sha256": record["canonical_ply_sha256"],
                 "texture_sha256": record.get("texture_sha256"),
-                "geometry_revision": record.get("geometry_revision", 1),
-                "source_to_mm_scale": record.get("source_to_mm_scale", 1.0),
+                "geometry_revision": record["geometry_revision"],
+                "source_to_mm_scale": record["source_to_mm_scale"],
                 "geometry_revision_created_at": (
                     selected_revision.get("created_at")
                     if isinstance(selected_revision, Mapping)
@@ -946,7 +949,7 @@ def build_template_preview(
                 "geometry_revision_operation": (
                     selected_revision.get("operation")
                     if isinstance(selected_revision, Mapping)
-                    else {"kind": "legacy_import", "factor": 1.0}
+                    else None
                 ),
             },
             "pose_template_from_object": transform_record(
@@ -975,8 +978,6 @@ def build_template_preview(
                 "slice_z_mm": layout_slice_z,
                 "source_to_placed": layout_source_to_placed,
                 "contours": [{"points": contour} for contour in layout_contours],
-                # Stable mode uses the upstream contract directly. Legacy mode
-                # keeps its already-sliced arbitrary 6-DoF contour at pose zero.
                 "pose": layout_pose,
             }
         )
@@ -1270,13 +1271,9 @@ def _load_template_bundle_metadata_unlocked(
     library = Path(library_root or default_template_library_root())
     opaque_id = _uuid(template_uuid, label="template_uuid")
     bundle_dir = _bundle_directory(library, opaque_id)
-    manifest_path = _bundle_file(
-        bundle_dir, BUNDLE_MANIFEST, label="Bundle manifest"
-    )
+    manifest_path = _bundle_file(bundle_dir, BUNDLE_MANIFEST, label="Bundle manifest")
     if manifest_path.stat().st_size > CARD_MANIFEST_MAX_JSON_BYTES:
-        raise BundleCardMetadataTooLarge(
-            "Legacy pose-template manifest is too large for a card read"
-        )
+        raise ValueError("Pose-template manifest exceeds the current size limit")
     manifest = _read_bounded_json(
         manifest_path,
         maximum_bytes=CARD_MANIFEST_MAX_JSON_BYTES,
@@ -1308,9 +1305,9 @@ def _load_template_bundle_metadata_unlocked(
         raise ValueError("Pose-template bundle file metadata is invalid")
     thumbnail_file = files.get("thumbnail")
     thumbnail_hash = hashes.get("thumbnail")
-    if bool(thumbnail_file) != bool(thumbnail_hash):
-        raise ValueError("Bundle thumbnail file and hash must be declared together")
-    if thumbnail_hash is not None and (
+    if thumbnail_file != THUMBNAIL_JSON or not isinstance(thumbnail_hash, str):
+        raise ValueError("Current bundle must declare its bounded thumbnail")
+    if (
         not isinstance(thumbnail_hash, str)
         or len(thumbnail_hash) != 64
         or any(character not in "0123456789abcdef" for character in thumbnail_hash)
@@ -1346,9 +1343,7 @@ def _validate_template_bundle_unlocked(
         raise ValueError("Pose-template bundle escapes library") from exc
     if bundle_dir.is_symlink() or not bundle_dir.is_dir():
         raise FileNotFoundError(f"Pose-template bundle does not exist: {bundle_dir}")
-    manifest_path = _bundle_file(
-        bundle_dir, BUNDLE_MANIFEST, label="Bundle manifest"
-    )
+    manifest_path = _bundle_file(bundle_dir, BUNDLE_MANIFEST, label="Bundle manifest")
     with open(manifest_path, "r", encoding="utf-8") as handle:
         manifest = json.load(handle)
     if (
@@ -1380,22 +1375,19 @@ def _validate_template_bundle_unlocked(
             raise ValueError(f"Bundle {name} is missing or was modified")
     thumbnail_file = files.get("thumbnail")
     thumbnail_hash = manifest.get("hashes", {}).get("thumbnail")
-    if bool(thumbnail_file) != bool(thumbnail_hash):
-        raise ValueError("Bundle thumbnail file and hash must be declared together")
-    if thumbnail_file:
-        thumbnail_path = _bundle_file(
-            bundle_dir, thumbnail_file, label="Bundle thumbnail"
-        )
-        if _sha256(thumbnail_path) != thumbnail_hash:
-            raise ValueError("Bundle thumbnail is missing or was modified")
-        _validate_template_thumbnail_content(
-            _read_bounded_json(
-                thumbnail_path,
-                maximum_bytes=THUMBNAIL_MAX_JSON_BYTES,
-                label="Bundle thumbnail",
-            ),
-            template_uuid=template_uuid,
-        )
+    if thumbnail_file != THUMBNAIL_JSON or not isinstance(thumbnail_hash, str):
+        raise ValueError("Current bundle must declare its bounded thumbnail")
+    thumbnail_path = _bundle_file(bundle_dir, thumbnail_file, label="Bundle thumbnail")
+    if _sha256(thumbnail_path) != thumbnail_hash:
+        raise ValueError("Bundle thumbnail is missing or was modified")
+    _validate_template_thumbnail_content(
+        _read_bounded_json(
+            thumbnail_path,
+            maximum_bytes=THUMBNAIL_MAX_JSON_BYTES,
+            label="Bundle thumbnail",
+        ),
+        template_uuid=template_uuid,
+    )
     for instance_files in files.get("assets", {}).values():
         for record in instance_files.values():
             path = _bundle_file(bundle_dir, record["path"], label="Bundle asset")
@@ -1403,9 +1395,7 @@ def _validate_template_bundle_unlocked(
                 raise ValueError("Bundle asset is missing or has the wrong size")
             if _sha256(path) != record["sha256"]:
                 raise ValueError("Bundle asset hash mismatch")
-    archive_path = _bundle_file(
-        bundle_dir, ARCHIVE_STATE, label="Bundle archive state"
-    )
+    archive_path = _bundle_file(bundle_dir, ARCHIVE_STATE, label="Bundle archive state")
     with open(archive_path, "r", encoding="utf-8") as handle:
         archive = json.load(handle)
     if archive.get("state") not in {"active", "archived"}:
@@ -1431,30 +1421,11 @@ def validate_template_bundle(
 
 def _load_template_bundle_detail_unlocked(
     template_uuid: str, *, library_root: Path
-) -> tuple[dict[str, Any], bool]:
-    """Load self-authenticating metadata, with one strict legacy fallback.
-
-    Current manifests are deliberately bounded and self-hashed. Older bundles
-    can contain exact contours in a manifest larger than the card-read limit;
-    those require the historical full validator to remain readable.
-    """
+) -> dict[str, Any]:
+    """Load bounded, self-authenticating current bundle metadata."""
 
     opaque_id = _uuid(template_uuid, label="template_uuid")
-    try:
-        return (
-            _load_template_bundle_metadata_unlocked(
-                opaque_id, library_root=library_root
-            ),
-            False,
-        )
-    except BundleCardMetadataTooLarge:
-        bundle_dir = _bundle_directory(library_root, opaque_id)
-        return (
-            _validate_template_bundle_unlocked(
-                bundle_dir, library_root=library_root
-            ),
-            True,
-        )
+    return _load_template_bundle_metadata_unlocked(opaque_id, library_root=library_root)
 
 
 def load_template_bundle_detail(
@@ -1464,7 +1435,7 @@ def load_template_bundle_detail(
 
     library = Path(library_root or default_template_library_root())
     with template_library_lock(library):
-        bundle, _strict_legacy_fallback = _load_template_bundle_detail_unlocked(
+        bundle = _load_template_bundle_detail_unlocked(
             template_uuid, library_root=library
         )
         return bundle
@@ -1509,25 +1480,19 @@ def load_template_bundle_preview(
 
     library = Path(library_root or default_template_library_root())
     with template_library_lock(library):
-        bundle, strict_legacy_fallback = _load_template_bundle_detail_unlocked(
+        bundle = _load_template_bundle_detail_unlocked(
             template_uuid, library_root=library
         )
         files = bundle.get("files")
         hashes = bundle.get("hashes")
         if not isinstance(files, Mapping) or not isinstance(hashes, Mapping):
             raise ValueError("Pose-template bundle file metadata is invalid")
-        preview_path = _bundle_file(
-            Path(bundle["bundle_path"]),
+        preview_path = _verify_declared_bundle_file(
+            bundle,
             files.get("preview", ""),
+            hashes.get("preview"),
             label="Bundle preview",
         )
-        if not strict_legacy_fallback:
-            preview_path = _verify_declared_bundle_file(
-                bundle,
-                files.get("preview", ""),
-                hashes.get("preview"),
-                label="Bundle preview",
-            )
         with open(preview_path, "r", encoding="utf-8") as handle:
             return json.load(handle)
 
@@ -1543,24 +1508,19 @@ def resolve_template_bundle_asset(
 
     library = Path(library_root or default_template_library_root())
     with template_library_lock(library):
-        bundle, strict_legacy_fallback = _load_template_bundle_detail_unlocked(
+        bundle = _load_template_bundle_detail_unlocked(
             template_uuid, library_root=library
         )
         files = bundle.get("files")
         assets = files.get("assets") if isinstance(files, Mapping) else None
-        instance_files = assets.get(instance_uuid) if isinstance(assets, Mapping) else None
+        instance_files = (
+            assets.get(instance_uuid) if isinstance(assets, Mapping) else None
+        )
         if not isinstance(instance_files, Mapping) or kind not in instance_files:
             raise KeyError("Unknown template instance asset")
         record = instance_files[kind]
         if not isinstance(record, Mapping):
             raise ValueError("Pose-template asset record is invalid")
-        path = _bundle_file(
-            Path(bundle["bundle_path"]),
-            record.get("path", ""),
-            label="Bundle asset",
-        )
-        if strict_legacy_fallback:
-            return path
         return _verify_declared_bundle_file(
             bundle,
             record.get("path", ""),
@@ -1582,23 +1542,16 @@ def resolve_template_bundle_download(
         raise KeyError("Unknown template download")
     library = Path(library_root or default_template_library_root())
     with template_library_lock(library):
-        bundle, strict_legacy_fallback = _load_template_bundle_detail_unlocked(
+        bundle = _load_template_bundle_detail_unlocked(
             template_uuid, library_root=library
         )
         bundle_dir = Path(bundle["bundle_path"])
         if kind == "manifest":
-            return _bundle_file(
-                bundle_dir, BUNDLE_MANIFEST, label="Bundle manifest"
-            )
+            return _bundle_file(bundle_dir, BUNDLE_MANIFEST, label="Bundle manifest")
         files = bundle.get("files")
         hashes = bundle.get("hashes")
         if not isinstance(files, Mapping) or not isinstance(hashes, Mapping):
             raise ValueError("Pose-template bundle file metadata is invalid")
-        path = _bundle_file(
-            bundle_dir, files.get("pdf", ""), label="Bundle pdf"
-        )
-        if strict_legacy_fallback:
-            return path
         return _verify_declared_bundle_file(
             bundle,
             files.get("pdf", ""),
@@ -1610,45 +1563,24 @@ def resolve_template_bundle_download(
 def load_template_thumbnail(
     template_uuid: str, *, library_root: str | Path | None = None
 ) -> dict[str, Any]:
-    """Load a bounded stored thumbnail or derive an old bundle's fallback.
-
-    Pre-thumbnail bundles remain immutable: their verified full preview is read
-    and bounded in memory, and no file or manifest is added to the bundle.
-    New card reads validate only the bounded thumbnail structure. Selection,
-    catalogue deletion, and explicit whole-bundle audits retain full hashing;
-    synchronous downloads verify only the immutable artifact being served.
-    """
+    """Load the hash-verified bounded thumbnail from a current bundle."""
 
     library = Path(library_root or default_template_library_root())
     opaque_id = _uuid(template_uuid, label="template_uuid")
     bundle_dir = _bundle_directory(library, opaque_id)
-    try:
-        metadata = load_template_bundle_metadata(opaque_id, library_root=library)
-    except BundleCardMetadataTooLarge:
-        metadata = validate_template_bundle(bundle_dir, library_root=library)
+    metadata = load_template_bundle_metadata(opaque_id, library_root=library)
     thumbnail_name = metadata.get("files", {}).get("thumbnail")
-    if thumbnail_name:
-        thumbnail_path = _bundle_file(
-            bundle_dir, thumbnail_name, label="Bundle thumbnail"
-        )
-        if _sha256(thumbnail_path) != metadata["hashes"]["thumbnail"]:
-            raise ValueError("Bundle thumbnail is missing or was modified")
-        thumbnail = _read_bounded_json(
-            thumbnail_path,
-            maximum_bytes=THUMBNAIL_MAX_JSON_BYTES,
-            label="Bundle thumbnail",
-        )
-        return _validate_template_thumbnail_content(
-            thumbnail, template_uuid=opaque_id
-        )
-
-    bundle = validate_template_bundle(bundle_dir, library_root=library)
-    preview_path = _bundle_file(
-        bundle_dir, bundle["files"]["preview"], label="Bundle preview"
+    if thumbnail_name != THUMBNAIL_JSON:
+        raise ValueError("Current bundle does not declare its bounded thumbnail")
+    thumbnail_path = _bundle_file(bundle_dir, thumbnail_name, label="Bundle thumbnail")
+    if _sha256(thumbnail_path) != metadata["hashes"]["thumbnail"]:
+        raise ValueError("Bundle thumbnail is missing or was modified")
+    thumbnail = _read_bounded_json(
+        thumbnail_path,
+        maximum_bytes=THUMBNAIL_MAX_JSON_BYTES,
+        label="Bundle thumbnail",
     )
-    with open(preview_path, "r", encoding="utf-8") as handle:
-        preview = json.load(handle)
-    return build_template_thumbnail(preview, template_uuid=bundle["template_uuid"])
+    return _validate_template_thumbnail_content(thumbnail, template_uuid=opaque_id)
 
 
 def list_template_bundles(
@@ -1721,12 +1653,7 @@ def template_bundle_summary(bundle: Mapping[str, Any]) -> dict[str, Any]:
 def list_template_bundle_summaries(
     library_root: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-    """List card metadata without hashing immutable PDFs, previews, or meshes.
-
-    Bundles created before bounded thumbnails remain readable through the strict
-    legacy fallback. New bundles take only bounded JSON reads on this request
-    path; full integrity validation remains mandatory for authoritative uses.
-    """
+    """List current bounded card metadata without hashing unrelated assets."""
 
     library = Path(library_root or default_template_library_root())
     if not library.is_dir() or library.is_symlink():
@@ -1737,12 +1664,7 @@ def list_template_bundle_summaries(
             continue
         try:
             opaque_id = _uuid(child.name, label="template_uuid")
-            try:
-                bundle = load_template_bundle_metadata(
-                    opaque_id, library_root=library
-                )
-            except BundleCardMetadataTooLarge:
-                bundle = validate_template_bundle(child, library_root=library)
+            bundle = load_template_bundle_metadata(opaque_id, library_root=library)
             summaries.append(template_bundle_summary(bundle))
         except (OSError, ValueError):
             continue
@@ -1756,7 +1678,7 @@ def set_template_archive_state(
         raise ValueError("Template state must be active or archived")
     library = Path(library_root or default_template_library_root())
     with template_library_lock(library):
-        bundle, _strict_legacy_fallback = _load_template_bundle_detail_unlocked(
+        bundle = _load_template_bundle_detail_unlocked(
             template_uuid, library_root=library
         )
         archive = {
@@ -1809,9 +1731,7 @@ def _template_deletion_result(
         **tombstone,
         "schema_version": "pose_template_library_delete.v1",
         "status": (
-            "deleted"
-            if cleanup["status"] == "complete"
-            else "deleted_cleanup_pending"
+            "deleted" if cleanup["status"] == "complete" else "deleted_cleanup_pending"
         ),
         "already_deleted": already_deleted,
     }
@@ -1854,10 +1774,8 @@ def delete_template_bundle(
                 raise ValueError(
                     "Pose-template deletion has both live and pending asset trees"
                 )
-            bundle, _strict_legacy_fallback = (
-                _load_template_bundle_detail_unlocked(
-                    opaque_id, library_root=library
-                )
+            bundle = _load_template_bundle_detail_unlocked(
+                opaque_id, library_root=library
             )
             if tombstone_path.exists():
                 tombstone = _load_template_deletion_tombstone(
@@ -1903,9 +1821,7 @@ def delete_template_bundle(
 
         cleanup = dict(tombstone["asset_cleanup"])
         if not cleanup_assets or cleanup["status"] == "complete":
-            return _template_deletion_result(
-                tombstone, already_deleted=already_deleted
-            )
+            return _template_deletion_result(tombstone, already_deleted=already_deleted)
         cleanup.update(last_attempt_at=utc_now_iso(), last_error=None)
         tombstone["asset_cleanup"] = cleanup
         atomic_write_json(tombstone_path, tombstone)
@@ -1935,9 +1851,7 @@ def delete_template_bundle(
                 cleanup.update(status="pending", last_error=cleanup_error)
             tombstone["asset_cleanup"] = cleanup
             atomic_write_json(tombstone_path, tombstone)
-        return _template_deletion_result(
-            tombstone, already_deleted=already_deleted
-        )
+        return _template_deletion_result(tombstone, already_deleted=already_deleted)
 
 
 def record_template_cleanup_submission_failure(
@@ -2013,7 +1927,10 @@ def clone_template_configuration(
         instance_uuid = item.get("instance_uuid")
         current = current_by_uuid.get(catalog_uuid)
         snapshot = snapshot_by_instance.get(instance_uuid)
-        if not isinstance(snapshot, Mapping) or snapshot.get("catalog_uuid") != catalog_uuid:
+        if (
+            not isinstance(snapshot, Mapping)
+            or snapshot.get("catalog_uuid") != catalog_uuid
+        ):
             raise ValueError("Pose-template configuration snapshot is invalid")
         snapshot_catalog = snapshot.get("catalog", {}) if snapshot else {}
         if current is None:
@@ -2026,9 +1943,8 @@ def clone_template_configuration(
                 "Cannot clone this template while workpiece "
                 f"{current.get('name', catalog_uuid)!r} is archived"
             )
-        if (
-            snapshot_catalog.get("canonical_ply_sha256")
-            != current.get("canonical_ply_sha256")
+        if snapshot_catalog.get("canonical_ply_sha256") != current.get(
+            "canonical_ply_sha256"
         ):
             raise ValueError(
                 "Cannot clone this template because workpiece "

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from posetestbot.io.artifacts import (
     CAPTURE_PLAN,
     CAPTURE_PLAN_PREFLIGHT_REPORT,
@@ -76,10 +78,12 @@ def test_capture_plan_preflight_reports_ok_for_mocked_connected_sensors(
 ) -> None:
     run_root = tmp_path / "run"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
         sensors=(
-            sensor_config_from_token("realsense:123:static:Cell RealSense"),
-            sensor_config_from_token("oak:auto:static:Cell OAK-D Pro"),
+            sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),
+            sensor_config_from_token("oak_d_pro:auto:static:Cell OAK-D Pro"),
         ),
     )
     write_run_config(run_root, config)
@@ -109,10 +113,12 @@ def test_capture_plan_preflight_includes_sensor_diagnostics_on_failures(
 ) -> None:
     run_root = tmp_path / "run-diagnostics"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
         sensors=(
-            sensor_config_from_token("realsense:123:static:Cell RealSense"),
-            sensor_config_from_token("zed:auto:static:Cell ZED 2i"),
+            sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),
+            sensor_config_from_token("zed_2i:auto:static:Cell ZED 2i"),
         ),
     )
     write_run_config(run_root, config)
@@ -182,8 +188,10 @@ def test_capture_plan_preflight_blocks_realsense_usb2_fallback(
 ) -> None:
     run_root = tmp_path / "run-realsense-usb2"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
     )
     write_run_config(run_root, config)
     write_capture_plan_with_manifest(run_root, config.to_dict())
@@ -255,8 +263,10 @@ def test_capture_plan_preflight_errors_for_real_robot_without_override(
 ) -> None:
     run_root = tmp_path / "run"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
     )
     write_run_config(run_root, config)
 
@@ -277,8 +287,10 @@ def test_capture_plan_preflight_reports_unsupported_resolution_without_throwing(
 ) -> None:
     run_root = tmp_path / "run-bad-resolution"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
         resolution="360p",
     )
     write_run_config(run_root, config)
@@ -304,8 +316,10 @@ def test_capture_plan_preflight_blocks_nonempty_sensor_folder(
 ) -> None:
     run_root = tmp_path / "run-existing-folder"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
     )
     write_run_config(run_root, config)
     sensor_folder = run_root / "realsense_123"
@@ -329,8 +343,10 @@ def test_capture_plan_preflight_blocks_even_empty_sensor_folder(
 ) -> None:
     run_root = tmp_path / "run-existing-empty-folder"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
     )
     write_run_config(run_root, config)
     (run_root / "realsense_123").mkdir()
@@ -353,7 +369,9 @@ def test_capture_plan_preflight_blocks_existing_raw_robot_pose_artifact(
     tmp_path: Path,
 ) -> None:
     run_root = tmp_path / "run-existing-poses"
-    config = create_run_config(run_root=run_root)
+    config = create_run_config(
+        capture_intent="dataset", bop_annotation_mode="none", run_root=run_root
+    )
     write_run_config(run_root, config)
     (run_root / "raw_robot_ee_poses.json").write_text("{}\n")
 
@@ -373,32 +391,25 @@ def test_capture_plan_preflight_errors_for_duplicate_output_folder(
     tmp_path: Path,
 ) -> None:
     run_root = tmp_path / "run-duplicate-folder"
-    config = create_run_config(
-        run_root=run_root,
-        sensors=(
-            sensor_config_from_token("zed:auto:static:Cell ZED 2i A"),
-            sensor_config_from_token("zed:auto:static:Cell ZED 2i B"),
-        ),
-    )
-    write_run_config(run_root, config)
-
-    report = build_capture_plan_preflight(
-        run_root,
-        include_sensor_status=False,
-        write_plan_if_missing=False,
-    )
-
-    assert report["overall_status"] == "error"
-    checks = {check["name"]: check for check in report["checks"]}
-    assert checks["sensor_output_folder_duplicate:zed_2i_auto"]["status"] == "error"
-    assert checks["capture_plan_build"]["status"] == "error"
+    with pytest.raises(ValueError, match="repeat identity"):
+        create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
+            run_root=run_root,
+            sensors=(
+                sensor_config_from_token("zed_2i:auto:static:Cell ZED 2i A"),
+                sensor_config_from_token("zed_2i:auto:static:Cell ZED 2i B"),
+            ),
+        )
 
 
 def test_capture_plan_preflight_writes_report_and_manifest(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
     )
     write_run_config(run_root, config)
 
@@ -431,8 +442,10 @@ def test_capture_plan_preflight_accepts_persisted_plan_build_options(
 ) -> None:
     run_root = tmp_path / "run-with-plan-options"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
     )
     write_run_config(run_root, config)
     write_capture_plan_with_manifest(

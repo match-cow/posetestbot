@@ -137,7 +137,8 @@ def test_network_and_interrupt_failures_are_observable() -> None:
     assert "recordSendFailure(" in pose_stream_java
     assert "All end-marker transmissions failed" in pose_stream_java
     assert "Thread.currentThread().interrupt()" in combined
-    assert 'DEFAULT_RECEIVER_IP = "172.31.1.169"' in java
+    assert 'throw new IllegalArgumentException("receiver_ip is required")' in java
+    assert "DEFAULT_RECEIVER_IP" not in java
 
 
 def test_full_capture_document_explains_frame_and_static_profile_boundary() -> None:

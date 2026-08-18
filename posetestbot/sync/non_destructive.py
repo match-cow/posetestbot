@@ -1,8 +1,7 @@
 """Non-destructive frame/robot-pose synchronization.
 
-This module bridges the legacy timestamp-named frame folders to the rewrite's
-manifest-backed storage. It copies synchronized frames into a derived folder and
-keeps raw capture folders unchanged.
+It consumes current frame and robot-pose metadata, copies synchronized frames
+into a derived folder, and keeps raw capture folders unchanged.
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ from posetestbot.io.atomic import (
 from posetestbot.io.artifacts import (
     DEPTH_DIR,
     FRAME_METADATA_JSONL,
-    LEGACY_SENSOR_METADATA_ARTIFACTS,
+    CURRENT_SENSOR_METADATA_ARTIFACTS,
     MATCH_ROBOT_EE_POSES,
     PROCESSED_DIR,
     RGB_DIR,
@@ -34,16 +33,21 @@ from posetestbot.io.artifacts import (
 )
 from posetestbot.io.manifest import discover_sensor_records
 from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
+from posetestbot.pipeline.run_config import load_run_config_for_run_root
+from posetestbot.robot.reference_frames import (
+    POSE_TEMPLATE_BASE_SUNRISE_PATH,
+    configured_sunrise_reference_frame_path,
+)
+from posetestbot.sensors.contracts import SensorType
 
 
 SCHEMA_VERSION = "sync_report.v3"
-FRAME_TIMESTAMP_SOURCES = ("host_received", "host_wall", "sensor", "filename")
-ROBOT_TIMESTAMP_SOURCES = ("host_received", "host_wall", "filename")
+FRAME_TIMESTAMP_SOURCES = ("host_received", "host_wall", "sensor")
+ROBOT_TIMESTAMP_SOURCES = ("host_received", "host_wall")
 SUPPORTED_TIMESTAMP_PAIRS = {
     ("host_received", "host_received"),
     ("host_wall", "host_wall"),
     ("sensor", "host_wall"),
-    ("filename", "host_wall"),
 }
 
 
@@ -70,69 +74,70 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
 def load_frame_metadata(sensor_folder: str | Path) -> list[dict[str, Any]]:
     folder = Path(sensor_folder)
     metadata_path = folder / FRAME_METADATA_JSONL
-    if metadata_path.exists():
-        records = []
-        seen_frame_ids: set[str] = set()
-        with open(metadata_path, "r") as f:
-            for line_number, line in enumerate(f, start=1):
-                stripped = line.strip()
-                if stripped:
-                    try:
-                        record = json.loads(stripped)
-                    except json.JSONDecodeError as exc:
-                        raise ValueError(
-                            f"Invalid JSON in {metadata_path} line {line_number}: {exc.msg}"
-                        ) from exc
-                    if not isinstance(record, dict):
-                        raise ValueError(
-                            f"Frame metadata line {line_number} must be a JSON object"
-                        )
-                    frame_id = str(record.get("frame_id") or "")
-                    if not frame_id:
-                        raise ValueError(
-                            f"Frame metadata line {line_number} is missing frame_id"
-                        )
-                    if frame_id in seen_frame_ids:
-                        raise ValueError(f"Duplicate frame_id in metadata: {frame_id}")
-                    seen_frame_ids.add(frame_id)
-                    records.append(record)
-        return records
-
+    if not metadata_path.is_file() or metadata_path.is_symlink():
+        raise FileNotFoundError(f"Current frame metadata is required: {metadata_path}")
     records = []
-    for index, rgb_path in enumerate(sorted((folder / RGB_DIR).glob("*.png"))):
-        frame_id = rgb_path.name
-        try:
-            timestamp_ms = int(rgb_path.stem)
-        except ValueError as exc:
-            raise ValueError(
-                f"Legacy RGB filename is not a numeric timestamp: {rgb_path.name}"
-            ) from exc
-        records.append(
-            {
-                "schema_version": "frame_metadata.v1",
-                "sensor_type": "legacy_unknown",
-                "sensor_id": folder.name,
-                "frame_index": index,
-                "frame_id": frame_id,
-                "rgb_path": f"{RGB_DIR}/{frame_id}",
-                "depth_path": f"{DEPTH_DIR}/{frame_id}",
-                "filename_timestamp_ns": timestamp_ms * 1_000_000,
-            }
-        )
+    seen_frame_ids: set[str] = set()
+    with open(metadata_path, "r") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.endswith("\n"):
+                raise ValueError(
+                    f"Frame metadata line {line_number} is not newline-committed"
+                )
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid JSON in {metadata_path} line {line_number}: {exc.msg}"
+                ) from exc
+            if not isinstance(record, dict):
+                raise ValueError(
+                    f"Frame metadata line {line_number} must be a JSON object"
+                )
+            if record.get("schema_version") != "frame_metadata.v1":
+                raise ValueError(
+                    f"Frame metadata line {line_number} must use frame_metadata.v1"
+                )
+            try:
+                SensorType(str(record.get("sensor_type")))
+            except ValueError as exc:
+                raise ValueError(
+                    f"Frame metadata line {line_number} has an unknown sensor_type"
+                ) from exc
+            for field in ("sensor_id", "rgb_path", "depth_path"):
+                if not isinstance(record.get(field), str) or not record[field]:
+                    raise ValueError(
+                        f"Frame metadata line {line_number} requires {field}"
+                    )
+            for field in ("host_received_timestamp_ns", "host_wall_timestamp_ns"):
+                timestamp = record.get(field)
+                if (
+                    isinstance(timestamp, bool)
+                    or not isinstance(timestamp, int)
+                    or timestamp <= 0
+                ):
+                    raise ValueError(
+                        f"Frame metadata line {line_number} requires positive {field}"
+                    )
+            frame_id = str(record.get("frame_id") or "")
+            if not frame_id:
+                raise ValueError(
+                    f"Frame metadata line {line_number} is missing frame_id"
+                )
+            if frame_id in seen_frame_ids:
+                raise ValueError(f"Duplicate frame_id in metadata: {frame_id}")
+            seen_frame_ids.add(frame_id)
+            records.append(record)
+    if not records:
+        raise ValueError(f"Current frame metadata is empty: {metadata_path}")
     return records
 
 
-def load_robot_poses(run_root: str | Path, sensor_folder: str | Path) -> dict[str, Any]:
-    candidates = [
-        Path(sensor_folder) / RAW_ROBOT_EE_POSES,
-        Path(run_root) / RAW_ROBOT_EE_POSES,
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return _read_json(candidate)
-    raise FileNotFoundError(
-        f"Could not find {RAW_ROBOT_EE_POSES} in {sensor_folder} or {run_root}"
-    )
+def load_robot_poses(run_root: str | Path) -> dict[str, Any]:
+    path = Path(run_root) / RAW_ROBOT_EE_POSES
+    if not path.is_file() or path.is_symlink():
+        raise FileNotFoundError(f"Current robot poses are required: {path}")
+    return _read_json(path)
 
 
 def resolve_timestamp_pair(
@@ -142,9 +147,7 @@ def resolve_timestamp_pair(
     """Resolve one explicit, clock-compatible frame/robot timestamp pair."""
 
     if frame_timestamp_source not in FRAME_TIMESTAMP_SOURCES:
-        raise ValueError(
-            "timestamp_source must be host_received, host_wall, sensor, or filename"
-        )
+        raise ValueError("timestamp_source must be host_received, host_wall, or sensor")
     if robot_timestamp_source is None:
         if frame_timestamp_source in {"host_received", "host_wall"}:
             robot_timestamp_source = frame_timestamp_source
@@ -154,9 +157,7 @@ def resolve_timestamp_pair(
                 "robot_timestamp_source"
             )
     if robot_timestamp_source not in ROBOT_TIMESTAMP_SOURCES:
-        raise ValueError(
-            "robot_timestamp_source must be host_received, host_wall, or filename"
-        )
+        raise ValueError("robot_timestamp_source must be host_received or host_wall")
     if (frame_timestamp_source, robot_timestamp_source) not in (
         SUPPORTED_TIMESTAMP_PAIRS
     ):
@@ -174,13 +175,8 @@ def robot_timestamp_ns(
         value = record.get("host_received_timestamp_ns")
     elif timestamp_source == "host_wall":
         value = record.get("host_wall_timestamp_ns")
-    elif timestamp_source == "filename":
-        framename = record.get("framename")
-        value = int(framename) * 1_000_000 if framename is not None else None
     else:
-        raise ValueError(
-            "robot timestamp source must be host_received, host_wall, or filename"
-        )
+        raise ValueError("robot timestamp source must be host_received or host_wall")
     if value is None:
         raise ValueError(
             f"Robot pose is missing required {timestamp_source} timestamp evidence"
@@ -197,38 +193,17 @@ def resolve_frame_timestamp(
         value = record.get("host_wall_timestamp_ns")
     elif timestamp_source == "sensor":
         value = record.get("sensor_timestamp_ns")
-    elif timestamp_source == "filename":
-        value = record.get("filename_timestamp_ns")
-        if value is None and record.get("frame_id"):
-            try:
-                value = int(Path(str(record["frame_id"])).stem) * 1_000_000
-            except ValueError:
-                value = None
     else:
-        raise ValueError(
-            "timestamp_source must be host_received, host_wall, sensor, or filename"
-        )
+        raise ValueError("timestamp_source must be host_received, host_wall, or sensor")
 
     actual_source = timestamp_source if value is not None else None
-    fallback = False
-    if value is None and timestamp_source != "filename" and record.get("frame_id"):
-        try:
-            value = int(Path(str(record["frame_id"])).stem) * 1_000_000
-        except ValueError:
-            value = None
-        else:
-            actual_source = "filename"
-            fallback = True
-
     return (
-        (int(value), actual_source, fallback)
-        if value is not None
-        else (None, None, False)
+        (int(value), actual_source, False) if value is not None else (None, None, False)
     )
 
 
 def frame_timestamp_ns(record: Mapping[str, Any], timestamp_source: str) -> int | None:
-    """Compatibility wrapper returning only the resolved timestamp."""
+    """Return the explicitly selected current timestamp."""
 
     return resolve_frame_timestamp(record, timestamp_source)[0]
 
@@ -237,10 +212,14 @@ def indexed_robot_poses(
     raw_poses: Mapping[str, Any],
     *,
     timestamp_source: str = "host_received",
+    expected_run_id: str,
+    expected_reference_frame_path: str,
 ) -> list[dict[str, Any]]:
     if not isinstance(raw_poses, Mapping) or not raw_poses:
         raise ValueError("Raw robot pose artifact must be a non-empty JSON object")
     records = []
+    run_ids: set[str] = set()
+    reference_paths: set[str] = set()
     for key, value in raw_poses.items():
         if not isinstance(value, Mapping):
             raise ValueError(f"Robot pose {key!r} must be a JSON object")
@@ -253,8 +232,39 @@ def indexed_robot_poses(
             raise ValueError(f"Robot pose {key!r} is missing motion")
         if not isinstance(record.get("pose"), Mapping):
             raise ValueError(f"Robot pose {key!r} is missing pose coordinates")
+        source_packet = record.get("source_packet")
+        if (
+            not isinstance(source_packet, Mapping)
+            or source_packet.get("schema_version") != "robot_pose.v1"
+            or source_packet.get("packet_kind") != "pose"
+            or source_packet.get("from_frame") != "robot_flange"
+            or source_packet.get("to_frame") != "template_base"
+        ):
+            raise ValueError(
+                f"Robot pose {key!r} requires a current robot_pose.v1 source packet"
+            )
+        run_id = source_packet.get("run_id")
+        reference_path = source_packet.get("sunrise_reference_frame_path")
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError(f"Robot pose {key!r} is missing run_id provenance")
+        if not isinstance(reference_path, str) or not reference_path:
+            raise ValueError(
+                f"Robot pose {key!r} is missing Sunrise reference provenance"
+            )
+        if run_id != expected_run_id:
+            raise ValueError(
+                f"Robot pose {key!r} run_id does not match run_config.json"
+            )
+        if reference_path != expected_reference_frame_path:
+            raise ValueError(
+                f"Robot pose {key!r} Sunrise frame does not match run_config.json"
+            )
+        run_ids.add(run_id)
+        reference_paths.add(reference_path)
         record["timestamp_ns"] = robot_timestamp_ns(record, timestamp_source)
         records.append(record)
+    if len(run_ids) != 1 or len(reference_paths) != 1:
+        raise ValueError("Robot pose stream mixes run or reference-frame provenance")
     return sorted(records, key=lambda item: item["timestamp_ns"])
 
 
@@ -332,21 +342,7 @@ def _relative_path(path: Path, root: Path) -> str:
 
 
 def _sensor_sync_keys(sensor_folder_name: str) -> tuple[str, ...]:
-    name = sensor_folder_name.lower()
-    exact = (
-        (sensor_folder_name, name)
-        if sensor_folder_name != name
-        else (sensor_folder_name,)
-    )
-    if name.startswith("realsense"):
-        aliases = ("realsense_d435", "realsense")
-    elif name.startswith("luxonis") or name.startswith("oak"):
-        aliases = ("oak_d_pro", "luxonis", "oak")
-    elif name.startswith("zed_2i") or name.startswith("zed"):
-        aliases = ("zed_2i", "zed")
-    else:
-        aliases = (name.split("_")[0],)
-    return tuple(dict.fromkeys((*exact, *aliases)))
+    return (sensor_folder_name,)
 
 
 def resolve_sync_delta_ms(
@@ -448,12 +444,12 @@ def copy_sensor_metadata_artifacts(
     sensor_folder: Path, output_folder: Path
 ) -> list[str]:
     copied = []
-    for artifact in LEGACY_SENSOR_METADATA_ARTIFACTS:
+    for artifact in CURRENT_SENSOR_METADATA_ARTIFACTS:
         if artifact == FRAME_METADATA_JSONL:
             continue
         source = sensor_folder / artifact
-        if not source.exists():
-            continue
+        if not source.is_file() or source.is_symlink():
+            raise FileNotFoundError(f"Current camera sidecar is required: {source}")
         destination = output_folder / artifact
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
@@ -485,12 +481,18 @@ def synchronize_sensor_folder(
     copy_files: bool = True,
     max_nearest_pose_delta_ms: int | float | None = None,
     required_frame_timestamp_domain: str | None = None,
-    timestamp_fallback_allowed: bool = True,
+    timestamp_fallback_allowed: bool = False,
     calibration_sync: Mapping[str, Any] | None = None,
     raw_robot_poses: Mapping[str, Any] | None = None,
 ) -> SyncResult:
     sensor_path = Path(sensor_folder)
     run_path = Path(run_root) if run_root is not None else sensor_path.parent
+    config = load_run_config_for_run_root(run_path)
+    expected_reference_path = configured_sunrise_reference_frame_path(config)
+    if expected_reference_path != POSE_TEMPLATE_BASE_SUNRISE_PATH:
+        raise ValueError(
+            "Current synchronization requires the canonical PoseTemplateBase frame"
+        )
     timestamp_source, resolved_robot_timestamp_source = resolve_timestamp_pair(
         timestamp_source, robot_timestamp_source
     )
@@ -509,8 +511,8 @@ def synchronize_sensor_folder(
         raise ValueError(
             "Required frame timestamp domain must be a non-empty string or null"
         )
-    if not isinstance(timestamp_fallback_allowed, bool):
-        raise ValueError("timestamp_fallback_allowed must be a boolean")
+    if timestamp_fallback_allowed is not False:
+        raise ValueError("Current synchronization forbids timestamp fallback")
     if calibration_sync is not None and not isinstance(calibration_sync, Mapping):
         raise ValueError("calibration_sync provenance must be an object")
     output_base = (
@@ -528,12 +530,14 @@ def synchronize_sensor_folder(
         if not frame_records:
             raise ValueError(f"No frame metadata or RGB frames found in {sensor_path}")
         if raw_robot_poses is None:
-            selected_robot_poses = load_robot_poses(run_path, sensor_path)
+            selected_robot_poses = load_robot_poses(run_path)
         else:
             selected_robot_poses = raw_robot_poses
         robot_records = indexed_robot_poses(
             selected_robot_poses,
             timestamp_source=resolved_robot_timestamp_source,
+            expected_run_id=str(config["run_id"]),
+            expected_reference_frame_path=expected_reference_path,
         )
         intervals = motion_intervals(robot_records)
         pose_packet_loss_audited, pose_packet_loss_count = robot_pose_packet_loss(
@@ -562,9 +566,7 @@ def synchronize_sensor_folder(
                     f"{required_frame_timestamp_domain!r}"
                 )
             resolved = resolve_frame_timestamp(frame_record, timestamp_source)
-            if not timestamp_fallback_allowed and (
-                resolved[0] is None or resolved[1] != timestamp_source or resolved[2]
-            ):
+            if resolved[0] is None or resolved[1] != timestamp_source or resolved[2]:
                 raise ValueError(
                     f"Frame {frame_record.get('frame_id')!r} in "
                     f"{sensor_path.name} cannot prove required "
@@ -596,14 +598,10 @@ def synchronize_sensor_folder(
 
         for timestamp_ns, actual_source, fallback, frame_record in resolved_records:
             if timestamp_ns is None or actual_source is None:
-                timestamp_missing_count += 1
-                dropped.append(
-                    {
-                        "frame_id": frame_record.get("frame_id"),
-                        "reason": f"missing {timestamp_source} timestamp",
-                    }
+                raise ValueError(
+                    f"Frame {frame_record.get('frame_id')!r} is missing "
+                    f"{timestamp_source} timestamp evidence"
                 )
-                continue
             timestamp_source_counts[actual_source] = (
                 timestamp_source_counts.get(actual_source, 0) + 1
             )
@@ -856,7 +854,7 @@ def synchronize_run(
     copy_files: bool = True,
     max_nearest_pose_delta_ms: int | float | None = None,
     required_frame_timestamp_domain: str | None = None,
-    timestamp_fallback_allowed: bool = True,
+    timestamp_fallback_allowed: bool = False,
     calibration_sync: Mapping[str, Any] | None = None,
     raw_robot_poses: Mapping[str, Any] | None = None,
 ) -> list[SyncResult]:

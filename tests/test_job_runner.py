@@ -142,6 +142,22 @@ def test_job_index_rebuilds_without_rewriting_or_pruning_history(
         assert (job_root / job_id / "job.json").read_bytes() == original
 
 
+def test_job_index_rejects_pre_scope_history(tmp_path: Path) -> None:
+    job_root = tmp_path / "jobs"
+    _write_terminal_job(
+        job_root,
+        job_id="pre-scope",
+        created_at="2026-07-19T00:00:00+00:00",
+        scope_kind=None,
+    )
+
+    runner = LocalJobRunner(job_root)
+
+    assert runner.list() == []
+    with pytest.raises(KeyError, match="Unknown job"):
+        runner.get("pre-scope")
+
+
 def test_job_history_cursor_is_stable_when_newer_history_arrives(
     tmp_path: Path,
 ) -> None:
@@ -293,6 +309,7 @@ def test_local_job_runner_marks_interrupted_jobs_failed_on_reload(
                 "log_path": (job_dir / "log.txt").as_posix(),
                 "resources": ["robot"],
                 "parameters": {"capture": True},
+                "scope_kind": "global",
             }
         )
     )
@@ -339,6 +356,7 @@ def test_local_job_runner_stops_verified_orphaned_process_group_on_reload(
                 "process_start_time": process_start_time,
                 "runner_pid": 999_999_999,
                 "runner_start_time": 1,
+                "scope_kind": "global",
             }
         )
     )

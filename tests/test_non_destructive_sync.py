@@ -55,6 +55,14 @@ def write_jsonl(path: Path, records: list[dict]) -> None:
 
 def create_sync_fixture(tmp_path: Path) -> tuple[Path, Path]:
     run_root = tmp_path / "run-1"
+    config = create_run_config(
+        run_root=run_root,
+        capture_intent="dataset",
+        bop_annotation_mode="none",
+        sensors=(SensorRunConfig("realsense_d435", "123", "D435"),),
+    )
+    write_run_config(run_root, config)
+    run_id = config.run_id
     sensor_folder = run_root / "realsense_123"
     rgb_folder = sensor_folder / RGB_DIR
     depth_folder = sensor_folder / DEPTH_DIR
@@ -122,6 +130,15 @@ def create_sync_fixture(tmp_path: Path) -> tuple[Path, Path]:
                 "host_received_timestamp_ns": 1_000_000_000,
                 "host_wall_timestamp_ns": 10_000_000_000,
                 "motion": "circ_far",
+                "source_packet": {
+                    "schema_version": "robot_pose.v1",
+                    "packet_kind": "pose",
+                    "sequence": 0,
+                    "run_id": run_id,
+                    "from_frame": "robot_flange",
+                    "to_frame": "template_base",
+                    "sunrise_reference_frame_path": "/PoseTestBot/PoseTemplateBase",
+                },
                 "pose": {"X": 1, "Y": 2, "Z": 3, "A": 4, "B": 5, "C": 6},
             },
             "1": {
@@ -129,6 +146,15 @@ def create_sync_fixture(tmp_path: Path) -> tuple[Path, Path]:
                 "host_received_timestamp_ns": 1_100_000_000,
                 "host_wall_timestamp_ns": 10_100_000_000,
                 "motion": "circ_far",
+                "source_packet": {
+                    "schema_version": "robot_pose.v1",
+                    "packet_kind": "pose",
+                    "sequence": 1,
+                    "run_id": run_id,
+                    "from_frame": "robot_flange",
+                    "to_frame": "template_base",
+                    "sunrise_reference_frame_path": "/PoseTestBot/PoseTemplateBase",
+                },
                 "pose": {"X": 7, "Y": 8, "Z": 9, "A": 10, "B": 11, "C": 12},
             },
             "2": {
@@ -136,6 +162,15 @@ def create_sync_fixture(tmp_path: Path) -> tuple[Path, Path]:
                 "host_received_timestamp_ns": 2_000_000_000,
                 "host_wall_timestamp_ns": 11_000_000_000,
                 "motion": "zoom",
+                "source_packet": {
+                    "schema_version": "robot_pose.v1",
+                    "packet_kind": "pose",
+                    "sequence": 2,
+                    "run_id": run_id,
+                    "from_frame": "robot_flange",
+                    "to_frame": "template_base",
+                    "sunrise_reference_frame_path": "/PoseTestBot/PoseTemplateBase",
+                },
                 "pose": {"X": 13, "Y": 14, "Z": 15, "A": 16, "B": 17, "C": 18},
             },
         },
@@ -214,12 +249,6 @@ def test_synchronize_sensor_folder_uses_verified_robot_pose_snapshot(
     run_root, sensor_folder = create_sync_fixture(tmp_path)
     verified_snapshot = json.loads((run_root / RAW_ROBOT_EE_POSES).read_text())
     verified_snapshot["0"]["pose"]["X"] = 999
-    verified_snapshot["0"]["source_packet"] = {
-        "schema_version": "robot_pose.v1",
-        "from_frame": "robot_flange",
-        "to_frame": "template_base",
-        "sunrise_reference_frame_path": "/PoseTestBot/PoseTemplateBase",
-    }
     monkeypatch.setattr(
         sync_module,
         "load_robot_poses",
@@ -366,7 +395,7 @@ def test_sync_strict_nearest_pose_delta_drops_outlier_before_derived_output(
     }
 
 
-def test_sync_reports_filename_timestamp_fallback(tmp_path: Path) -> None:
+def test_sync_rejects_missing_current_host_timestamp(tmp_path: Path) -> None:
     run_root, sensor_folder = create_sync_fixture(tmp_path)
     records = [
         json.loads(line)
@@ -375,20 +404,15 @@ def test_sync_reports_filename_timestamp_fallback(tmp_path: Path) -> None:
     records[0].pop("host_received_timestamp_ns")
     write_jsonl(sensor_folder / FRAME_METADATA_JSONL, records)
 
-    result = synchronize_sensor_folder(
-        sensor_folder,
-        run_root=run_root,
-        sync_delta=0,
-        timestamp_source="host_received",
-    )
-    report = json.loads(Path(result.report_path).read_text())
-
-    assert report["timestamp_source"] == "mixed"
-    assert report["timestamp_source_counts"] == {
-        "filename": 1,
-        "host_received": 2,
-    }
-    assert report["timestamp_fallback_count"] == 1
+    with pytest.raises(
+        ValueError, match="requires positive host_received_timestamp_ns"
+    ):
+        synchronize_sensor_folder(
+            sensor_folder,
+            run_root=run_root,
+            sync_delta=0,
+            timestamp_source="host_received",
+        )
 
 
 def test_sensor_exposure_timestamp_pairs_explicitly_with_robot_wall_clock(
@@ -523,7 +547,33 @@ def test_sensor_timestamp_requires_explicit_compatible_robot_clock() -> None:
 
 def test_sync_run_cli_processes_all_discovered_sensors(tmp_path: Path) -> None:
     run_root, sensor_folder = create_sync_fixture(tmp_path)
-    shutil.copytree(sensor_folder, run_root / "luxonis_abc")
+    second = run_root / "luxonis_abc"
+    shutil.copytree(sensor_folder, second)
+    records = [
+        json.loads(line)
+        for line in (second / FRAME_METADATA_JSONL).read_text().splitlines()
+    ]
+    for record in records:
+        record["sensor_type"] = "oak_d_pro"
+        record["sensor_id"] = "abc"
+    write_jsonl(second / FRAME_METADATA_JSONL, records)
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            capture_intent="dataset",
+            bop_annotation_mode="none",
+            sensors=(
+                SensorRunConfig("realsense_d435", "123", "D435"),
+                SensorRunConfig("oak_d_pro", "abc", "OAK-D Pro"),
+            ),
+        ),
+    )
+    new_run_id = json.loads((run_root / "run_config.json").read_text())["run_id"]
+    raw = json.loads((run_root / RAW_ROBOT_EE_POSES).read_text())
+    for record in raw.values():
+        record["source_packet"]["run_id"] = new_run_id
+    write_json(run_root / RAW_ROBOT_EE_POSES, raw)
     repo_root = Path(__file__).resolve().parents[1]
 
     result = subprocess.run(
@@ -562,7 +612,10 @@ def test_synchronize_run_defaults_to_enabled_run_config_sensors(
     write_run_config(
         run_root,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
             run_root=run_root,
+            run_id=json.loads((run_root / "run_config.json").read_text())["run_id"],
             sensors=(
                 SensorRunConfig("realsense_d435", "123", "Enabled"),
                 SensorRunConfig("realsense_d435", "999", "Disabled", enabled=False),
@@ -627,6 +680,8 @@ def test_run_sync_cli_applies_selected_profile_policy_per_exact_camera(
     write_run_config(
         run_root,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
             run_root=run_root,
             sensors=(
                 SensorRunConfig(
@@ -751,12 +806,9 @@ def test_run_sync_cli_applies_selected_profile_policy_per_exact_camera(
     assert calls == []
 
 
-def test_invalid_filename_timestamp_is_reported_as_missing() -> None:
-    assert resolve_frame_timestamp({"frame_id": "not-numeric.png"}, "filename") == (
-        None,
-        None,
-        False,
-    )
+def test_filename_timestamp_source_is_rejected() -> None:
+    with pytest.raises(ValueError, match="host_received, host_wall, or sensor"):
+        resolve_frame_timestamp({"frame_id": "1000.png"}, "filename")
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), True, "invalid"])

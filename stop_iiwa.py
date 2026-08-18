@@ -7,22 +7,13 @@ from posetestbot.config import robot_profile
 from posetestbot.robot.udp import send_stop
 
 
-def send_stop_message(
-    *,
-    ip_robot: str | None,
-    port_robot: int | None,
-    protocol: str,
-    intent: str,
-) -> bool:
-    """Send a stop-like control message to the configured iiwa controller."""
+def send_stop_message() -> bool:
+    """Request that the idle iiwa application exit its command loop."""
 
-    profile = robot_profile().with_overrides(
-        robot_ip=ip_robot,
-        command_port=port_robot,
-    )
+    profile = robot_profile()
 
     try:
-        stop_message = send_stop(profile, protocol=protocol, intent=intent)
+        stop_message = send_stop(profile)
         print(f"Sent stop message to {profile.robot_ip}:{profile.command_port}")
         print(f"Message: {stop_message}")
         return True
@@ -33,32 +24,11 @@ def send_stop_message(
         print(f"Error sending stop message: {exc}")
         return False
 
+
 def main():
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Send stop message to robot via UDP")
-    parser.add_argument(
-        "--ip_robot",
-        type=str,
-        default=None,
-        help="Override robot IP address from the selected profile.",
-    )
-    parser.add_argument(
-        "--port_robot",
-        type=int,
-        default=None,
-        help="Override robot UDP command port from the selected profile.",
-    )
-    parser.add_argument(
-        "--protocol",
-        choices=("legacy", "v1"),
-        default="legacy",
-        help="Robot command protocol. Use legacy for the current Sunrise app.",
-    )
-    parser.add_argument(
-        "--intent",
-        choices=("pause_capture", "stop_after_current_motion", "emergency_stop"),
-        default="stop_after_current_motion",
-        help="Structured v1 stop intent. Legacy protocol still sends {'stop': true}.",
+    parser = argparse.ArgumentParser(
+        description="Request exit of the idle PoseTestBot iiwa program via UDP"
     )
     parser.add_argument(
         "--verbose",
@@ -67,10 +37,7 @@ def main():
     )
 
     args = parser.parse_args()
-    selected_profile = robot_profile().with_overrides(
-        robot_ip=args.ip_robot,
-        command_port=args.port_robot,
-    )
+    selected_profile = robot_profile()
 
     if args.verbose:
         print(
@@ -79,12 +46,7 @@ def main():
             f"{selected_profile.robot_ip}:{selected_profile.command_port}"
         )
 
-    success = send_stop_message(
-        ip_robot=selected_profile.robot_ip,
-        port_robot=selected_profile.command_port,
-        protocol=args.protocol,
-        intent=args.intent,
-    )
+    success = send_stop_message()
 
     if success:
         print("Stop message sent successfully.")
@@ -92,6 +54,7 @@ def main():
     else:
         print("Failed to send stop message.")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

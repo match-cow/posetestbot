@@ -10,14 +10,14 @@ PoseTestBot.
 | Method and path | Contract |
 | --- | --- |
 | `GET /bop/annotations/setup?run_root=…` | Inspect exported dataset and readiness blockers per annotation mode |
-| `POST /bop/annotations` | Queue `pose` or `pose_and_mask` generation after mode-specific readiness validation |
+| `POST /bop/annotations` | Queue the run-configured `pose` or `pose_and_masks` product after mode-specific readiness validation |
 
 The request is:
 
 ```json
 {
   "run_root": "working_data/example",
-  "mode": "pose_and_mask"
+  "mode": "pose_and_masks"
 }
 ```
 
@@ -53,7 +53,7 @@ Registered-result evaluation request:
 
 The only alternative source is `gt_simulation`, intended for deterministic
 test validation and explicitly labelled as such. This API is not a pose
-estimator, result converter, or acquisition-pipeline stage. All result and
+estimator, result converter, or acquisition stage. All result and
 evaluation evidence stays below `processed/bop_evaluation/`.
 
 ## External cluster controller proxy
@@ -66,7 +66,7 @@ evaluation evidence stays below `processed/bop_evaluation/`.
 | `GET /cluster/archives` | List immutable controller-side run archives |
 | `POST /cluster/archives` | Submit archive creation for a locally validated run |
 | `POST /cluster/archives/<archive_id>/restore` | Submit restore with local identity/active-job checks |
-| `GET /cluster/pose-estimation/setup?run_root=…` | Return browser-safe dataset hash, archive readiness, and advertised estimator choices |
+| `GET /cluster/pose-estimation/setup?run_root=…&estimator_id=…` | Return strict setup v2 with the browser-safe dataset identity and controller-advertised estimators |
 | `POST /cluster/pose-estimation/jobs` | Submit a typed controller job using an advertised estimator ID and supported options |
 | `GET /cluster/jobs` | List curated external jobs |
 | `GET /cluster/jobs/<job_id>` | Inspect one curated external job |
@@ -81,3 +81,5 @@ staged dataset hash, and local dataset hash.
 
 Archive/storage readiness is independent from estimator runtime readiness. A
 run can be archived or restored even when no qualified estimator is advertised.
+Controllers without the current domains-and-estimators status shape fail closed;
+PoseTestBot never fabricates a default estimator or resource profile.

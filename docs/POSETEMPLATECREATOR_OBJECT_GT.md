@@ -50,8 +50,8 @@ pose_template_from_object =
     translate_xy * rotate_z * source_to_placed
 ```
 
-Legacy bundles and six-DoF drafts remain readable. New templates do not ask an
-operator to reproduce arbitrary roll, pitch, or Z values by eye.
+Only current stable-orientation configurations and bundles are accepted. The
+operator is never asked to reproduce arbitrary roll, pitch, or Z values by eye.
 
 The operator-confirmed placement maps the blue dot into `template_base`:
 
@@ -103,6 +103,7 @@ transforms, the PDF page boundary, or GT.
 
    ```bash
    uv run python scripts/create_run_config.py working_data/my_run \
+     --intent dataset --annotation-mode none \
      --dataset-mode pose_template
    ```
 
@@ -150,9 +151,8 @@ transforms, the PDF page boundary, or GT.
   every instance's largest compensated contour, then admits secondary contours
   round-robin, with hard limits of 400 contours, 4096 total points, and 48
   points per contour. Its approximation record reports every source/included
-  count. Pre-thumbnail bundles remain readable: the endpoint derives the same
-  bounded representation from their verified preview in memory and never
-  modifies the historical bundle. `GET /pose-templates/library` returns
+  count. A current bundle must contain this declared, hash-verified thumbnail;
+  missing or oversized thumbnail evidence fails closed. `GET /pose-templates/library` returns
   metadata-only summaries; exact contours and preview meshes are available only
   from the explicitly requested detail/full-preview endpoints. New manifests
   omit the duplicate raw `nominal_contours` and `compensated_contours` arrays
@@ -193,9 +193,9 @@ exact blocking paths.
 Ordinary library cards/details read the bounded, self-hashed manifest and do
 not hash every immutable PDF, preview, mesh, and texture. A thumbnail, full
 preview, PDF, or individual instance asset request verifies the manifest plus
-only the requested declared artifact. Oversized pre-bounded legacy manifests
-use strict whole-bundle validation as a compatibility fallback. Authoritative
-operations remain stricter: run selection, catalogue-reference checks before
+only the requested declared artifact. Oversized or malformed manifests are
+rejected. Authoritative operations remain strict: run selection,
+catalogue-reference checks before
 permanent deletion, and explicit whole-bundle validation reject missing,
 modified, undeclared, or symlinked tree entries.
 
@@ -208,18 +208,19 @@ stage, without blocking ordinary catalogue work for the full render.
 
 ## Validation and recovery
 
-Run the acquisition-only readiness gate after export:
+Validate the current base export and optional annotation setup directly:
 
 ```bash
-uv run python scripts/run_rewrite_gate.py working_data/my_run \
-  --gate rewrite_bop_export_readiness.v1 --write
+uv run python scripts/process_dataset.py working_data/my_run
+curl --fail-with-body --get http://127.0.0.1:5000/bop/annotations/setup \
+  --data-urlencode run_root=working_data/my_run
 ```
 
-For pose-template mode the gate cross-checks selection, prepared geometry,
-calibration, annotation/toolkit identity when present, every BOP GT index,
-model hashes, target visibility counts, and both provenance sidecars. Preserve
-raw capture data; retry preparation, annotation generation, or export into
-derived artifacts after correcting a blocker.
+The fixed processing recipe cross-checks selection, prepared geometry,
+calibration, model hashes, and provenance before writing the current base
+export. Optional annotation readiness then verifies its mode-specific inputs
+and toolkit identity. Preserve raw capture data; retry derived processing after
+correcting a blocker.
 
 Selection creation and replacement hold the template-library lock while they
 strictly validate and snapshot the chosen active bundle. The run-local reader

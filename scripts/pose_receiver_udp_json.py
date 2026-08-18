@@ -23,51 +23,26 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("output_path", help="Path to folder for received data")
     parser.add_argument(
-        "--ip",
-        type=str,
-        default=None,
-        help="IP address to bind the receiver socket to.",
-    )
-    parser.add_argument(
-        "--port", type=int, default=None, help="Port to bind the receiver socket to."
-    )
-    parser.add_argument(
         "--capture_vel",
         type=float,
         default=None,
         help=(
             "Requested capture velocity in m/s. Defaults to the selected "
-            "robot profile; the transmitted value is capped at 0.03 by "
-            "default. Canonical object-dataset plans may supply a larger "
-            "versioned command limit."
+            "fixed lab profile; capture planning supplies the bounded value."
         ),
     )
     parser.add_argument(
-        "--ip_robot",
-        type=str,
-        default=None,
-        help="Override robot IP address from the selected profile.",
-    )
-    parser.add_argument(
-        "--port_robot",
-        type=int,
-        default=None,
-        help="Override robot UDP command port from the selected profile.",
-    )
-    parser.add_argument(
-        "--protocol",
-        choices=("legacy", "v1"),
-        default="legacy",
-        help="Robot command protocol. Use legacy for the current Sunrise app.",
+        "--run-id",
+        required=True,
+        help="Immutable run UUID included in robot_command.v1 and required packets.",
     )
     parser.add_argument(
         "--maximum-command-velocity-m-s",
         type=float,
         default=None,
         help=(
-            "Maximum transmitted capture request in m/s. Values above the "
-            "conservative 0.03 legacy limit require --protocol v1. The "
-            "canonical object-dataset capture plan supplies this explicitly."
+            "Maximum transmitted capture request in m/s. The fixed capture "
+            "recipe supplies this explicitly."
         ),
     )
     parser.add_argument(
@@ -106,10 +81,6 @@ def main() -> int:
     if args.output_path == "out":
         output_path = Path(__file__).resolve().parent / "out"
     profile = robot_profile().with_overrides(
-        robot_ip=args.ip_robot,
-        command_port=args.port_robot,
-        receiver_ip=args.ip,
-        receiver_port=args.port,
         cartesian_velocity_m_s=args.capture_vel,
     )
 
@@ -117,7 +88,7 @@ def main() -> int:
         result = run_pose_receiver(
             output_path,
             profile=profile,
-            protocol=args.protocol,
+            run_id=args.run_id,
             verbose=args.verbose,
             allow_real_robot=args.allow_real_robot,
             allow_cameras=args.allow_cameras,

@@ -47,6 +47,36 @@ class FakeRunner:
 
 
 def _status() -> dict[str, Any]:
+    profile = {
+        "profile_id": "smoke",
+        "enabled": True,
+        "partition": "gpu",
+        "gres": "gpu:1",
+        "cpus": 4,
+        "memory": "24G",
+        "walltime": "00:20:00",
+        "max_targets": 2,
+    }
+    runtime = {
+        "estimator_id": "foundationpose",
+        "driver_id": "foundationpose.v1",
+        "runtime_id": "foundationpose-a1b694b8",
+        "container": {"filename": "foundationpose.sif", "sha256": "1" * 64},
+        "assets": {"weights": {"filename": "weights.zip", "sha256": "2" * 64}},
+        "source_revisions": {
+            "foundationpose": "a1b694b83e633c2cb6115b9063d940a687759392",
+            "bop_toolkit": "cea62d651c7e395b2e1962b9749e4e89693c6ac4",
+        },
+        "build_provenance": {"base_image_digest": f"sha256:{'4' * 64}"},
+        "licenses": [{"name": "NVIDIA Source Code License", "sha256": "3" * 64}],
+        "input_contracts": ["posetestbot.bop.v5.pose_and_masks"],
+        "output_contract": "bop19.csv.v1",
+        "qualified_resource_profiles": ["smoke"],
+        "qualification_manifest_sha256": "5" * 64,
+        "qualified": True,
+        "ready": True,
+        "qualification_blockers": [],
+    }
     return {
         "schema_version": "posetestbot_cluster_status.v1",
         "ready": True,
@@ -57,29 +87,32 @@ def _status() -> dict[str, Any]:
             "pose_estimation": True,
         },
         "feature_blockers": {"archive": [], "estimation": []},
-        "runtime": {
-            "runtime_id": "foundationpose-a1b694b8",
-            "foundationpose_revision": "a1b694b83e633c2cb6115b9063d940a687759392",
-            "bop_toolkit_revision": "cea62d651c7e395b2e1962b9749e4e89693c6ac4",
-            "sif_sha256": "1" * 64,
-            "weights_sha256": "2" * 64,
-            "weights_files_sha256": "4" * 64,
-            "qualification_manifest_sha256": "5" * 64,
-            "foundationpose_license": "NVIDIA Source Code License",
-            "foundationpose_license_sha256": "3" * 64,
-            "qualified": True,
-            "ready": True,
+        "domains": {
+            "storage": {
+                "ready": True,
+                "read": True,
+                "mutation": True,
+                "blockers": [],
+            },
+            "scheduler": {"ready": True, "blockers": []},
         },
-        "profiles": [
+        "runtime": runtime,
+        "profiles": [profile],
+        "estimators": [
             {
-                "profile_id": "smoke",
+                "estimator_id": "foundationpose",
+                "driver_id": "foundationpose.v1",
+                "display_name": "FoundationPose",
+                "installed": True,
+                "configured": True,
                 "enabled": True,
-                "partition": "gpu",
-                "gres": "gpu:1",
-                "cpus": 4,
-                "memory": "24G",
-                "walltime": "00:20:00",
-                "max_targets": 2,
+                "ready": True,
+                "blockers": [],
+                "readiness_blockers": [],
+                "input_contracts": ["posetestbot.bop.v5.pose_and_masks"],
+                "output_contract": "bop19.csv.v1",
+                "runtime": runtime,
+                "profiles": [profile],
             }
         ],
     }
@@ -116,8 +149,16 @@ class FakeController:
             }
         }
 
+    def create_estimation_job(self, payload, *, idempotency_key: str):
+        self.pose_payload = dict(payload)
+        self.pose_key = idempotency_key
+        return self.create_pose_job(payload, idempotency_key=idempotency_key)
+
     def pose_jobs(self, **_kwargs):
         return {"jobs": [self.job_value] if self.job_value else [], "next_cursor": None}
+
+    def estimation_jobs(self, **kwargs):
+        return self.pose_jobs(**kwargs)
 
     def job(self, _job_id: str):
         if self.job_value is None:
@@ -238,12 +279,8 @@ class GenericController(FakeController):
                             "megapose": "abcdef0123456789",
                             "private": "/secret/checkout",
                         },
-                        "licenses": [
-                            {"name": "Fixture license", "sha256": "9" * 64}
-                        ],
-                        "input_contracts": [
-                            "posetestbot.bop.v5.pose_and_masks"
-                        ],
+                        "licenses": [{"name": "Fixture license", "sha256": "9" * 64}],
+                        "input_contracts": ["posetestbot.bop.v5.pose_and_masks"],
                         "output_contract": "bop19.csv.v1",
                         "qualified_resource_profiles": ["smoke"],
                         "qualification_manifest_sha256": "a" * 64,
@@ -301,6 +338,17 @@ class ArchiveOnlyController(GenericController):
 class OfflineController(FakeController):
     def status(self):
         raise ClusterClientError("Cluster controller is unavailable")
+
+
+class PreCurrentController(FakeController):
+    def status(self):
+        return {
+            "schema_version": "posetestbot_cluster_status.v0",
+            "ready": True,
+            "connection": {"ready": True},
+            "runtime": _status()["runtime"],
+            "profiles": _status()["profiles"],
+        }
 
 
 class BlockedController(FakeController):
@@ -409,16 +457,12 @@ def test_cluster_controller_service_status_and_actions_are_server_owned(
     client = app.test_client()
 
     status = client.get("/cluster/controller-service")
-    rejected = client.post(
-        "/cluster/controller-service/start", json={"confirm": False}
-    )
+    rejected = client.post("/cluster/controller-service/start", json={"confirm": False})
     caller_controlled = client.post(
         "/cluster/controller-service/start",
         json={"confirm": True, "service_unit": "caller-controlled.service"},
     )
-    started = client.post(
-        "/cluster/controller-service/start", json={"confirm": True}
-    )
+    started = client.post("/cluster/controller-service/start", json={"confirm": True})
 
     assert status.status_code == 200
     assert status.get_json()["state"] == "stopped"
@@ -433,22 +477,16 @@ def test_cluster_controller_service_status_and_actions_are_server_owned(
     assert rejected.status_code == 400
     assert caller_controlled.status_code == 400
     assert started.status_code == 202
-    assert started.get_json()["job"]["command"][-1] == (
-        "posetestbot-cluster.service"
-    )
+    assert started.get_json()["job"]["command"][-1] == ("posetestbot-cluster.service")
     assert "caller-controlled" not in started.get_data(as_text=True)
     assert manager.commands == ["start"]
 
     manager.state = "running"
-    stopped = client.post(
-        "/cluster/controller-service/stop", json={"confirm": True}
-    )
+    stopped = client.post("/cluster/controller-service/stop", json={"confirm": True})
 
     assert stopped.status_code == 202
     assert stopped.get_json()["job"]["scope_kind"] == "global"
-    assert stopped.get_json()["job"]["resources"] == [
-        "cluster_controller_service"
-    ]
+    assert stopped.get_json()["job"]["resources"] == ["cluster_controller_service"]
     assert manager.commands == ["start", "stop"]
 
 
@@ -459,9 +497,7 @@ def test_cluster_controller_service_is_explicitly_unmanaged_by_default(
     client = app.test_client()
 
     status = client.get("/cluster/controller-service")
-    action = client.post(
-        "/cluster/controller-service/start", json={"confirm": True}
-    )
+    action = client.post("/cluster/controller-service/start", json={"confirm": True})
 
     assert status.status_code == 200
     assert status.get_json()["state"] == "unmanaged"
@@ -491,6 +527,7 @@ def test_pose_setup_submission_is_server_revalidated_and_loopback_proxied(
         "/cluster/pose-estimation/jobs",
         json={
             "run_root": run.as_posix(),
+            "estimator_id": "foundationpose",
             "profile_id": "smoke",
             "operator": "Fixture Operator",
             "dataset_sha256": "caller-must-not-control-this",
@@ -499,6 +536,7 @@ def test_pose_setup_submission_is_server_revalidated_and_loopback_proxied(
     assert submitted.status_code == 202
     dataset = inspect_dataset(run, include_depth_content=True)
     assert controller.pose_payload == {
+        "estimator_id": "foundationpose",
         "run_root": run.as_posix(),
         "dataset_alias": dataset["dataset_alias"],
         "dataset_sha256": dataset["dataset_sha256"],
@@ -506,7 +544,7 @@ def test_pose_setup_submission_is_server_revalidated_and_loopback_proxied(
         "operator": "Fixture Operator",
     }
     assert controller.pose_key is not None
-    assert controller.pose_key.startswith("pose-submit:")
+    assert controller.pose_key.startswith("estimation-submit:")
 
 
 def test_generic_estimator_is_discovered_selected_and_submitted(
@@ -562,7 +600,7 @@ def test_generic_estimator_is_discovered_selected_and_submitted(
 
 
 def test_archive_storage_status_is_independent_of_estimator_readiness(
-    tmp_path: Path
+    tmp_path: Path,
 ) -> None:
     controller = ArchiveOnlyController()
     app, _runs_root = _app(tmp_path, controller)
@@ -605,6 +643,42 @@ def test_pose_setup_exposes_controller_outage_and_containment_blockers(
     assert "allowed root" in escaped.get_json()["output"]
 
 
+def test_cluster_rejects_pre_current_status_without_advertised_estimators(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app, runs_root = _app(tmp_path, PreCurrentController())
+    run = _pose_ready_run(runs_root)
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs_root.as_posix())
+    client = app.test_client()
+
+    status = client.get("/cluster/status")
+    setup = client.get(
+        "/cluster/pose-estimation/setup",
+        query_string={"run_root": run.as_posix()},
+    )
+
+    assert status.status_code == 200
+    assert status.get_json()["ready"] is False
+    assert "estimators" not in status.get_json()
+    assert status.get_json()["blockers"] == [
+        {
+            "code": "controller_contract_invalid",
+            "message": (
+                "The cluster controller did not return the current status "
+                "contract with domains and advertised estimators."
+            ),
+        }
+    ]
+    assert setup.status_code == 200
+    assert setup.get_json()["ready"] is False
+    assert setup.get_json()["estimator"] is None
+    assert setup.get_json()["estimators"] == []
+    assert any(
+        blocker["code"] == "controller_contract_invalid"
+        for blocker in setup.get_json()["blockers"]
+    )
+
+
 def test_pose_setup_preserves_structured_controller_readiness_blockers(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -641,16 +715,13 @@ def _successful_external_job(
     provenance = {
         "schema_version": "posetestbot_cluster_collected_result.v1",
         "job_id": job_id,
-        "method": "foundationpose",
         "dataset_sha256": dataset["dataset_sha256"],
-        "oracle_mask_contract": "bop_mask_visib_gt_instance.v1",
-        "score_contract": "constant_1.0_no_detection_confidence",
-        "execution_contract": "independent_register_per_target_no_tracking.v1",
-        "units": {
-            "bop_model": "millimetres",
-            "bop_depth": "millimetres",
-            "foundationpose": "metres",
-            "result_translation": "millimetres",
+        "estimator": {
+            "estimator_id": "foundationpose",
+            "driver_id": "foundationpose.v1",
+            "runtime_id": "foundationpose-a1b694b8",
+            "input_contracts": ["posetestbot.bop.v5.pose_and_masks"],
+            "output_contract": "bop19.csv.v1",
         },
         "runtime": _status()["runtime"],
         "input_manifest_sha256": "3" * 64,
@@ -670,6 +741,9 @@ def _successful_external_job(
             "provider": "posetestbot-cluster",
             "job_id": job_id,
             "slurm_job_id": "81234",
+            "estimator_id": "foundationpose",
+            "driver_id": "foundationpose.v1",
+            "runtime_id": "foundationpose-a1b694b8",
         },
         "result": {
             "filename": result.name,
@@ -684,10 +758,15 @@ def _successful_external_job(
     controller.job_value = {
         "schema_version": "posetestbot_cluster_job.v1",
         "job_id": job_id,
-        "kind": "pose-estimation",
+        "kind": "estimation",
         "state": "succeeded",
         "status": "succeeded",
-        "payload": {"run_root": run.as_posix()},
+        "payload": {
+            "run_root": run.as_posix(),
+            "estimator_id": "foundationpose",
+            "driver_id": "foundationpose.v1",
+            "runtime_id": "foundationpose-a1b694b8",
+        },
         "result": {
             "filename": result.name,
             "sha256": result_hash,
@@ -695,6 +774,8 @@ def _successful_external_job(
                 provenance_path.read_bytes()
             ).hexdigest(),
             "dataset_sha256": dataset["dataset_sha256"],
+            "estimator_id": "foundationpose",
+            "runtime_id": "foundationpose-a1b694b8",
             "estimate_count": 1,
             "failure_count": 0,
         },
@@ -717,9 +798,7 @@ def _successful_generic_external_job(
         "driver_id": "megapose.v1",
         "runtime_id": "megapose-fixture",
         "container": {"filename": "megapose.sif", "sha256": "1" * 64},
-        "assets": {
-            "weights": {"filename": "weights.json", "sha256": "2" * 64}
-        },
+        "assets": {"weights": {"filename": "weights.json", "sha256": "2" * 64}},
         "source_revisions": {"megapose": "abcdef0123456789"},
         "build_provenance": {"base_image_digest": f"sha256:{'3' * 64}"},
         "licenses": [{"name": "Fixture license", "sha256": "4" * 64}],

@@ -47,9 +47,17 @@ def bop_annotations_setup():
 def queue_bop_annotations():
     try:
         value = _json_object()
+        if set(value) != {"run_root", "mode"}:
+            raise ValueError(
+                "Ground-truth request fields must be exactly run_root and mode"
+            )
         run_root = resolve_web_run_root(value.get("run_root"))
         mode = validate_annotation_mode(value.get("mode"))
         setup = inspect_annotation_setup(run_root, app_root=APP_ROOT)
+        if setup.get("configured_mode") != mode:
+            raise ValueError(
+                "Requested ground-truth mode does not match run_config.json"
+            )
         readiness = setup["readiness_by_mode"][mode]
         if not readiness["ready"]:
             message = "; ".join(str(item["message"]) for item in readiness["blockers"])

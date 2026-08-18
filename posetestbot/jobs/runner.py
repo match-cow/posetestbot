@@ -42,8 +42,7 @@ TAIL_PERSIST_INTERVAL_SECONDS = 0.25
 RUN_SCOPE = "run"
 LIBRARY_SCOPE = "library"
 GLOBAL_SCOPE = "global"
-UNKNOWN_SCOPE = "unknown"
-JOB_SCOPE_KINDS = {RUN_SCOPE, LIBRARY_SCOPE, GLOBAL_SCOPE, UNKNOWN_SCOPE}
+JOB_SCOPE_KINDS = {RUN_SCOPE, LIBRARY_SCOPE, GLOBAL_SCOPE}
 DEFAULT_JOB_PAGE_LIMIT = 50
 MAX_JOB_PAGE_LIMIT = 100
 JOB_INDEX_FILENAME = "index.sqlite3"
@@ -69,7 +68,7 @@ def _resolve_supervised_command(
     return resolved
 
 
-@dataclass
+@dataclass(kw_only=True)
 class JobRecord:
     id: str
     name: str
@@ -94,7 +93,7 @@ class JobRecord:
     supervisor_process_group_id: int | None = None
     supervisor_start_time: int | None = None
     visibility: str = OPERATOR_VISIBILITY
-    scope_kind: str = UNKNOWN_SCOPE
+    scope_kind: str
     run_root: str | None = None
 
     def to_dict(self) -> dict:
@@ -244,17 +243,14 @@ class LocalJobRunner:
         """Return active work plus one stable keyset page of terminal history."""
 
         if isinstance(limit, bool) or not 1 <= int(limit) <= MAX_JOB_PAGE_LIMIT:
-            raise ValueError(
-                f"limit must be an integer from 1 to {MAX_JOB_PAGE_LIMIT}"
-            )
+            raise ValueError(f"limit must be an integer from 1 to {MAX_JOB_PAGE_LIMIT}")
         limit = int(limit)
         normalized_statuses = self._normalize_filter_values(statuses)
         normalized_scopes = self._normalize_filter_values(scope_kinds)
         invalid_scopes = set(normalized_scopes) - JOB_SCOPE_KINDS
         if invalid_scopes:
             raise ValueError(
-                "scope_kind must contain only: "
-                + ", ".join(sorted(JOB_SCOPE_KINDS))
+                "scope_kind must contain only: " + ", ".join(sorted(JOB_SCOPE_KINDS))
             )
         normalized_run_root = (
             Path(run_root).resolve().as_posix() if run_root is not None else None
@@ -292,9 +288,7 @@ class LocalJobRunner:
                         parameters,
                     ).fetchone()[0]
                 )
-                counts_where_sql = (
-                    " AND ".join(base_where) if base_where else "1 = 1"
-                )
+                counts_where_sql = " AND ".join(base_where) if base_where else "1 = 1"
                 status_counts = {
                     str(row[0]): int(row[1])
                     for row in connection.execute(
@@ -318,9 +312,7 @@ class LocalJobRunner:
                     terminal_where.append(
                         "(created_at < ? OR (created_at = ? AND id < ?))"
                     )
-                    terminal_parameters.extend(
-                        [after[0], after[0], after[1]]
-                    )
+                    terminal_parameters.extend([after[0], after[0], after[1]])
                 terminal_rows = connection.execute(
                     "SELECT id, created_at FROM jobs WHERE "
                     + " AND ".join(terminal_where)
@@ -416,8 +408,7 @@ class LocalJobRunner:
             active_ids = [
                 job.id
                 for job in self._jobs.values()
-                if job.id in self._local_job_ids
-                and job.status not in TERMINAL_STATUSES
+                if job.id in self._local_job_ids and job.status not in TERMINAL_STATUSES
             ]
         processes: dict[str, subprocess.Popen] = {}
         with self._lock:
@@ -483,8 +474,7 @@ class LocalJobRunner:
                     return
                 encoded = value.encode("utf-8", errors="replace")
                 marker = (
-                    "\n[PoseTestBot job log truncated at "
-                    f"{self.max_log_bytes} bytes]\n"
+                    f"\n[PoseTestBot job log truncated at {self.max_log_bytes} bytes]\n"
                 ).encode("utf-8")
                 data_limit = max(0, self.max_log_bytes - len(marker))
                 remaining = data_limit - log_bytes
@@ -556,7 +546,9 @@ class LocalJobRunner:
                 current.supervisor_process_group_id = (
                     os.getpgid(process.pid) if os.name != "nt" else process.pid
                 )
-                current.supervisor_start_time = self._read_process_start_time(process.pid)
+                current.supervisor_start_time = self._read_process_start_time(
+                    process.pid
+                )
                 self._persist_job(current)
                 should_terminate = self._jobs[job_id].status in {
                     CANCELED,
@@ -632,7 +624,10 @@ class LocalJobRunner:
         job.tail.append(self._bounded_tail_line(line))
         if len(job.tail) > self.tail_limit:
             del job.tail[: len(job.tail) - self.tail_limit]
-        while len(job.tail) > 1 and sum(len(item) for item in job.tail) > self.max_tail_chars:
+        while (
+            len(job.tail) > 1
+            and sum(len(item) for item in job.tail) > self.max_tail_chars
+        ):
             del job.tail[0]
 
     def _bounded_tail_line(self, line: str) -> str:
@@ -838,13 +833,17 @@ class LocalJobRunner:
         job_data.setdefault("supervisor_process_group_id", None)
         job_data.setdefault("supervisor_start_time", None)
         job_data.setdefault("visibility", OPERATOR_VISIBILITY)
-        job_data.setdefault("scope_kind", UNKNOWN_SCOPE)
         job_data.setdefault("run_root", None)
-        if job_data["scope_kind"] not in JOB_SCOPE_KINDS:
-            job_data["scope_kind"] = UNKNOWN_SCOPE
-            job_data["run_root"] = None
-        if job_data["scope_kind"] != RUN_SCOPE:
-            job_data["run_root"] = None
+        scope_kind = job_data.get("scope_kind")
+        if scope_kind not in JOB_SCOPE_KINDS:
+            raise ValueError("Persisted job has no current scope_kind")
+        if scope_kind == RUN_SCOPE:
+            run_root = job_data.get("run_root")
+            if not isinstance(run_root, str) or not run_root.strip():
+                raise ValueError("Run-scoped persisted job has no run_root")
+            job_data["run_root"] = Path(run_root).resolve().as_posix()
+        elif job_data.get("run_root") is not None:
+            raise ValueError("Non-run persisted job contains run_root")
         return JobRecord(**job_data)
 
     @staticmethod
@@ -964,19 +963,17 @@ class LocalJobRunner:
         scope_kind: str,
         run_root: str | Path | None,
     ) -> str | None:
-        if scope_kind not in JOB_SCOPE_KINDS - {UNKNOWN_SCOPE}:
+        if scope_kind not in JOB_SCOPE_KINDS:
             raise ValueError(
                 "scope_kind for a new job must be one of: "
-                + ", ".join(sorted(JOB_SCOPE_KINDS - {UNKNOWN_SCOPE}))
+                + ", ".join(sorted(JOB_SCOPE_KINDS))
             )
         if scope_kind == RUN_SCOPE:
             if run_root is None or not str(run_root).strip():
                 raise ValueError("run_root is required when scope_kind='run'")
             return Path(run_root).resolve().as_posix()
         if run_root is not None:
-            raise ValueError(
-                "run_root is only valid when scope_kind='run'"
-            )
+            raise ValueError("run_root is only valid when scope_kind='run'")
         return None
 
     @staticmethod
@@ -987,11 +984,7 @@ class LocalJobRunner:
             return ()
         return tuple(
             sorted(
-                {
-                    str(value).strip().lower()
-                    for value in values
-                    if str(value).strip()
-                }
+                {str(value).strip().lower() for value in values if str(value).strip()}
             )
         )
 
@@ -1147,8 +1140,7 @@ class LocalJobRunner:
             """
         )
         connection.execute(
-            "CREATE INDEX jobs_history_order "
-            "ON jobs(status, created_at DESC, id DESC)"
+            "CREATE INDEX jobs_history_order ON jobs(status, created_at DESC, id DESC)"
         )
         connection.execute(
             "CREATE INDEX jobs_scope_run "

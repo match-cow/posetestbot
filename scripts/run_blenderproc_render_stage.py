@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--annotation-mode",
         choices=("pose", "pose_and_masks"),
-        default="pose_and_masks",
+        required=True,
         help=(
             "Publish analytic pose GT only, or pose GT for a later official "
             "BOP Toolkit depth-mask step. BlenderProc does not render masks."

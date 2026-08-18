@@ -91,7 +91,6 @@ def _profile(
         ),
         "timestamp_fallback_allowed": False,
         "max_nearest_pose_delta_ms": max_nearest_pose_delta_ms,
-        "historical_per_sensor_offsets_allowed": False,
         "auto_estimated_per_sensor_offset": True,
         "sensor_key": sensor_key,
         "quality_report": (
@@ -191,6 +190,8 @@ def _selected_run(
     write_run_config(
         source,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
             run_root=source,
             sensors=sensors,
             run_name="Calibration source",
@@ -199,9 +200,10 @@ def _selected_run(
     write_run_config(
         run_root,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
             run_root=run_root,
             sensors=sensors,
-            sequence_id="calibrated_capture_to_bop_dataset_dry_run",
         ),
     )
     library = list_calibration_library(run_root)
@@ -231,9 +233,10 @@ def _selected_run(
     write_run_config(
         run_root,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
             run_root=run_root,
             sensors=configured_sensors,
-            sequence_id="calibrated_capture_to_bop_dataset_dry_run",
             calibration_profiles=selected["calibration_profiles"],
             intrinsic_calibration_profiles=selected["intrinsic_calibration_profiles"],
             calibration_profile_selection={
@@ -253,6 +256,8 @@ def test_profile_sync_policy_preserves_manual_mode_without_selection(
     write_run_config(
         run_root,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
             run_root=run_root,
             sensors=(_sensor("manual-1"),),
             calibration_profiles="operator_profiles.json",
@@ -434,7 +439,7 @@ def test_profile_sync_policy_rejects_duplicate_current_sensor_identity(
     config["capture"]["sensors"].append(dict(config["capture"]["sensors"][0]))
     atomic_write_json(config_path, config)
 
-    with pytest.raises(ValueError, match="duplicate sensor identity"):
+    with pytest.raises(ValueError, match="repeat identity"):
         resolve_calibration_profile_sync_policy(run_root)
 
 

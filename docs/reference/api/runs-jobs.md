@@ -40,7 +40,6 @@ explicit confirmation contract exposed by the console.
 | `GET /jobs/<job_id>` | Return one job snapshot |
 | `GET /jobs/<job_id>/log` | Return the bounded plain-text job log |
 | `POST /jobs/<job_id>/cancel` | Request cooperative cancellation when the job contract permits it |
-| `POST /run-command` | Queue one allow-listed manual command; no arbitrary command string is accepted |
 
 Queued domain APIs generally return:
 
@@ -63,5 +62,6 @@ was recorded; clients should poll until terminal. Committed storage operations
 may deliberately set `cancelable: false` and return `409` rather than risk a
 half-applied filesystem mutation.
 
+Robot Start/Stop uses the purpose-specific `POST /robot/commands` contract.
 The local runner is not a general remote scheduler. External archive and
 estimator jobs are exposed through the narrow [cluster API](bop-cluster.md).

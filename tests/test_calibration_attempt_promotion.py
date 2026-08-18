@@ -38,13 +38,8 @@ from posetestbot.calibration.target_library import (
     select_target_bundle,
 )
 from posetestbot.io.artifacts import (
-    CALIBRATION_CANDIDATES,
-    CALIBRATION_OBSERVATIONS,
     CALIBRATION_PROFILES,
-    CALIBRATION_PROFILES_SOLVED,
-    CALIBRATION_SOLVER_REPORT,
     CALIBRATION_TARGET,
-    CALIBRATION_VALIDATION_REPORT,
     DEPTH_DIR,
     FRAME_METADATA_JSONL,
     RGB_DIR,
@@ -57,12 +52,9 @@ from posetestbot.pipeline.run_config import (
     sensor_configs_from_values,
     write_run_config_with_manifest,
 )
-from posetestbot.pipeline.rewrite_gate import (
-    build_calibration_validation_gate_report,
-)
 from posetestbot.robot.reference_frames import POSE_TEMPLATE_BASE_SUNRISE_PATH
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
-from posetestbot.sensors.frame_writer import write_legacy_camera_sidecars
+from posetestbot.sensors.frame_writer import write_camera_sidecars
 
 
 def _configuration() -> dict:
@@ -86,15 +78,26 @@ def _write_capture_folder(path: Path) -> None:
     (path / FRAME_METADATA_JSONL).write_text(
         json.dumps(
             {
+                "schema_version": "frame_metadata.v1",
+                "sensor_type": (
+                    "realsense_d435"
+                    if path.name.startswith("realsense_")
+                    else "oak_d_pro"
+                ),
+                "sensor_id": path.name.split("_", 1)[1],
+                "frame_index": 0,
                 "frame_id": "1000.png",
+                "rgb_path": "rgb/1000.png",
+                "depth_path": "depth/1000.png",
                 "host_received_timestamp_ns": 1_000_000_000,
+                "host_wall_timestamp_ns": 10_000_000_000,
                 "sensor_timestamp_ns": 10_000_000_000,
                 "color_timestamp_domain": "global_time",
             }
         )
         + "\n"
     )
-    write_legacy_camera_sidecars(
+    write_camera_sidecars(
         path,
         CameraIntrinsics(
             cam_k=(600.0, 0.0, 4.0, 0.0, 600.0, 4.0, 0.0, 0.0, 1.0),
@@ -205,7 +208,6 @@ def _write_fixed_zero_time_offset_evidence(
                     "time_offset_search": source_reference,
                     "sign_convention": attempt_module.time_offset_sign_convention(),
                     "per_sensor_offsets": per_sensor_offsets,
-                    "historical_per_sensor_offsets_allowed": False,
                     "auto_estimated_per_sensor_offsets": False,
                     "timing_warning_sensor_keys": [],
                     "warning_fallback_sensor_keys": [],
@@ -213,10 +215,10 @@ def _write_fixed_zero_time_offset_evidence(
             }
         )
     )
-    (attempt_root / CALIBRATION_OBSERVATIONS).write_text(
+    (attempt_root / attempt_module.OBSERVATIONS_FILE).write_text(
         json.dumps(
             {
-                "schema_version": "calibration_observations.v1",
+                "schema_version": "calibration_attempt_observations.v1",
                 "run_root": run_root.as_posix(),
                 "attempt_id": attempt_id,
                 "overall_status": "ok",
@@ -422,6 +424,8 @@ def test_historical_attempt_cannot_be_promoted(
     write_run_config_with_manifest(
         run_root,
         create_run_config(
+            capture_intent="calibration",
+            bop_annotation_mode="none",
             run_root=run_root,
             sensors=sensor_configs_from_values(
                 [
@@ -433,7 +437,6 @@ def test_historical_attempt_cannot_be_promoted(
                     }
                 ]
             ),
-            robot_pose_sunrise_reference_frame_path=(POSE_TEMPLATE_BASE_SUNRISE_PATH),
         ),
     )
     attempt_id = "a" * 32
@@ -459,7 +462,7 @@ def test_historical_attempt_cannot_be_promoted(
     )
 
     with pytest.raises(
-        ValueError, match="Historical calibration attempts are read-only"
+        ValueError, match="Unsupported calibration attempt request schema"
     ):
         promote_calibration_attempt(run_root, attempt_id)
 
@@ -581,9 +584,7 @@ def _failing_motion_consistency_evidence(
     hypothesis_count: int,
     candidate_offset_ms: float,
 ) -> dict:
-    evidence = _passing_motion_consistency_evidence(
-        hypothesis_count=hypothesis_count
-    )
+    evidence = _passing_motion_consistency_evidence(hypothesis_count=hypothesis_count)
     motion_count = evidence["motion_count"]
     evidence["status"] = "error"
     evidence["candidate_robot_pose_time_offset_ms"] = candidate_offset_ms
@@ -692,7 +693,7 @@ def test_report_backed_applied_auto_offset_evidence_is_promotable(
     }
     quality_path.write_text(json.dumps(quality))
 
-    observations_path = attempt_root / CALIBRATION_OBSERVATIONS
+    observations_path = attempt_root / attempt_module.OBSERVATIONS_FILE
     observations = json.loads(observations_path.read_text())
     observations["synchronization_policy"] = "auto_offset"
     observation = observations["observations"][0]
@@ -758,19 +759,15 @@ def _report_backed_ambiguous_auto_offset_attempt(
                             "original_status": "error",
                             "actual": (
                                 {
-                                    "motion_count": motion_consistency[
-                                        "motion_count"
-                                    ],
+                                    "motion_count": motion_consistency["motion_count"],
                                     "methods": motion_consistency["methods"],
                                 }
-                                if name
-                                == "leave_one_motion_out_timing_consistency"
+                                if name == "leave_one_motion_out_timing_consistency"
                                 else 110.0
                             ),
                             "threshold": (
                                 motion_consistency["thresholds"]
-                                if name
-                                == "leave_one_motion_out_timing_consistency"
+                                if name == "leave_one_motion_out_timing_consistency"
                                 else 20.0
                             ),
                             "fallback": "recorded timing retained at 0 ms",
@@ -839,9 +836,7 @@ def test_report_backed_ambiguous_auto_offset_tampering_blocks_promotion(
     if tamper_mode == "candidate_sign":
         sensor["candidate_sync_delta_ms"] = 30.0
     elif tamper_mode == "motion_summary":
-        sensor["motion_consistency"]["methods"]["shah"][
-            "positive_motion_count"
-        ] = 1
+        sensor["motion_consistency"]["methods"]["shah"]["positive_motion_count"] = 1
     else:
         quality_path = attempt_root / SYNC_QUALITY_REPORT
         quality = json.loads(quality_path.read_text())
@@ -876,7 +871,7 @@ def test_report_backed_fixed_zero_time_offset_tampering_blocks_promotion(
         ] = 1.0
         path.write_text(json.dumps(value))
     elif tamper_mode == "observation_source":
-        path = attempt_root / CALIBRATION_OBSERVATIONS
+        path = attempt_root / attempt_module.OBSERVATIONS_FILE
         value = json.loads(path.read_text())
         value["observations"][0]["timestamp_alignment"]["source"] = (
             "processed/calibration/other/time_offset_search.json"
@@ -901,18 +896,12 @@ def test_report_backed_fixed_zero_time_offset_tampering_blocks_promotion(
         attempt_module._promotion_time_offset_evidence(attempt)
 
 
-@pytest.mark.parametrize(
-    "tamper_mode",
-    [
-        None,
-        "candidate_profile_binding",
-        "target_selection",
-    ],
-)
-def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected_camera(
+def _exercise_promotion_transaction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     tamper_mode: str | None,
+    *,
+    sdk_inverse_projection: bool = True,
 ) -> None:
     run_root = tmp_path / "run"
     configured = sensor_configs_from_values(
@@ -934,7 +923,12 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
     )
     write_run_config_with_manifest(
         run_root,
-        create_run_config(run_root=run_root, sensors=configured),
+        create_run_config(
+            capture_intent="calibration",
+            bop_annotation_mode="none",
+            run_root=run_root,
+            sensors=configured,
+        ),
     )
     library = tmp_path / "library"
     bundle = generate_target_bundle(
@@ -952,6 +946,7 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
     )
     _write_capture_folder(run_root / "realsense_1")
     _write_capture_folder(run_root / "luxonis_2")
+    run_id = load_run_config_for_run_root(run_root)["run_id"]
     (run_root / "raw_robot_ee_poses.json").write_text(
         json.dumps(
             {
@@ -959,6 +954,14 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
                     "motion": "pose_0",
                     "framename": 1000,
                     "host_wall_timestamp_ns": 10_000_000_000,
+                    "source_packet": {
+                        "schema_version": "robot_pose.v1",
+                        "packet_kind": "pose",
+                        "run_id": run_id,
+                        "from_frame": "robot_flange",
+                        "to_frame": "template_base",
+                        "sunrise_reference_frame_path": POSE_TEMPLATE_BASE_SUNRISE_PATH,
+                    },
                     "pose": {
                         "X": 0.0,
                         "Y": 0.0,
@@ -1011,13 +1014,17 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
         "robot_pose_time_offset_ms": 0.0,
         "sync_delta_ms": 0.0,
     }
+    if sdk_inverse_projection:
+        candidate = replace(
+            candidate,
+            intrinsics=replace(
+                candidate.intrinsics,
+                distortion_model="inverse_brown_conrady",
+                projection_source="realsense_sdk_color_stream",
+            ),
+        )
     candidate = replace(
         candidate,
-        intrinsics=replace(
-            candidate.intrinsics,
-            distortion_model="inverse_brown_conrady",
-            projection_source="realsense_sdk_color_stream",
-        ),
         metadata={
             **candidate.metadata,
             "synchronization": synchronization,
@@ -1169,11 +1176,11 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
     if tamper_mode == "target_selection":
         config_path = run_root / "run_config.json"
         config = json.loads(config_path.read_text())
-        config["calibration_target"]["operator_note"] = "changed after attempt"
+        config["calibration_target"]["source_sha256"] = "f" * 64
         config_path.write_text(json.dumps(config))
         with pytest.raises(
             CalibrationTargetConflict,
-            match="selection changed after this attempt",
+            match="evidence changed after this attempt",
         ):
             promote_calibration_attempt(run_root, attempt_id)
         assert {
@@ -1186,10 +1193,7 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
         config = json.loads(config_path.read_text())
         config["calibration_target"]["placement"].pop("mounting_frame")
         config_path.write_text(json.dumps(config))
-        with pytest.raises(
-            CalibrationTargetConflict,
-            match="evidence changed after this attempt",
-        ):
+        with pytest.raises(ValueError, match="mounting_frame must be"):
             promote_calibration_attempt(run_root, attempt_id)
         assert {
             profile.profile_id
@@ -1212,7 +1216,9 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
     )
     assert promoted.status == CalibrationStatus.VALID
     assert promoted.operator == "test-operator"
-    assert promoted.intrinsics.distortion_model == "inverse_brown_conrady"
+    assert promoted.intrinsics.distortion_model == (
+        "inverse_brown_conrady" if sdk_inverse_projection else "brown_conrady"
+    )
     assert promoted.rectified_intrinsics is not None
     assert promoted.sync_delta_ms == 0.0
     canonical = json.loads((run_root / CALIBRATION_PROFILES).read_text())
@@ -1254,14 +1260,41 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
         json.loads((run_root / CALIBRATION_TARGET).read_text())["placement"]
         == (requested_placement["transform"])
     )
-    for filename in (
-        CALIBRATION_CANDIDATES,
-        CALIBRATION_SOLVER_REPORT,
-        CALIBRATION_PROFILES_SOLVED,
-        CALIBRATION_VALIDATION_REPORT,
-    ):
-        assert (run_root / filename).is_file()
-    validation = json.loads((run_root / CALIBRATION_VALIDATION_REPORT).read_text())
-    assert validation["promotion"]["profile_count"] == 2
-    gate = build_calibration_validation_gate_report(run_root)
-    assert gate["overall_status"] == "ready"
+    assert (run_root / CALIBRATION_PROFILES).is_file()
+    assert (attempt_root / attempt_module.CANDIDATE_PROFILES_FILE).is_file()
+    assert (attempt_root / attempt_module.CHECKS_FILE).is_file()
+
+
+def prepare_promoted_calibration_for_workflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Create one fully promoted synthetic calibration for workflow tests."""
+
+    _exercise_promotion_transaction(
+        tmp_path,
+        monkeypatch,
+        None,
+        sdk_inverse_projection=False,
+    )
+    return tmp_path / "run"
+
+
+@pytest.mark.parametrize(
+    "tamper_mode",
+    [
+        None,
+        "candidate_profile_binding",
+        "candidate_profile_transform",
+        "promotion_status_selection",
+        "robot_pose_artifact",
+        "request_robot_pose_reference",
+        "target_selection",
+        "legacy_target_selection",
+    ],
+)
+def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected_camera(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper_mode: str | None,
+) -> None:
+    _exercise_promotion_transaction(tmp_path, monkeypatch, tamper_mode)

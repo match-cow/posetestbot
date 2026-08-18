@@ -35,7 +35,7 @@ def test_sensor_adapter_registry_lists_supported_capture_scripts() -> None:
 def test_sensor_registry_builds_folder_names_and_uv_capture_commands() -> None:
     assert sensor_folder_name(SensorType.REALSENSE_D435, "123") == "realsense_123"
     assert sensor_folder_name(SensorType.OAK_D_PRO, "auto") == "luxonis_auto"
-    assert sensor_folder_name(SensorType.ZED_2I, "default") == "zed_2i_auto"
+    assert sensor_folder_name(SensorType.ZED_2I, "default") == "zed_2i_default"
 
     realsense_command = build_sensor_capture_command(
         sensor_type=SensorType.REALSENSE_D435,

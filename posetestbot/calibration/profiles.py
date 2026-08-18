@@ -1,4 +1,4 @@
-"""Typed calibration profile contract for rewrite-era sensor calibration."""
+"""Typed calibration profile contract for current sensor calibration."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from posetestbot.robot.reference_frames import (
     verified_sunrise_reference_frame_path,
 )
 from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, SensorType
+from posetestbot.sensors.registry import SENSOR_ADAPTERS
 
 SCHEMA_VERSION = "calibration.v2"
 QUATERNION_NORM_TOLERANCE = 1e-3
@@ -46,10 +47,6 @@ class TransformFrame(StrEnum):
     ARUCO_GRID = "aruco_grid"
     TCP = "tcp"
     PHYSICAL_ROBOT_BASE = "physical_robot_base"
-    # Source-compatible enum aliases retained for internal call sites.
-    END_EFFECTOR = "robot_flange"
-    ROBOT_BASE = "template_base"
-    CELL_WORLD = "template_base"
 
 
 @dataclass(frozen=True)
@@ -511,59 +508,25 @@ def validate_profile_collection(profiles: Iterable[CalibrationProfile]) -> None:
         valid_slots[slot] = profile.profile_id
 
 
-def legacy_sensor_key_for_type(sensor_type: SensorType) -> str:
-    if sensor_type == SensorType.REALSENSE_D435:
-        return "realsense"
-    if sensor_type == SensorType.OAK_D_PRO:
-        return "luxonis"
-    if sensor_type == SensorType.ZED_2I:
-        return "zed_2i"
-    return sensor_type.value
-
-
 def sensor_identity_from_folder_name(sensor_name: str) -> tuple[SensorType | None, str]:
-    name = sensor_name.lower()
-    if name.startswith("realsense_"):
-        return SensorType.REALSENSE_D435, sensor_name[len("realsense_") :]
-    if name.startswith("realsense"):
-        return SensorType.REALSENSE_D435, sensor_name
-    if name.startswith("luxonis_"):
-        return SensorType.OAK_D_PRO, sensor_name[len("luxonis_") :]
-    if name.startswith("oak_"):
-        return SensorType.OAK_D_PRO, sensor_name[len("oak_") :]
-    if name.startswith("luxonis") or name.startswith("oak"):
-        return SensorType.OAK_D_PRO, sensor_name
-    if name.startswith("zed_2i_"):
-        return SensorType.ZED_2I, sensor_name[len("zed_2i_") :]
-    if name.startswith("zed_"):
-        return SensorType.ZED_2I, sensor_name[len("zed_") :]
-    if name.startswith("zed"):
-        return SensorType.ZED_2I, sensor_name
+    exact_key = sensor_name.split(":", 1)
+    if len(exact_key) == 2 and exact_key[1]:
+        try:
+            return SensorType(exact_key[0]), exact_key[1]
+        except ValueError:
+            return None, sensor_name
+    for sensor_type, adapter in SENSOR_ADAPTERS.items():
+        prefix = f"{adapter.folder_prefix}_"
+        if sensor_name.startswith(prefix) and len(sensor_name) > len(prefix):
+            return sensor_type, sensor_name[len(prefix) :]
     return None, sensor_name
 
 
 def _profile_match_score(profile: CalibrationProfile, sensor_name: str) -> int | None:
     sensor_type, device_id = sensor_identity_from_folder_name(sensor_name)
-    if sensor_type is not None and profile.sensor_type != sensor_type:
+    if sensor_type is None or profile.sensor_type != sensor_type:
         return None
-
-    legacy_key = legacy_sensor_key_for_type(profile.sensor_type)
-    legacy_metadata_key = profile.metadata.get("legacy_sensor_key")
-    candidates = {
-        profile.sensor_id: 90,
-        profile.profile_id: 80,
-        str(legacy_metadata_key): 70 if legacy_metadata_key else 0,
-        legacy_key: 60,
-    }
-    if profile.sensor_id == sensor_name:
-        return 100
-    if profile.sensor_id == device_id:
-        return 95
-    if sensor_name in candidates:
-        return candidates[sensor_name]
-    if device_id in candidates:
-        return candidates[device_id]
-    return candidates.get(legacy_key) if profile.sensor_id == legacy_key else None
+    return 100 if profile.sensor_id == device_id else None
 
 
 def select_profile_for_sensor(
@@ -628,12 +591,7 @@ def select_valid_profile_for_sensor(
 def require_static_profile_pose_template_base(
     profile: CalibrationProfile,
 ) -> None:
-    """Require a reusable static profile to be proven in PoseTemplateBase.
-
-    Legacy/static candidate profiles remain loadable for inspection, but they
-    cannot be selected for dataset preparation or promoted through the legacy
-    validation path without verified robot-pose frame provenance.
-    """
+    """Require a reusable static profile to be proven in PoseTemplateBase."""
 
     if profile.mounting_mode != MountingMode.STATIC:
         return
@@ -652,8 +610,7 @@ def require_static_profile_pose_template_base(
             f"Static calibration profile {profile.profile_id} cannot be reused: "
             "camera-to-template_base must be backed by verified robot_pose.v1 "
             f"poses in {POSE_TEMPLATE_BASE_SUNRISE_PATH!r}; found {actual!r}. "
-            "Use the guided static-camera workflow instead of the legacy "
-            "known-target stages."
+            "Create and promote a current guided calibration."
         )
 
 

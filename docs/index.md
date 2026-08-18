@@ -53,7 +53,7 @@ evidence.
 | --- | --- | --- |
 | Operator console | Desktop-first supervised lab workflow | [Operator workflows](OPERATOR_WORKFLOWS.md) |
 | Flask HTTP API | Trusted-LAN JSON/file interface used by the console | [API conventions](reference/http-api.md) |
-| Command-line scripts | Status, planning, stage execution, and validation | [CLI and scripts](reference/cli.md) |
+| Command-line scripts | Status and fixed capture/processing recipes | [CLI and scripts](reference/cli.md) |
 | Run directory | Immutable inputs and reproducible raw/derived artifacts | [Runs and artifact lineage](concepts/runs-and-artifacts.md) |
 
 ## Current hardware profile
@@ -75,4 +75,4 @@ robot.
 - Understand process and trust boundaries: [Architecture and boundaries](concepts/architecture.md)
 - Find an HTTP endpoint: [Complete route index](reference/http-api-routes.md)
 - Inspect the run file contract: [Artifact index](reference/artifacts.md)
-- Check work still requiring physical validation: [Remaining work](REWRITE_REMAINING_WORK.md)
+- Review the five operator-run acceptance tasks: [Physical commissioning](COMMISSIONING.md)

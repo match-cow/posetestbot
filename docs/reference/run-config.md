@@ -1,38 +1,41 @@
-# Run configuration (`run_config.v3`)
+# Run configuration (`run_config.v4`)
 
-`run_config.json` records run intent. It selects sensors, frame conventions,
-dataset mode, immutable calibration/template inputs, and the default pipeline
-sequence. It does **not** persist physical execution authorization.
+`run_config.json` is the current run-intent contract. PoseTestBot accepts
+exactly `run_config.v4`; it does not migrate v3 or accept a generic pipeline
+section. Physical execution acknowledgements are deliberately absent and must
+be submitted afresh for each capture request.
 
 ## Top-level fields
 
 | Field | Contract |
 | --- | --- |
-| `schema_version` | Exactly `run_config.v3` |
-| `run_name` | Human-readable run name |
-| `run_root` | Run directory, subject to web containment when used through HTTP |
-| `robot_profile` | Sole real-lab iiwa profile; `mode` must be `real` |
-| `capture` | Resolution, FPS, velocity, participating sensors, and synchronization |
-| `frames` | Robot-pose convention, dataset reference frame, and fixed transforms |
+| `schema_version` | Exactly `run_config.v4` |
+| `run_id` | Immutable UUID bound into robot-pose packets and run artifacts |
+| `run_name` | Nonempty operator-facing name |
+| `run_root` | Owning directory; web requests also enforce approved-root containment |
+| `robot_profile` | Exact sole lab profile, including fixed robot and receiver endpoints |
+| `capture` | Explicit intent, sensor contract, resolution, rate, velocity, and synchronization |
+| `frames` | Robot reference-frame provenance, dataset frame, and typed fixed transforms |
 | `dataset_mode` | `objectless` or `pose_template` |
-| `pose_template` | Run-owned selection reference for `pose_template` mode, otherwise `null` |
-| `calibration_profiles` | Path to exact run-selected extrinsic profiles or `null` |
-| `intrinsic_calibration_profiles` | Path to exact run-selected intrinsic profiles or `null` |
-| `calibration_profile_selection` | Hash-bound selection metadata or `null` |
-| `calibration_target` | Hash-bound run-owned target selection or `null` |
-| `pipeline` | Registered sequence, plan-only flag, and validated options |
+| `pose_template` | Run-owned selection reference for pose-template datasets, otherwise `null` |
+| `calibration_profiles` | Exact run-owned extrinsic-profile snapshot path or `null` |
+| `intrinsic_calibration_profiles` | Exact run-owned intrinsic-profile snapshot path or `null` |
+| `calibration_profile_selection` | Hash-bound v2 selection pointer or `null` |
+| `calibration_target` | Hash-bound selected target bundle or `null` |
+| `bop` | Explicit eventual annotation mode |
 
-Retired legacy fields such as `object_folder` and `selected_objects` are
-rejected instead of silently migrated.
+Unknown or retired fields, including `pipeline`, `object_folder`, and
+`selected_objects`, are rejected.
 
-## Capture section
+## Capture contract
 
 ```json
 {
   "capture": {
+    "intent": "dataset",
     "resolution": "720p",
     "fps": 6,
-    "velocity_m_s": 0.1,
+    "velocity_m_s": 0.01,
     "sensors": [
       {
         "sensor_type": "realsense_d435",
@@ -54,17 +57,19 @@ rejected instead of silently migrated.
 }
 ```
 
-At least one sensor must be enabled. Sensor type, mounting mode, resolution,
-orientation, and device ID are checked against registered contracts. The only
-supported synchronization object contains exactly the schema and
-`timestamp_aligned` mode; roles, group IDs, triggers, scopes, and alternative
-implementations are rejected.
+`intent` is exactly `calibration` or `dataset`. At least one sensor is enabled.
+Sensor types must be exact registry identifiers: `realsense_d435`,
+`oak_d_pro`, or `zed_2i`. Short aliases are rejected. Device identity,
+mounting, supported resolution, and RealSense-only inversion are validated.
 
-`operator_alias` is the run-owned label. `display_name` remains its effective
-compatibility value. Neither field changes sensor physical identity or output
-folder naming.
+The synchronization object has exactly the two shown fields. Every camera
+must provide current timestamp metadata; filename timestamps and missing-value
+fallbacks are not accepted.
 
-## Frame section
+`operator_alias` is the run-owned label. `display_name` is the effective label
+snapshotted for the run. Neither changes physical identity or folder naming.
+
+## Frames and fixed transforms
 
 ```json
 {
@@ -72,7 +77,8 @@ folder naming.
     "robot_pose": {
       "from": "robot_flange",
       "to": "template_base",
-      "convention": "kuka_abc_radians"
+      "convention": "kuka_abc_radians",
+      "sunrise_reference_frame_path": "/PoseTestBot/PoseTemplateBase"
     },
     "dataset_reference_frame": "template_base",
     "fixed_transforms": []
@@ -80,57 +86,36 @@ folder naming.
 }
 ```
 
-Each fixed transform requires `from`, `to`, a normalized
-`rotation_quaternion_wxyz` with four finite values, and `translation_mm` with
-three finite values. The source defaults to `operator_configured`.
+Robot-pose reference metadata must agree with strict `robot_pose.v1` packets.
+Each fixed transform has `from`, `to`, a normalized four-value
+`rotation_quaternion_wxyz`, a three-value `translation_mm`, and an explicit or
+default `source`.
 
-## Dataset and immutable selections
+## Immutable selections
 
-`objectless` mode cannot reference a pose template. `pose_template` mode uses:
+`pose_template` datasets reference `pose_template_selection.json`; objectless
+runs must keep `pose_template` null. Reusable calibration selection always
+uses `calibration_profile_selection.v2` and exact snapshots below
+`processed/calibration_inputs/<bundle_sha256>/`. Target and pose-template
+selection APIs write their own hash-bound objects; clients should not invent
+asset paths or hashes.
 
-```json
-{
-  "dataset_mode": "pose_template",
-  "pose_template": {
-    "selection_artifact": "pose_template_selection.json"
-  }
-}
-```
-
-Calibration selection metadata must reference
-`calibration_profile_selection.json`, contain a lowercase SHA-256
-`bundle_sha256`, and supply both exact profile paths. A selected target records
-its target ID, run-relative bundle path, source/spec/PDF/configuration/geometry
-hashes, and validated placement.
-
-These objects are written by their domain selection APIs. Clients should not
-fabricate hashes or paths.
-
-## Pipeline section
-
-```json
-{
-  "pipeline": {
-    "sequence_id": "real_full_capture_validation",
-    "plan_only": true,
-    "options": {}
-  }
-}
-```
-
-The sequence must exist in `GET /pipeline/sequences`, and options are validated
-against its stage registry. `allow_cameras` and `allow_real_robot` are rejected
-anywhere inside persisted options. Those gates must be freshly submitted to
-the physical capture endpoint.
+`bop.annotation_mode` is one of `none`, `pose`, or `pose_and_masks`.
+Calibration intent requires `none`. Dataset processing always writes the base
+annotation-free BOP export; the configured non-`none` mode is fulfilled later
+by the explicit optional annotation job.
 
 ## Create and inspect
 
 ```bash
-uv run python scripts/create_run_config.py working_data/example
+uv run python scripts/create_run_config.py working_data/example \
+  --intent dataset --annotation-mode none
+
 curl --fail-with-body --get http://127.0.0.1:5000/run-config \
   --data-urlencode run_root=working_data/example
 ```
 
-The HTTP `POST /run-config` writer serializes replacement with the same lock
-used by pose-template selection, validates all sections, writes atomically, and
-updates the run manifest.
+`POST /run-config` requires `run_root`, `intent`, and `annotation_mode`. It
+serializes replacement with selection writers, writes atomically, updates
+`dataset_manifest.json`, and refuses camera-contract changes after raw capture
+evidence exists.

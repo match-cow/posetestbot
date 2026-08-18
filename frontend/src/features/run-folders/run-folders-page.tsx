@@ -13,7 +13,6 @@ import {
   FolderPlus,
   FolderOpen,
   HardDrive,
-  Link2,
   LoaderCircle,
   MoveRight,
   RefreshCw,
@@ -56,7 +55,6 @@ interface JobSubmission {
 interface RunFolderMutationResponse extends JobSubmission {
   source_run_root: string
   destination_run_root?: string
-  compatibility_alias?: string
 }
 
 interface TrackedOperation {
@@ -64,7 +62,6 @@ interface TrackedOperation {
   runName?: string
   sourceRunRoot?: string
   destinationRunRoot?: string
-  compatibilityAlias?: string
   job: Job
 }
 
@@ -104,8 +101,7 @@ function normalizeRunPath(value: string) {
 
 function isSelectedRunFolder(run: RunFolder, selectedRun: string) {
   const selected = normalizeRunPath(selectedRun)
-  return [run.path, ...(run.relocation?.aliases ?? [])]
-    .some((candidate) => normalizeRunPath(candidate) === selected)
+  return normalizeRunPath(run.path) === selected
 }
 
 function runRootForPath(path: string, allowedRoots: string[]) {
@@ -136,7 +132,8 @@ function runMatchesSearch(run: RunFolder, search: string) {
     run.name,
     run.path,
     run.root,
-    run.config.sequence ?? "",
+    run.config.intent ?? "",
+    run.config.annotation_mode ?? "",
     run.contents.dataset_mode ?? "",
     ...run.contents.object_names,
     ...run.contents.sensors.flatMap((sensor) => [sensor.name, sensor.sensor_type, sensor.device_id, sensor.mounting_mode]),
@@ -184,7 +181,6 @@ function operationFromJob(job: Job): TrackedOperation | null {
     runName: source?.split("/").filter(Boolean).at(-1),
     sourceRunRoot: source,
     destinationRunRoot: destination,
-    compatibilityAlias: kind === "move" ? source : undefined,
     job,
   }
 }
@@ -413,11 +409,6 @@ function RunDetails({ run }: { run: RunFolder }) {
         <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-muted-foreground">Filesystem scan</div>
         <div className="mt-1.5 text-[10px] text-muted-foreground">{plural(run.directory_count, "directory")} · {plural(run.file_count, "file")} · {plural(run.symlink_count, "symlink")} · {formatBytes(run.allocated_bytes)} allocated</div>
         {run.scan_errors.length > 0 && <ul className="mt-2 list-disc space-y-1 pl-4 text-[10px] text-destructive">{run.scan_errors.slice(0, 10).map((error, index) => <li key={`${index}:${error}`}>{error}</li>)}{run.scan_errors.length > 10 && <li>{run.scan_errors.length - 10} more scan errors; inspect the inventory job log for full context.</li>}</ul>}
-        {run.relocation && <div className="mt-2 rounded border bg-muted/30 p-2 text-[10px] text-muted-foreground">
-          <div className="flex items-center gap-1 font-semibold text-foreground"><Link2 aria-hidden="true" className="size-3" />Relocated {plural(run.relocation.history_count, "time")}</div>
-          <div className="mt-1 break-all font-mono">{run.relocation.original_path}</div>
-          {run.relocation.aliases.map((alias) => <div className="mt-0.5 break-all font-mono" key={alias}>Alias {alias}</div>)}
-        </div>}
       </div>
     </div>
   </details>
@@ -545,7 +536,6 @@ export function RunFoldersPage() {
         runName: variables.run.name,
         sourceRunRoot: result.source_run_root,
         destinationRunRoot: result.destination_run_root,
-        compatibilityAlias: result.compatibility_alias,
         job: result.job,
       })
       setMoveTarget(null)
@@ -682,7 +672,7 @@ export function RunFoldersPage() {
 
     <Card data-testid="run-folder-chooser">
       <CardHeader className="border-b bg-muted/20">
-        <div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle>Choose an existing run</CardTitle><CardDescription className="mt-1">Search by run name, folder, path, object, sensor, or workflow sequence. Selecting a run changes browser-local context; it does not modify that run.</CardDescription></div><div className="text-[10px] text-muted-foreground">{selectableRuns.length.toLocaleString()} of {runs.length.toLocaleString()} folders shown</div></div>
+        <div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle>Choose an existing run</CardTitle><CardDescription className="mt-1">Search by run name, folder, path, object, sensor, or acquisition intent. Selecting a run changes browser-local context; it does not modify that run.</CardDescription></div><div className="text-[10px] text-muted-foreground">{selectableRuns.length.toLocaleString()} of {runs.length.toLocaleString()} folders shown</div></div>
         <div className="mt-4 grid gap-3 md:grid-cols-[minmax(280px,1fr)_minmax(220px,0.55fr)_180px]">
           <div className="relative"><Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input aria-label="Search run folders" className="pl-9" value={runSearch} onChange={(event) => setRunSearch(event.target.value)} placeholder="Search runs, objects, sensors…" /></div>
           <Select value={runRootFilter} onValueChange={setRunRootFilter}><SelectTrigger aria-label="Filter run folders by storage root"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All storage roots</SelectItem>{bootstrap.allowed_run_roots.map((root) => <SelectItem value={root} key={root}>{root}</SelectItem>)}</SelectContent></Select>
@@ -746,7 +736,6 @@ export function RunFoldersPage() {
               ? "This background inventory and recovery job continues after navigation and cannot be canceled safely after submission. Jobs shows its resource lock, live output, and final status."
               : "This background storage job continues after navigation and cannot be canceled safely after submission. Jobs shows its resource lock, live output, and final status."}</p>
             {effectiveOperation.kind === "move" && effectiveOperation.sourceRunRoot && <div className="mt-2 break-all font-mono text-[10px] text-muted-foreground">{effectiveOperation.sourceRunRoot} → {effectiveOperation.destinationRunRoot ?? "destination pending"}</div>}
-            {effectiveOperation.compatibilityAlias && <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">Compatibility link: {effectiveOperation.compatibilityAlias}</div>}
           </div>
         </div>
         <Button asChild size="sm" variant="outline" className="shrink-0 bg-card"><Link to="/jobs">Open Jobs</Link></Button>
@@ -808,7 +797,7 @@ export function RunFoldersPage() {
                         </td>
                         <td className="px-4 py-4">
                           {run.config.valid
-                            ? <><div className="mb-3 flex flex-wrap items-center gap-1.5"><StatusBadge status="configured" tone="success" /><span className="text-[10px] text-muted-foreground">{run.config.sequence ? titleCase(run.config.sequence) : "No sequence"}{run.config.plan_only === true ? " · plan only" : ""}</span></div><ContentsSummary run={run} /></>
+                            ? <><div className="mb-3 flex flex-wrap items-center gap-1.5"><StatusBadge status="configured" tone="success" /><span className="text-[10px] text-muted-foreground">{run.config.intent ? titleCase(run.config.intent) : "Unknown intent"} · {run.config.annotation_mode ? titleCase(run.config.annotation_mode) : "Unknown annotation mode"}</span></div><ContentsSummary run={run} /></>
                             : <div className="space-y-3">
                                 <div className="flex items-start gap-2 rounded border border-destructive/35 bg-destructive/5 p-3 text-[11px] leading-relaxed text-destructive"><AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" /><div><div className="font-semibold">Invalid run configuration</div><div className="mt-1 break-words text-muted-foreground">{run.config.error ?? "The configuration could not be read."}</div></div></div>
                                 <ContentsSummary run={run} />
@@ -818,7 +807,6 @@ export function RunFoldersPage() {
                         <td className="px-4 py-4">
                           <div className="truncate font-mono text-[10px] font-semibold" title={run.root}>{run.root}</div>
                           <div className="mt-2 flex items-center gap-1 text-[10px] text-muted-foreground"><Clock3 aria-hidden="true" className="size-3" />{formatDate(run.modified_at)}</div>
-                          {run.relocation && <div className="mt-2 flex items-start gap-1 text-[10px] leading-relaxed text-muted-foreground"><Link2 aria-hidden="true" className="mt-0.5 size-3 shrink-0" />Compatibility link retained from an earlier location.</div>}
                         </td>
                         <td className="px-4 py-4">
                           <div className="flex flex-col items-stretch gap-2">
@@ -859,7 +847,7 @@ export function RunFoldersPage() {
             </Select>
           </div>
           {destinationRoot && <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 text-xs"><div className="text-[9px] font-bold uppercase tracking-[0.12em] text-muted-foreground">Resulting path</div><div className="mt-1 break-all font-mono font-semibold">{destinationRoot.replace(/\/+$/, "")}/{moveTarget.name}</div></div>}
-          <div className="flex items-start gap-3 rounded-lg border border-warning/35 bg-warning/5 p-3 text-xs leading-relaxed"><Link2 aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning-foreground" /><p>The folder name stays the same. After the move, a compatibility link at the original path keeps existing references working.</p></div>
+          <div className="flex items-start gap-3 rounded-lg border border-warning/35 bg-warning/5 p-3 text-xs leading-relaxed"><MoveRight aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning-foreground" /><p>The folder name stays the same. The old path is removed after the destination is durably published, so update any external references.</p></div>
         </div>}
         <DialogFooter><Button variant="outline" onClick={() => setMoveTarget(null)} disabled={moveRun.isPending}>Cancel</Button><Button onClick={() => moveTarget && destinationRoot && moveRun.mutate({ run: moveTarget, root: destinationRoot })} disabled={!moveTarget || !destinationRoot || moveRun.isPending}>{moveRun.isPending ? <LoaderCircle className="animate-spin" /> : <MoveRight />}Queue move</Button></DialogFooter>
       </DialogContent>

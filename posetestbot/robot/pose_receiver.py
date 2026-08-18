@@ -37,6 +37,7 @@ from posetestbot.io.manifest import (
 )
 from posetestbot.robot.udp import send_start
 from posetestbot.robot.reference_frames import (
+    POSE_TEMPLATE_BASE_SUNRISE_PATH,
     configured_sunrise_reference_frame_path,
 )
 
@@ -100,7 +101,6 @@ def _validate_execution_boundary(
     allow_cameras: bool,
     receive_start_timeout_s: float,
     receive_idle_timeout_s: float,
-    protocol: str,
 ) -> None:
     missing = []
     if allow_real_robot is not True:
@@ -119,8 +119,6 @@ def _validate_execution_boundary(
     ):
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be a finite value greater than 0")
-    if protocol not in {"legacy", "v1"}:
-        raise ValueError("protocol must be 'legacy' or 'v1'")
 
 
 def _stage_artifact_paths(
@@ -280,11 +278,9 @@ def _cleanup_raw_pose_claim(claim: RawPoseClaim) -> None:
 
 
 def _packet_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate optional v1 sender provenance without changing legacy packets."""
+    """Validate mandatory robot_pose.v1 sender provenance."""
 
     schema_version = value.get("schema_version")
-    if schema_version is None:
-        return {}
     if schema_version != POSE_PACKET_SCHEMA_VERSION:
         raise PoseReceiverPacketError(
             "Malformed robot pose packet: unsupported schema_version "
@@ -323,9 +319,15 @@ def _packet_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
         )
 
     run_id = value.get("run_id")
-    if not isinstance(run_id, str) or not run_id.strip():
+    try:
+        canonical_run_id = str(uuid.UUID(run_id))
+    except (ValueError, AttributeError, TypeError) as exc:
         raise PoseReceiverPacketError(
-            "Malformed robot pose packet: run_id must be a non-empty string."
+            "Malformed robot pose packet: run_id must be a canonical UUID."
+        ) from exc
+    if run_id != canonical_run_id:
+        raise PoseReceiverPacketError(
+            "Malformed robot pose packet: run_id must be a canonical UUID."
         )
     if value.get("from_frame") != "robot_flange":
         raise PoseReceiverPacketError(
@@ -336,14 +338,10 @@ def _packet_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
             "Malformed robot pose packet: to_frame must be template_base."
         )
     reference_path = value.get("sunrise_reference_frame_path")
-    if (
-        not isinstance(reference_path, str)
-        or not reference_path.startswith("/")
-        or reference_path.endswith("/")
-    ):
+    if reference_path != POSE_TEMPLATE_BASE_SUNRISE_PATH:
         raise PoseReceiverPacketError(
             "Malformed robot pose packet: sunrise_reference_frame_path must be "
-            "an absolute Application Data frame path."
+            f"{POSE_TEMPLATE_BASE_SUNRISE_PATH}."
         )
 
     motion = value.get("motion")
@@ -358,7 +356,7 @@ def _packet_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
         "sequence": sequence,
         "sender_monotonic_ns": sender_monotonic_ns,
         "sender_wall_timestamp_ms": sender_wall_timestamp_ms,
-        "run_id": run_id.strip(),
+        "run_id": run_id,
         "from_frame": "robot_flange",
         "to_frame": "template_base",
         "sunrise_reference_frame_path": reference_path,
@@ -515,7 +513,7 @@ def run_pose_receiver(
     output_path: str | Path,
     *,
     profile: RobotProfile,
-    protocol: str = "legacy",
+    run_id: str,
     verbose: bool = False,
     allow_real_robot: bool = False,
     allow_cameras: bool = False,
@@ -533,21 +531,18 @@ def run_pose_receiver(
         allow_cameras=allow_cameras,
         receive_start_timeout_s=receive_start_timeout_s,
         receive_idle_timeout_s=receive_idle_timeout_s,
-        protocol=protocol,
     )
     requested_velocity_m_s = profile.cartesian_velocity_m_s
     commanded_velocity_m_s = bounded_capture_velocity_m_s(
         requested_velocity_m_s,
         maximum_velocity_m_s=maximum_command_velocity_m_s,
     )
-    if (
-        maximum_command_velocity_m_s > MAX_CAPTURE_COMMAND_VELOCITY_M_S
-        and protocol != "v1"
-    ):
-        raise ValueError(
-            "Capture command limits above "
-            f"{MAX_CAPTURE_COMMAND_VELOCITY_M_S:g} m/s require protocol='v1'"
-        )
+    try:
+        canonical_run_id = str(uuid.UUID(run_id))
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("run_id must be a canonical UUID") from exc
+    if run_id != canonical_run_id:
+        raise ValueError("run_id must be a canonical UUID")
     command_profile = profile.with_overrides(
         cartesian_velocity_m_s=commanded_velocity_m_s
     )
@@ -557,14 +552,16 @@ def run_pose_receiver(
     if not run_root.is_dir():
         raise ValueError(f"Output path is not a directory: {run_root}")
     raw_pose_path = run_root / RAW_ROBOT_EE_POSES
-    try:
-        from posetestbot.pipeline.run_config import load_run_config_for_run_root
+    from posetestbot.pipeline.run_config import load_run_config_for_run_root
 
-        run_config = load_run_config_for_run_root(run_root)
-    except FileNotFoundError:
-        expected_reference_path = None
-    else:
-        expected_reference_path = configured_sunrise_reference_frame_path(run_config)
+    run_config = load_run_config_for_run_root(run_root)
+    if run_config["run_id"] != run_id:
+        raise ValueError("run_id does not match run_config.json")
+    expected_reference_path = configured_sunrise_reference_frame_path(run_config)
+    if expected_reference_path != POSE_TEMPLATE_BASE_SUNRISE_PATH:
+        raise ValueError(
+            "run_config.json does not use the canonical PoseTemplateBase frame"
+        )
     try:
         expected_robot_ip = ipaddress.ip_address(profile.robot_ip)
     except ValueError as exc:
@@ -581,7 +578,6 @@ def run_pose_receiver(
     last_sender: tuple[Any, ...] | None = None
     start_message: Mapping[str, Any] = {}
     sender_stream_identity: dict[str, Any] | None = None
-    sender_uses_v1_packets: bool | None = None
     previous_sender_sequence: int | None = None
 
     try:
@@ -592,7 +588,7 @@ def run_pose_receiver(
                 "cartesian_velocity_m_s": commanded_velocity_m_s,
                 "requested_cartesian_velocity_m_s": requested_velocity_m_s,
                 "command_velocity_cap_m_s": maximum_command_velocity_m_s,
-                "protocol": protocol,
+                "protocol": "robot_command.v1",
                 "mode": "real",
             },
         )
@@ -606,7 +602,7 @@ def run_pose_receiver(
 
                 start_message = send_start_command(
                     command_profile,
-                    protocol=protocol,
+                    run_id=run_id,
                     maximum_velocity_m_s=maximum_command_velocity_m_s,
                 )
                 print(
@@ -649,60 +645,48 @@ def run_pose_receiver(
                         expected_robot_ip=expected_robot_ip,
                     )
                     motion, pose, source_packet = _decode_packet(data)
-                    if expected_reference_path is not None:
-                        if not source_packet:
-                            raise PoseReceiverPacketError(
-                                "Run config declares an exact Sunrise robot-pose "
-                                "reference frame, so legacy pose packets are not "
-                                "accepted; deploy/use robot_pose.v1."
-                            )
-                        observed_reference_path = source_packet.get(
-                            "sunrise_reference_frame_path"
-                        )
-                        if observed_reference_path != expected_reference_path:
-                            raise PoseReceiverPacketError(
-                                "Robot pose stream Sunrise reference frame does not "
-                                "match run_config.json: observed "
-                                f"{observed_reference_path!r}, expected "
-                                f"{expected_reference_path!r}."
-                            )
-                    current_uses_v1 = bool(source_packet)
-                    if sender_uses_v1_packets is None:
-                        sender_uses_v1_packets = current_uses_v1
-                    elif current_uses_v1 != sender_uses_v1_packets:
+                    if source_packet.get("run_id") != run_id:
                         raise PoseReceiverPacketError(
-                            "Robot pose packet schema changed during capture."
+                            "Robot pose packet run_id does not match the requested capture."
                         )
-                    if source_packet:
-                        current_identity = _stream_identity(source_packet)
-                        if sender_stream_identity is None:
-                            sender_stream_identity = current_identity
-                        elif current_identity != sender_stream_identity:
-                            raise PoseReceiverPacketError(
-                                "Robot pose packet stream identity changed during "
-                                "capture."
-                            )
+                    observed_reference_path = source_packet.get(
+                        "sunrise_reference_frame_path"
+                    )
+                    if observed_reference_path != expected_reference_path:
+                        raise PoseReceiverPacketError(
+                            "Robot pose stream Sunrise reference frame does not "
+                            "match run_config.json: observed "
+                            f"{observed_reference_path!r}, expected "
+                            f"{expected_reference_path!r}."
+                        )
+                    current_identity = _stream_identity(source_packet)
+                    if sender_stream_identity is None:
+                        sender_stream_identity = current_identity
+                    elif current_identity != sender_stream_identity:
+                        raise PoseReceiverPacketError(
+                            "Robot pose packet stream identity changed during capture."
+                        )
 
-                        sender_sequence = int(source_packet["sequence"])
-                        if (
-                            previous_sender_sequence is not None
-                            and sender_sequence <= previous_sender_sequence
-                        ):
-                            raise PoseReceiverPacketError(
-                                "Robot pose packet sequence must increase strictly; "
-                                f"received {sender_sequence} after "
-                                f"{previous_sender_sequence}."
-                            )
-                        if previous_sender_sequence is None:
-                            source_packet["sequence_delta"] = 0
-                            source_packet["estimated_packets_lost"] = 0
-                        else:
-                            sequence_delta = sender_sequence - previous_sender_sequence
-                            source_packet["sequence_delta"] = sequence_delta
-                            source_packet["estimated_packets_lost"] = max(
-                                0, sequence_delta - 1
-                            )
-                        previous_sender_sequence = sender_sequence
+                    sender_sequence = int(source_packet["sequence"])
+                    if (
+                        previous_sender_sequence is not None
+                        and sender_sequence <= previous_sender_sequence
+                    ):
+                        raise PoseReceiverPacketError(
+                            "Robot pose packet sequence must increase strictly; "
+                            f"received {sender_sequence} after "
+                            f"{previous_sender_sequence}."
+                        )
+                    if previous_sender_sequence is None:
+                        source_packet["sequence_delta"] = 0
+                        source_packet["estimated_packets_lost"] = 0
+                    else:
+                        sequence_delta = sender_sequence - previous_sender_sequence
+                        source_packet["sequence_delta"] = sequence_delta
+                        source_packet["estimated_packets_lost"] = max(
+                            0, sequence_delta - 1
+                        )
+                    previous_sender_sequence = sender_sequence
                     if motion == "end":
                         if not poses:
                             raise PoseReceiverPacketError(
@@ -724,8 +708,7 @@ def run_pose_receiver(
                         "motion": motion,
                         "pose": pose,
                     }
-                    if source_packet:
-                        pose_record["source_packet"] = source_packet
+                    pose_record["source_packet"] = source_packet
                     poses[len(poses)] = pose_record
 
                     if verbose:

@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from flask import Flask, jsonify, request
 from werkzeug.datastructures import ImmutableMultiDict
 from werkzeug.exceptions import RequestEntityTooLarge
 
-from posetestbot.pipeline.sequences import get_pipeline_sequence
-from posetestbot.pipeline.stages import get_pipeline_stage
 from posetestbot.web.paths import APP_ROOT
 
 DEFAULT_RUN_ROOT = APP_ROOT / "working_data"
@@ -26,6 +24,7 @@ BOOLEAN_FIELDS = {
     "allow_real_robot",
     "allow_stale_preflight",
     "compare_hand_eye_methods",
+    "confirm_idle_program_exit",
     "download",
     "from_detected_sensors",
     "include_runtimes",
@@ -41,7 +40,11 @@ BOOLEAN_FIELDS = {
     "promote",
     "require_valid",
 }
-EXECUTION_ACKNOWLEDGEMENT_FIELDS = {"allow_cameras", "allow_real_robot"}
+EXECUTION_ACKNOWLEDGEMENT_FIELDS = {
+    "allow_cameras",
+    "allow_real_robot",
+    "confirm_idle_program_exit",
+}
 RUN_PATH_FIELDS = {"candidates", "observations", "profiles", "run_config"}
 OUTPUT_PATH_FIELDS = {"output_profiles"}
 INPUT_PATH_FIELDS = {
@@ -68,8 +71,7 @@ def parse_strict_bool(value: Any, *, name: str, default: bool | None = None) -> 
         if normalized in FALSE_STRINGS:
             return False
     raise ValueError(
-        f"{name} must be a JSON boolean or one of: "
-        "true, false, 1, 0, yes, no, on, off"
+        f"{name} must be a JSON boolean or one of: true, false, 1, 0, yes, no, on, off"
     )
 
 
@@ -152,67 +154,6 @@ def resolve_web_scoped_path(
     return _require_below(path, roots, label=label)
 
 
-def _normalize_stage_options(
-    stage_id: str,
-    options: Mapping[str, Any],
-    *,
-    run_root: Path,
-) -> dict[str, Any]:
-    stage = get_pipeline_stage(stage_id)
-    normalized = dict(options)
-    for name in EXECUTION_ACKNOWLEDGEMENT_FIELDS & normalized.keys():
-        if not isinstance(normalized[name], bool):
-            raise ValueError(f"{name} must be a literal JSON boolean")
-    for parameter in stage.parameters:
-        if parameter.kind != "path" or parameter.name not in normalized:
-            continue
-        values = normalized[parameter.name]
-        raw_values = values if parameter.multiple else [values]
-        if not isinstance(raw_values, list | tuple):
-            raise ValueError(f"Pipeline option {parameter.name!r} must be a list")
-        resolved = [
-            resolve_web_scoped_path(
-                value,
-                scope=parameter.path_scope or "run",
-                run_root=run_root,
-                label=f"Pipeline option {parameter.name!r}",
-            ).as_posix()
-            for value in raw_values
-        ]
-        normalized[parameter.name] = resolved if parameter.multiple else resolved[0]
-    return normalized
-
-
-def _normalize_pipeline_payload(data: dict[str, Any], run_root: Path) -> None:
-    options = data.get("options")
-    if options is None:
-        return
-    if not isinstance(options, Mapping):
-        raise ValueError("options must be an object")
-    if request.path == "/pipeline/run" and isinstance(data.get("stage"), str):
-        data["options"] = _normalize_stage_options(
-            data["stage"], options, run_root=run_root
-        )
-    elif request.path == "/pipeline/run-sequence" and isinstance(
-        data.get("sequence"), str
-    ):
-        sequence = get_pipeline_sequence(data["sequence"])
-        step_stages = {step.id: step.stage_id for step in sequence.steps}
-        stage_ids = {step.stage_id for step in sequence.steps}
-        normalized_groups = {}
-        for group, values in options.items():
-            if not isinstance(values, Mapping):
-                raise ValueError(f"Pipeline sequence options for {group!r} must be an object")
-            stage_id = step_stages.get(str(group), str(group))
-            if stage_id not in stage_ids:
-                normalized_groups[str(group)] = dict(values)
-                continue
-            normalized_groups[str(group)] = _normalize_stage_options(
-                stage_id, values, run_root=run_root
-            )
-        data["options"] = normalized_groups
-
-
 def _normalize_json_payload(data: dict[str, Any]) -> None:
     for key in EXECUTION_ACKNOWLEDGEMENT_FIELDS & data.keys():
         if not isinstance(data[key], bool):
@@ -239,7 +180,6 @@ def _normalize_json_payload(data: dict[str, Any]) -> None:
             data[key] = resolve_web_scoped_path(
                 data[key], scope="input", run_root=run_root, label=key
             ).as_posix()
-    _normalize_pipeline_payload(data, run_root)
 
 
 def _normalize_query_arguments() -> None:

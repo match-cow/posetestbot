@@ -347,88 +347,59 @@ def normalize_unit_correction_request(value: Mapping[str, Any]) -> dict[str, Any
     }
 
 
-def _implicit_geometry_revision(record: Mapping[str, Any]) -> dict[str, Any]:
-    assets = record["assets"]
-    canonical = dict(assets["canonical_ply"])
-    return {
-        "revision": 1,
-        "created_at": record.get("created_at"),
-        "canonical_ply_sha256": record.get("canonical_ply_sha256"),
-        "canonical_ply": canonical,
-        "extraction": dict(record.get("extraction") or {}),
-        "source_to_mm_scale": 1.0,
-        "operation": {
-            "kind": "import",
-            "factor": 1.0,
-            "source_to_mm_scale": 1.0,
-        },
-    }
-
-
 def _normalize_geometry_state(
     record: Mapping[str, Any], root: Path, *, verify_assets: bool
 ) -> dict[str, Any]:
-    """Load legacy v1 geometry as revision one and validate explicit history."""
+    """Validate the explicit retained geometry-revision history."""
 
     raw_revisions = record.get("geometry_revisions")
-    if raw_revisions is None:
-        revisions: list[dict[str, Any]] = [_implicit_geometry_revision(record)]
-        current_revision = 1
-        current_scale = 1.0
-    else:
-        if not isinstance(raw_revisions, list) or not raw_revisions:
-            raise ValueError("geometry_revisions must be a non-empty array")
-        if len(raw_revisions) > 10_000:
-            raise ValueError("geometry_revisions exceeds 10,000 entries")
-        current_revision = int(record.get("geometry_revision", 0))
-        current_scale = float(record.get("source_to_mm_scale", 0.0))
-        revisions = []
-        seen: set[int] = set()
-        for raw in raw_revisions:
-            if not isinstance(raw, Mapping):
-                raise ValueError("Geometry revision entries must be objects")
-            revision = int(raw.get("revision", 0))
-            if revision <= 0 or revision in seen:
-                raise ValueError(
-                    "Geometry revision numbers must be unique and positive"
-                )
-            seen.add(revision)
-            canonical = raw.get("canonical_ply")
-            if not isinstance(canonical, Mapping):
-                raise ValueError(
-                    "Geometry revision canonical_ply must be an asset record"
-                )
-            digest = raw.get("canonical_ply_sha256")
-            if digest != canonical.get("sha256"):
-                raise ValueError("Geometry revision canonical hash mismatch")
-            extraction = raw.get("extraction")
-            if not isinstance(extraction, Mapping):
-                raise ValueError("Geometry revision extraction must be an object")
-            revision_scale = float(raw.get("source_to_mm_scale", 0.0))
-            if not math.isfinite(revision_scale) or revision_scale <= 0:
-                raise ValueError(
-                    "Geometry revision source_to_mm_scale must be positive"
-                )
-            operation = raw.get("operation")
-            if not isinstance(operation, Mapping):
-                raise ValueError("Geometry revision operation must be an object")
-            normalized = {
-                **raw,
-                "revision": revision,
-                "canonical_ply": dict(canonical),
-                "extraction": dict(extraction),
-                "source_to_mm_scale": revision_scale,
-                "operation": dict(operation),
-            }
-            normalized.pop("orientation_analysis", None)
-            if verify_assets:
-                _validate_asset_record(canonical, root)
-            revisions.append(normalized)
-        revisions.sort(key=lambda item: int(item["revision"]))
-        if current_revision not in seen:
-            raise ValueError("geometry_revision must select a retained revision")
-        if not math.isfinite(current_scale) or current_scale <= 0:
-            raise ValueError("source_to_mm_scale must be positive")
+    if not isinstance(raw_revisions, list) or not raw_revisions:
+        raise ValueError("geometry_revisions must be a non-empty array")
+    if len(raw_revisions) > 10_000:
+        raise ValueError("geometry_revisions exceeds 10,000 entries")
+    current_revision = int(record.get("geometry_revision", 0))
+    current_scale = float(record.get("source_to_mm_scale", 0.0))
+    revisions = []
+    seen: set[int] = set()
+    for raw in raw_revisions:
+        if not isinstance(raw, Mapping):
+            raise ValueError("Geometry revision entries must be objects")
+        revision = int(raw.get("revision", 0))
+        if revision <= 0 or revision in seen:
+            raise ValueError("Geometry revision numbers must be unique and positive")
+        seen.add(revision)
+        canonical = raw.get("canonical_ply")
+        if not isinstance(canonical, Mapping):
+            raise ValueError("Geometry revision canonical_ply must be an asset record")
+        digest = raw.get("canonical_ply_sha256")
+        if digest != canonical.get("sha256"):
+            raise ValueError("Geometry revision canonical hash mismatch")
+        extraction = raw.get("extraction")
+        if not isinstance(extraction, Mapping):
+            raise ValueError("Geometry revision extraction must be an object")
+        revision_scale = float(raw.get("source_to_mm_scale", 0.0))
+        if not math.isfinite(revision_scale) or revision_scale <= 0:
+            raise ValueError("Geometry revision source_to_mm_scale must be positive")
+        operation = raw.get("operation")
+        if not isinstance(operation, Mapping):
+            raise ValueError("Geometry revision operation must be an object")
+        normalized = {
+            **raw,
+            "revision": revision,
+            "canonical_ply": dict(canonical),
+            "extraction": dict(extraction),
+            "source_to_mm_scale": revision_scale,
+            "operation": dict(operation),
+        }
+        normalized.pop("orientation_analysis", None)
+        if verify_assets:
+            _validate_asset_record(canonical, root)
+        revisions.append(normalized)
+    revisions.sort(key=lambda item: int(item["revision"]))
+    if current_revision not in seen:
+        raise ValueError("geometry_revision must select a retained revision")
+    if not math.isfinite(current_scale) or current_scale <= 0:
+        raise ValueError("source_to_mm_scale must be positive")
 
     active = next(
         item for item in revisions if int(item["revision"]) == current_revision

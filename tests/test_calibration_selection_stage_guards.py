@@ -28,14 +28,14 @@ from posetestbot.pipeline.run_config import create_run_config, write_run_config
             "scripts/run_blenderproc_prepare_stage.py",
             "--calibration-profiles",
             "processed/calibration_inputs/missing/calibration_profiles.json",
-            ("--objectless",),
+            ("--annotation-mode", "pose", "--objectless"),
         ),
         (
             "bop_export",
             "scripts/run_bop_export_stage.py",
             "--calibration-profiles",
             "processed/calibration_inputs/missing/calibration_profiles.json",
-            ("--objectless", "--no-model-export"),
+            ("--annotation-mode", "none", "--objectless", "--no-model-export"),
         ),
     ],
 )
@@ -48,21 +48,22 @@ def test_selected_calibration_stage_fails_closed_without_selection_manifest(
     extra_args: tuple[str, ...],
 ) -> None:
     run_root = tmp_path / stage_name
-    calibration_path = (
-        "processed/calibration_inputs/missing/calibration_profiles.json"
-    )
+    calibration_path = "processed/calibration_inputs/missing/calibration_profiles.json"
     intrinsic_path = (
         "processed/calibration_inputs/missing/intrinsic_calibration_profiles.json"
     )
     write_run_config(
         run_root,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
             run_root=run_root,
             calibration_profiles=calibration_path,
             intrinsic_calibration_profiles=intrinsic_path,
             calibration_profile_selection={
                 "selection_artifact": CALIBRATION_PROFILE_SELECTION,
                 "bundle_sha256": "0" * 64,
+                "selected_at": "2026-08-18T10:00:00+00:00",
             },
         ),
     )

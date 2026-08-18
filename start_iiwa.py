@@ -13,11 +13,8 @@ from posetestbot.robot.udp import send_start
 
 def send_start_message(
     *,
-    ip_robot: str | None,
-    port_robot: int | None,
     capture_vel: float | None,
-    protocol: str,
-    run_id: str | None,
+    run_id: str,
     manual_test_speed: bool = False,
     allow_real_robot: bool = False,
     allow_cameras: bool = False,
@@ -32,19 +29,14 @@ def send_start_message(
         return False
 
     profile = robot_profile().with_overrides(
-        robot_ip=ip_robot,
-        command_port=port_robot,
         cartesian_velocity_m_s=(
-            MANUAL_TEST_COMMAND_VELOCITY_M_S
-            if manual_test_speed
-            else capture_vel
+            MANUAL_TEST_COMMAND_VELOCITY_M_S if manual_test_speed else capture_vel
         ),
     )
 
     try:
         start_message = send_start(
             profile,
-            protocol=protocol,
             run_id=run_id,
             maximum_velocity_m_s=(
                 MANUAL_TEST_COMMAND_VELOCITY_M_S
@@ -62,21 +54,10 @@ def send_start_message(
         print(f"Error sending start message: {exc}")
         return False
 
+
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Send start message to iiwa via UDP")
-    parser.add_argument(
-        "--ip_robot",
-        type=str,
-        default=None,
-        help="Override robot IP address from the selected profile.",
-    )
-    parser.add_argument(
-        "--port_robot",
-        type=int,
-        default=None,
-        help="Override robot UDP command port from the selected profile.",
-    )
     parser.add_argument(
         "--capture_vel",
         type=float,
@@ -95,16 +76,9 @@ def main():
         ),
     )
     parser.add_argument(
-        "--protocol",
-        choices=("legacy", "v1"),
-        default="legacy",
-        help="Robot command protocol. Use legacy for the current Sunrise app.",
-    )
-    parser.add_argument(
-        "--run_id",
-        type=str,
-        default=None,
-        help="Optional run identifier included with v1 commands.",
+        "--run-id",
+        required=True,
+        help="Immutable run UUID included with robot_command.v1.",
     )
     parser.add_argument(
         "--allow-real-robot",
@@ -124,8 +98,6 @@ def main():
 
     args = parser.parse_args()
     selected_profile = robot_profile().with_overrides(
-        robot_ip=args.ip_robot,
-        command_port=args.port_robot,
         cartesian_velocity_m_s=args.capture_vel,
     )
 
@@ -137,10 +109,7 @@ def main():
         )
 
     success = send_start_message(
-        ip_robot=selected_profile.robot_ip,
-        port_robot=selected_profile.command_port,
         capture_vel=selected_profile.cartesian_velocity_m_s,
-        protocol=args.protocol,
         run_id=args.run_id,
         manual_test_speed=args.manual_test_speed,
         allow_real_robot=args.allow_real_robot,
@@ -153,6 +122,7 @@ def main():
     else:
         print("Failed to send start message.")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

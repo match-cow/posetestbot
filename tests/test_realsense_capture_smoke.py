@@ -18,8 +18,8 @@ from posetestbot.pipeline.run_config import (
 )
 from posetestbot.sensors.contracts import CameraIntrinsics, SensorDeviceInfo, SensorType
 from posetestbot.sensors.frame_writer import (
-    write_legacy_camera_sidecars,
-    write_legacy_rgbd_frame,
+    write_camera_sidecars,
+    write_rgbd_frame,
 )
 from posetestbot.sensors.realsense_smoke import (
     build_realsense_capture_smoke_report,
@@ -125,9 +125,13 @@ def test_realsense_timestamp_helpers_record_sensor_clock_details() -> None:
 
 def realsense_only_config(run_root: Path):
     return create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
         sensors=tuple(
-            sensor_config_from_token(f"realsense:{serial}:static:RealSense {serial}")
+            sensor_config_from_token(
+                f"realsense_d435:{serial}:static:RealSense {serial}"
+            )
             for serial in SERIALS
         ),
     )
@@ -150,11 +154,11 @@ def fake_capture(
         height=3,
         depth_scale_to_mm=1.0,
     )
-    write_legacy_camera_sidecars(output_path, intrinsics)
+    write_camera_sidecars(output_path, intrinsics)
     first_frame_id = None
     last_frame_id = None
     for index in range(max_frames):
-        metadata = write_legacy_rgbd_frame(
+        metadata = write_rgbd_frame(
             output_path,
             rgb_image=np.zeros((3, 4, 3), dtype=np.uint8),
             depth_image=np.ones((3, 4), dtype=np.uint16) * index,
@@ -217,7 +221,9 @@ def test_realsense_capture_smoke_succeeds_with_three_mocked_devices(
 
     manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     stage = next(
-        stage for stage in manifest["stages"] if stage["name"] == "realsense_capture_smoke"
+        stage
+        for stage in manifest["stages"]
+        if stage["name"] == "realsense_capture_smoke"
     )
     assert stage["status"] == "succeeded"
     assert stage["artifacts"][REALSENSE_CAPTURE_SMOKE_REPORT] == (
@@ -236,13 +242,15 @@ def test_realsense_capture_smoke_passes_configured_inversion_to_capture(
 ) -> None:
     run_root = tmp_path / "run-inverted"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
         sensors=tuple(
             sensor_config_from_token(
                 (
-                    f"realsense:{serial}:static:RealSense {serial}:inverted"
+                    f"realsense_d435:{serial}:static:RealSense {serial}:inverted"
                     if serial == SERIALS[0]
-                    else f"realsense:{serial}:static:RealSense {serial}"
+                    else f"realsense_d435:{serial}:static:RealSense {serial}"
                 )
             )
             for serial in SERIALS
@@ -312,12 +320,18 @@ def test_realsense_capture_smoke_refuses_nonempty_output_folder(
     assert report["captures"] == []
 
 
-def test_realsense_capture_smoke_is_independent_of_robot_profile(tmp_path: Path) -> None:
+def test_realsense_capture_smoke_is_independent_of_robot_profile(
+    tmp_path: Path,
+) -> None:
     run_root = tmp_path / "run-real-robot"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
         sensors=tuple(
-            sensor_config_from_token(f"realsense:{serial}:static:RealSense {serial}")
+            sensor_config_from_token(
+                f"realsense_d435:{serial}:static:RealSense {serial}"
+            )
             for serial in SERIALS
         ),
     )
@@ -360,7 +374,9 @@ def test_realsense_capture_smoke_records_one_camera_capture_failure(
     ]
     manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     stage = next(
-        stage for stage in manifest["stages"] if stage["name"] == "realsense_capture_smoke"
+        stage
+        for stage in manifest["stages"]
+        if stage["name"] == "realsense_capture_smoke"
     )
     assert stage["status"] == "failed"
 
@@ -371,8 +387,10 @@ def test_realsense_capture_smoke_cli_writes_failed_report_for_wrong_scope(
     run_root = tmp_path / "run-cli"
     repo_root = Path(__file__).resolve().parents[1]
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("oak:auto:static:Cell OAK-D Pro"),),
+        sensors=(sensor_config_from_token("oak_d_pro:auto:static:Cell OAK-D Pro"),),
     )
     write_run_config(run_root, config)
 

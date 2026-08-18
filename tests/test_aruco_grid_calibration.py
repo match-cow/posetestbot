@@ -7,7 +7,6 @@ import cv2
 import numpy as np
 import pytest
 
-from posetestbot.aruco.grid import estimate_sensor_poses
 from posetestbot.calibration.intrinsics import (
     IntrinsicCalibrationError,
     calibrate_intrinsic_profile,
@@ -18,7 +17,6 @@ from posetestbot.calibration.targets import (
     normalize_calibration_target_spec,
     opencv_grid_board,
 )
-from posetestbot.io.artifacts import ARUCO_POSE_ESTIMATION
 
 
 def sensor_fixture(folder: Path) -> None:
@@ -33,7 +31,22 @@ def sensor_fixture(folder: Path) -> None:
         )
     )
     (folder / "frame_metadata.jsonl").write_text(
-        json.dumps({"sensor_id": "SERIAL-1", "orientation": "normal"}) + "\n"
+        json.dumps(
+            {
+                "schema_version": "frame_metadata.v1",
+                "sensor_type": "realsense_d435",
+                "sensor_id": "SERIAL-1",
+                "frame_index": 0,
+                "frame_id": "000000.png",
+                "rgb_path": "rgb/000000.png",
+                "depth_path": "depth/000000.png",
+                "sensor_timestamp_ns": 1,
+                "host_received_timestamp_ns": 2,
+                "host_wall_timestamp_ns": 3,
+                "orientation": "normal",
+            }
+        )
+        + "\n"
     )
 
 
@@ -130,11 +143,11 @@ def current_target() -> dict:
     )
 
 
-def test_synthetic_intrinsic_recovery_and_enriched_pose(tmp_path: Path) -> None:
+def test_synthetic_intrinsic_recovery(tmp_path: Path) -> None:
     sensor = tmp_path / "realsense_SERIAL-1"
     sensor_fixture(sensor)
     target = current_target()
-    detections, poses = synthetic_detections(target)
+    detections, _poses = synthetic_detections(target)
 
     profile = calibrate_intrinsic_profile(sensor, detections, target)
 
@@ -149,16 +162,6 @@ def test_synthetic_intrinsic_recovery_and_enriched_pose(tmp_path: Path) -> None:
     )
     assert profile["rectified"]["distortion"] == [0.0] * 5
     assert profile["depth"]["alignment"]["recalibrated"] is False
-
-    output = estimate_sensor_poses(sensor, detections, target, profile)
-    first = output["000000.png"]["aruco_pose_estimation"]
-    assert first["schema_version"] == "aruco_pose_estimation.v2"
-    assert first["transform"]["from"] == "aruco_grid"
-    assert first["transform"]["to"] == "camera"
-    assert first["pnp_inlier_count"] >= 4
-    assert first["mean_reprojection_error_px"] < 0.1
-    assert np.allclose(first["tvec"], poses["000000.png"]["tvec"], atol=1.0)
-    assert (sensor / ARUCO_POSE_ESTIMATION).is_file()
 
 
 def test_intrinsic_coverage_failure_reports_rejected_audit(tmp_path: Path) -> None:

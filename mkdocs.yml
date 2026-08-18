@@ -71,6 +71,7 @@ nav:
       - System overview: getting-started/overview.md
       - Installation and first launch: getting-started/installation.md
       - Operator workflows: OPERATOR_WORKFLOWS.md
+      - Physical commissioning: COMMISSIONING.md
   - System design:
       - Architecture and boundaries: concepts/architecture.md
       - Runs and artifact lineage: concepts/runs-and-artifacts.md
@@ -80,7 +81,7 @@ nav:
       - Complete route index: reference/http-api-routes.md
       - System, sensors, and monitoring: reference/api/system-sensors.md
       - Runs and jobs: reference/api/runs-jobs.md
-      - Capture and pipeline: reference/api/capture-pipeline.md
+      - Capture and focused orchestration: reference/api/capture-pipeline.md
       - Calibration: reference/api/calibration.md
       - Workpieces and pose templates: reference/api/catalogs.md
       - BOP and cluster boundary: reference/api/bop-cluster.md
@@ -95,13 +96,10 @@ nav:
   - IIWA integration:
       - Full-capture application: IIWA_FULL_CAPTURE_APPLICATION.md
       - Single-frame static calibration: IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md
-      - Nine-frame calibration program: IIWA_CALIBRATION_VARIANCE_PROPOSAL.md
-      - Commissioning checklist: IIWA_CALIBRATION_TEACHING_CHECKLIST.md
+      - Nine-frame teaching checklist: IIWA_CALIBRATION_TEACHING_CHECKLIST.md
       - Pose-stream cadence: IIWA_POSE_STREAM_CADENCE.md
-  - Evidence and project status:
-      - Eye-in-hand validation: EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md
-      - Rewrite progress: REWRITE_PROGRESS.md
-      - Remaining work: REWRITE_REMAINING_WORK.md
+  - Design record:
+      - Clean-break streamlining: STREAMLINING_PLAN.md
   - Documentation maintenance: GITHUB_PAGES.md
 
 copyright: PoseTestBot is research software; physical execution remains operator-controlled.

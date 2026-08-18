@@ -22,6 +22,8 @@ from posetestbot.calibration.attempt_solver import (
     evaluate_extrinsic_candidate,
     rank_candidates,
     solve_planar_pnp_candidates,
+)
+from posetestbot.calibration.transforms import (
     transform_from_record,
     transform_record,
     transform_residual,
@@ -29,7 +31,7 @@ from posetestbot.calibration.attempt_solver import (
 
 from posetestbot.calibration import attempts as attempt_module
 
-from posetestbot.calibration.candidates import _robot_ee_to_reference
+from posetestbot.calibration.transforms import robot_ee_to_reference
 
 from posetestbot.calibration.intrinsics import (
     factory_intrinsic_profile,
@@ -45,7 +47,7 @@ from posetestbot.io.artifacts import (
 
 from posetestbot.sensors.contracts import CameraIntrinsics
 
-from posetestbot.sensors.frame_writer import write_legacy_camera_sidecars
+from posetestbot.sensors.frame_writer import write_camera_sidecars
 
 
 @pytest.mark.parametrize(
@@ -67,8 +69,16 @@ def test_prepare_attempt_normalizes_paths_and_requires_zero_sync_delta(
     (sensor_folder / "frame_metadata.jsonl").write_text(
         json.dumps(
             {
+                "schema_version": "frame_metadata.v1",
+                "sensor_type": "realsense_d435",
+                "sensor_id": "1",
+                "frame_index": 0,
                 "frame_id": "1000.png",
+                "rgb_path": "rgb/1000.png",
+                "depth_path": "depth/1000.png",
                 "sensor_timestamp_ns": 10_000_000_000,
+                "host_received_timestamp_ns": 10_000_000_000,
+                "host_wall_timestamp_ns": 10_000_000_000,
                 "color_timestamp_domain": "global_time",
             }
         )
@@ -370,8 +380,16 @@ def test_realsense_calibration_timestamp_preflight_requires_global_time(
     (sensor_folder / "frame_metadata.jsonl").write_text(
         json.dumps(
             {
+                "schema_version": "frame_metadata.v1",
+                "sensor_type": "realsense_d435",
+                "sensor_id": "1",
+                "frame_index": 0,
                 "frame_id": "1000.png",
+                "rgb_path": "rgb/1000.png",
+                "depth_path": "depth/1000.png",
                 "sensor_timestamp_ns": 10_000_000_000,
+                "host_received_timestamp_ns": 10_000_000_000,
+                "host_wall_timestamp_ns": 10_000_000_000,
                 "color_timestamp_domain": "system_time",
             }
         )
@@ -413,8 +431,16 @@ def test_prepare_attempt_rejects_mutated_per_sensor_timestamp_policy(
     (sensor_folder / "frame_metadata.jsonl").write_text(
         json.dumps(
             {
+                "schema_version": "frame_metadata.v1",
+                "sensor_type": "realsense_d435",
+                "sensor_id": "1",
+                "frame_index": 0,
                 "frame_id": "1000.png",
+                "rgb_path": "rgb/1000.png",
+                "depth_path": "depth/1000.png",
                 "sensor_timestamp_ns": 10_000_000_000,
+                "host_received_timestamp_ns": 10_000_000_000,
+                "host_wall_timestamp_ns": 10_000_000_000,
                 "color_timestamp_domain": "global_time",
             }
         )
@@ -459,12 +485,17 @@ def test_prepare_attempt_rejects_mutated_per_sensor_timestamp_policy(
             run_root,
             attempt_root,
             {"sensors": sensors, "timestamp_policy": recorded_policy},
+            {
+                "raw_robot_ee_poses.json": json.loads(
+                    (run_root / "raw_robot_ee_poses.json").read_text()
+                )
+            },
         )
 
 
 def _intrinsic_sensor_fixture(folder: Path) -> dict:
     folder.mkdir(parents=True)
-    write_legacy_camera_sidecars(
+    write_camera_sidecars(
         folder,
         CameraIntrinsics(
             cam_k=(600.0, 0.0, 320.0, 0.0, 601.0, 240.0, 0.0, 0.0, 1.0),
@@ -476,6 +507,23 @@ def _intrinsic_sensor_fixture(folder: Path) -> dict:
             projection_source="test_factory_color",
         ),
         include_distortion_in_cam_k=True,
+    )
+    (folder / "frame_metadata.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "frame_metadata.v1",
+                "sensor_type": "realsense_d435",
+                "sensor_id": folder.name.removeprefix("realsense_"),
+                "frame_index": 0,
+                "frame_id": "000000.png",
+                "rgb_path": "rgb/000000.png",
+                "depth_path": "depth/000000.png",
+                "sensor_timestamp_ns": 1,
+                "host_received_timestamp_ns": 1,
+                "host_wall_timestamp_ns": 1,
+            }
+        )
+        + "\n"
     )
     return factory_intrinsic_profile(folder)
 
@@ -730,7 +778,7 @@ def _fixture_observations(
     observations = []
     for index, robot_pose in enumerate(poses):
         coverage_row, coverage_column = divmod(index % 9, 3)
-        flange_to_base = _robot_ee_to_reference(robot_pose)
+        flange_to_base = robot_ee_to_reference(robot_pose)
         if mode == "eye_in_hand":
             target_to_camera = (
                 pt.invert_transform(camera_to_flange)
@@ -948,12 +996,11 @@ def test_planar_pnp_uses_shared_inliers_refines_and_retains_ippe_ambiguity() -> 
     assert result["raw_common_inlier_ratio"] == result["common_inlier_ratio"]
 
 
-def test_planar_pnp_isolates_strong_target_instance_from_duplicate_marker_clutter(
-) -> None:
+def test_planar_pnp_isolates_strong_target_instance_from_duplicate_marker_clutter() -> (
+    None
+):
     marker_origins = [
-        (column * 50.0, row * 50.0)
-        for row in range(3)
-        for column in range(4)
+        (column * 50.0, row * 50.0) for row in range(3) for column in range(4)
     ]
     marker_objects = [
         np.asarray(
@@ -1128,6 +1175,7 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
     attempt_root = run_root / "processed" / "calibration" / attempt_id
     attempt_root.mkdir(parents=True)
     robot_pose_path = run_root / "raw_robot_ee_poses.json"
+    run_id = "11111111-1111-4111-8111-111111111111"
     robot_pose_path.write_text(
         json.dumps(
             {
@@ -1135,9 +1183,11 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
                     "pose": {},
                     "source_packet": {
                         "schema_version": "robot_pose.v1",
+                        "packet_kind": "pose",
+                        "run_id": run_id,
                         "from_frame": "robot_flange",
                         "to_frame": "template_base",
-                        "sunrise_reference_frame_path": "/PoseTestBot/TemplateBase",
+                        "sunrise_reference_frame_path": "/PoseTestBot/PoseTemplateBase",
                     },
                 }
             }
@@ -1175,7 +1225,8 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
             "packet_schema_version": "robot_pose.v1",
             "from": "robot_flange",
             "to": "template_base",
-            "sunrise_reference_frame_path": "/PoseTestBot/TemplateBase",
+            "sunrise_reference_frame_path": "/PoseTestBot/PoseTemplateBase",
+            "run_id": run_id,
             "artifacts": ["raw_robot_ee_poses.json"],
             "pose_counts": {"raw_robot_ee_poses.json": 1},
             "artifact_bindings": [
@@ -1196,6 +1247,9 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
             attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION
         ),
     }
+    request_value["timestamp_policy"] = attempt_module._attempt_timestamp_policy(
+        request_value["sensors"]
+    )
     (attempt_root / "request.json").write_text(json.dumps(request_value))
     (attempt_root / "progress.json").write_text(
         json.dumps(attempt_module._initial_progress(attempt_id))
@@ -1289,7 +1343,7 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
         "complete",
     ]
     for filename in (
-        "calibration_observations.json",
+        "observations.json",
         "extrinsic_candidates.json",
         "ranking.json",
         "checks.json",
@@ -1328,7 +1382,6 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
         "max_nearest_pose_delta_ms": 150.0,
         "warning_nearest_pose_delta_ms": 20.0,
         "warning_fallback_used": False,
-        "historical_per_sensor_offsets_allowed": False,
         "auto_estimated_per_sensor_offset": False,
         "sensor_key": sensor_key,
         "quality_report": (
@@ -1366,11 +1419,19 @@ def _multi_camera_candidate_variant(
         from_frame="aruco_grid",
         to_frame="template_base",
     )
+    candidate["synchronization"] = {
+        "policy": "fixed_zero",
+        "status": "fixed_zero",
+        "robot_pose_time_offset_ms": 0.0,
+        "sync_delta_ms": 0.0,
+        "source": "processed/calibration/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/time_offset_search.json",
+        "warning_fallback_used": False,
+    }
     return candidate
 
 
 def _multi_camera_request() -> dict:
-    return {
+    value = {
         "attempt_id": "a" * 32,
         "mode": "eye_in_hand",
         "sensor_keys": ["realsense_d435:1", "oak_d_pro:2"],
@@ -1400,7 +1461,25 @@ def _multi_camera_request() -> dict:
         "pnp_methods": ["IPPE", "ITERATIVE"],
         "extrinsic_methods": ["park"],
         "intrinsics_policy": "reuse_compatible_or_factory",
+        "robot_pose_reference": {
+            "schema_version": "robot_pose_reference.v1",
+            "status": "verified",
+            "packet_schema_version": "robot_pose.v1",
+            "from": "robot_flange",
+            "to": "template_base",
+            "sunrise_reference_frame_path": "/PoseTestBot/PoseTemplateBase",
+            "run_id": "11111111-1111-4111-8111-111111111111",
+        },
+        "synchronization_policy": "fixed_zero",
+        "synchronization_search": attempt_module.time_offset_search_configuration(),
+        "synchronization_implementation_revision": (
+            attempt_module.TIME_OFFSET_IMPLEMENTATION_REVISION
+        ),
     }
+    value["timestamp_policy"] = attempt_module._attempt_timestamp_policy(
+        value["sensors"]
+    )
+    return value
 
 
 def _multi_camera_intrinsics() -> dict[str, dict]:
@@ -1623,35 +1702,20 @@ def test_multi_camera_ranking_fails_closed_when_peer_fails(tmp_path) -> None:
         extrinsic_method="park",
         sensor_key="oak_d_pro:2",
     )
-    request_value = {
-        "attempt_id": "a" * 32,
-        "mode": "eye_in_hand",
-        "sensor_keys": ["realsense_d435:1", "oak_d_pro:2"],
-        "sensors": [
-            {
-                "sensor_key": "realsense_d435:1",
-                "sensor_name": "realsense_1",
-                "sensor_type": "realsense_d435",
-                "device_id": "1",
-                "display_name": "D435",
-            },
-            {
-                "sensor_key": "oak_d_pro:2",
-                "sensor_name": "luxonis_2",
-                "sensor_type": "oak_d_pro",
-                "device_id": "2",
-                "display_name": "OAK",
-            },
-        ],
-        "target_id": "target-1",
-        "target_mounting": {
-            "from": "aruco_grid",
-            "to": "template_base",
-            "state": "estimated",
-        },
-        "solver_policy": "auto_compare",
-        "intrinsics_policy": "reuse_compatible_or_factory",
-    }
+    for candidate in (passing, failing):
+        candidate["synchronization"] = {
+            "policy": "fixed_zero",
+            "status": "fixed_zero",
+            "robot_pose_time_offset_ms": 0.0,
+            "sync_delta_ms": 0.0,
+            "source": (
+                "processed/calibration/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"
+                "time_offset_search.json"
+            ),
+            "warning_fallback_used": False,
+        }
+    request_value = _multi_camera_request()
+    request_value["pnp_methods"] = ["ITERATIVE"]
     intrinsic = {
         "profile_id": "factory",
         "sensor_id": "1",

@@ -26,7 +26,6 @@ from posetestbot.pipeline.run_config import (
 )
 
 from posetestbot.run_folders import (
-    LOCATION_FILE,
     build_run_folder_inventory,
     delete_run_folder,
     move_run_folder,
@@ -42,6 +41,8 @@ def _write_run(path: Path, *, with_object: bool = False) -> None:
     path.mkdir(parents=True, exist_ok=True)
     config = create_run_config(
         run_root=path,
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         sensors=(
             SensorRunConfig(
                 sensor_type="realsense_d435",
@@ -50,7 +51,6 @@ def _write_run(path: Path, *, with_object: bool = False) -> None:
                 mounting_mode="eye_in_hand",
             ),
         ),
-        sequence_id="sync_aruco",
     )
     write_run_config(path, config)
     if with_object:
@@ -102,8 +102,9 @@ def test_inventory_sizes_and_summarizes_without_following_symlinks(
         "valid": True,
         "error": None,
         "run_name": "run-a",
-        "sequence": "sync_aruco",
-        "plan_only": True,
+        "run_id": load_run_config_for_run_root(run)["run_id"],
+        "intent": "dataset",
+        "annotation_mode": "none",
     }
     assert record["contents"]["sensor_count"] == 1
     assert record["contents"]["enabled_sensor_count"] == 1
@@ -137,7 +138,7 @@ def test_general_run_discovery_hides_move_quarantine_and_staging(
     assert [item["path"] for item in records] == [visible.as_posix()]
 
 
-def test_move_preserves_path_bound_config_via_alias_and_supports_move_back(
+def test_move_rebinds_path_bound_config_without_alias_and_supports_move_back(
     tmp_path: Path,
 ) -> None:
     first_root = tmp_path / "first"
@@ -157,14 +158,12 @@ def test_move_preserves_path_bound_config_via_alias_and_supports_move_back(
     destination = second_root / "run-a"
 
     assert moved["destination_run_root"] == destination.as_posix()
-    assert source.is_symlink()
-    assert source.resolve() == destination
+    assert not source.exists() and not source.is_symlink()
     assert destination.is_dir() and not destination.is_symlink()
     assert load_run_config_for_run_root(destination)["run_name"] == "run-a"
-    location = json.loads((destination / LOCATION_FILE).read_text())
-    assert location["original_path"] == source.as_posix()
-    assert location["aliases"] == [source.as_posix()]
-    assert len(location["history"]) == 1
+    assert (
+        load_run_config_for_run_root(destination)["run_root"] == destination.as_posix()
+    )
 
     moved_back = move_run_folder(
         destination,
@@ -175,13 +174,9 @@ def test_move_preserves_path_bound_config_via_alias_and_supports_move_back(
 
     assert moved_back["destination_run_root"] == source.as_posix()
     assert source.is_dir() and not source.is_symlink()
-    assert destination.is_symlink()
-    assert destination.resolve() == source
+    assert not destination.exists() and not destination.is_symlink()
     assert load_run_config_for_run_root(source)["run_name"] == "run-a"
-    location = json.loads((source / LOCATION_FILE).read_text())
-    assert location["original_path"] == source.as_posix()
-    assert location["aliases"] == [destination.as_posix()]
-    assert len(location["history"]) == 2
+    assert load_run_config_for_run_root(source)["run_root"] == source.as_posix()
 
 
 def test_interrupted_cross_device_copy_rolls_back_before_inventory(
@@ -241,7 +236,7 @@ def test_interrupted_cross_device_copy_rolls_back_before_inventory(
     assert second_inventory["maintenance"]["unresolved_count"] == 0
 
 
-def test_delete_removes_run_and_only_verified_compatibility_aliases(
+def test_delete_removes_only_the_selected_current_run(
     tmp_path: Path,
 ) -> None:
     first_root = tmp_path / "first"
@@ -464,7 +459,6 @@ def test_api_returns_cached_inventory_and_queues_scoped_operations(
         operation="move",
         source=source,
         expected_identity=run_identity(source),
-        aliases=[],
         destination_root=second_root,
     )
     assert client.get("/ui/run-folders").get_json()["inventory_state"] == "stale"
@@ -509,7 +503,7 @@ def test_api_returns_cached_inventory_and_queues_scoped_operations(
     moved = move.get_json()
     assert moved["source_run_root"] == source.as_posix()
     assert moved["destination_run_root"] == (second_root / source.name).as_posix()
-    assert moved["compatibility_alias"] == source.as_posix()
+    assert "compatibility_alias" not in moved
     submission = runner.submissions[-1]
     assert submission["scope_kind"] == "run"
     assert submission["run_root"] == source

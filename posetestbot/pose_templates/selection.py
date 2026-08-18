@@ -529,8 +529,6 @@ def select_pose_template(
                 )
                 config["schema_version"] = RUN_CONFIG_SCHEMA_VERSION
                 config["dataset_mode"] = "pose_template"
-                config.pop("object_folder", None)
-                config.pop("selected_objects", None)
                 config["pose_template"] = {
                     "template_uuid": snapshot_bundle["template_uuid"],
                     "selection_artifact": POSE_TEMPLATE_SELECTION,
@@ -557,9 +555,7 @@ def select_pose_template(
                         )
                 return selected
 
-            return _promote_paths(
-                promotions, root=root, validate_live=validate_live
-            )
+            return _promote_paths(promotions, root=root, validate_live=validate_live)
         finally:
             for path in (staging_snapshot, staging_selection, staging_config):
                 if path is not None and (path.exists() or path.is_symlink()):

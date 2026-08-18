@@ -4,21 +4,14 @@ from pathlib import Path
 
 from posetestbot.config import robot_profile
 from posetestbot.io.artifacts import (
-    ARUCO_COVERAGE_REPORT,
     BOP_EXPORT_MANIFEST,
     BOP_TARGETS_BOP19,
     CAPTURE_EXECUTION_LOGS_DIR,
     CAPTURE_EXECUTION_PLAN,
     CAPTURE_EXECUTION_REPORT,
-    CALIBRATION_CANDIDATES,
-    CALIBRATION_PREFLIGHT_REPORT,
-    CALIBRATION_OBSERVATIONS,
-    CALIBRATION_PROFILES_FROM_OBSERVATIONS,
-    CALIBRATION_VALIDATION_REPORT,
     DATASET_MANIFEST,
     DEPTH_DIR,
     FRAME_METADATA_JSONL,
-    PIPELINE_SEQUENCE_PLAN,
     RAW_ROBOT_EE_POSES,
     RGB_DIR,
     RUN_CONFIG,
@@ -43,26 +36,16 @@ def test_artifact_names_are_stable() -> None:
     assert DATASET_MANIFEST == "dataset_manifest.json"
     assert RUN_CONFIG == "run_config.json"
     assert RAW_ROBOT_EE_POSES == "raw_robot_ee_poses.json"
-    assert ARUCO_COVERAGE_REPORT == "aruco_coverage_report.json"
     assert FRAME_METADATA_JSONL == "frame_metadata.jsonl"
     assert BOP_EXPORT_MANIFEST == "bop_export_manifest.json"
     assert BOP_TARGETS_BOP19 == "test_targets_bop19.json"
     assert CAPTURE_EXECUTION_PLAN == "capture_execution_plan.json"
     assert CAPTURE_EXECUTION_REPORT == "capture_execution_report.json"
     assert CAPTURE_EXECUTION_LOGS_DIR == "capture_execution_logs"
-    assert CALIBRATION_OBSERVATIONS == "calibration_observations.json"
-    assert CALIBRATION_CANDIDATES == "calibration_candidates.json"
-    assert (
-        CALIBRATION_PROFILES_FROM_OBSERVATIONS
-        == "calibration_profiles_from_observations.json"
-    )
-    assert CALIBRATION_VALIDATION_REPORT == "calibration_validation_report.json"
-    assert CALIBRATION_PREFLIGHT_REPORT == "calibration_preflight_report.json"
     assert SYNC_QUALITY_REPORT == "sync_quality_report.json"
-    assert PIPELINE_SEQUENCE_PLAN == "pipeline_sequence_plan.json"
 
 
-def test_sensor_type_from_legacy_folder_names() -> None:
+def test_sensor_type_from_current_registry_folder_prefixes() -> None:
     assert sensor_type_from_folder_name("realsense_123") == "realsense_d435"
     assert sensor_type_from_folder_name("luxonis_abc") == "oak_d_pro"
     assert sensor_type_from_folder_name("zed_2i_456") == "zed_2i"

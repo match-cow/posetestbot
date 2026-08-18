@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run BlenderProc preparation as a manifest-tracked pipeline stage."""
+"""Prepare manifest-tracked inputs for optional BlenderProc annotation."""
 
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--annotation-mode",
         choices=("pose", "pose_and_masks"),
-        default="pose_and_masks",
+        required=True,
         help=(
             "Prepare deterministic pose GT only, or pose GT for a later "
             "depth-aware mask generation step."
@@ -184,7 +184,7 @@ def run_prepare(
     object_instances: dict | None = None,
     run_root: Path | None = None,
     sensor_names: tuple[str, ...] | None = None,
-    annotation_mode: str = "pose_and_masks",
+    annotation_mode: str,
 ) -> dict[str, Path]:
     prepared = prepare_sensor_folders(
         input_folder=input_folder,
@@ -219,10 +219,7 @@ def main() -> None:
     try:
         stage_artifacts: dict[str, Path] = {}
         object_instances = None
-        try:
-            run_config = load_run_config_for_run_root(run_root)
-        except FileNotFoundError:
-            run_config = None
+        run_config = load_run_config_for_run_root(run_root)
         mounting_modes_by_sensor_name = enabled_sensor_mounting_modes_by_folder(
             run_config
         )

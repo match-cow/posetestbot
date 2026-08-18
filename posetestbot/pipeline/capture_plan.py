@@ -10,8 +10,6 @@ from typing import Any, Mapping
 
 from posetestbot.config import (
     DEFAULT_CAPTURE_VELOCITY_M_S,
-    DEFAULT_RECEIVER_PORT,
-    DEFAULT_ROBOT_PORT,
     MAX_CAPTURE_COMMAND_VELOCITY_M_S,
     MAX_OBJECT_DATASET_COMMAND_VELOCITY_M_S,
     bounded_capture_velocity_m_s,
@@ -94,11 +92,6 @@ def _sensor_folder_name(sensor_type: str, device_id: str) -> str:
     return sensor_folder_name(sensor_type, device_id)
 
 
-def _robot_int(robot: Mapping[str, Any], key: str, default: int) -> int:
-    value = robot.get(key, default)
-    return int(value)
-
-
 def _robot_float(robot: Mapping[str, Any], key: str, default: float) -> float:
     value = robot.get(key, default)
     return float(value)
@@ -144,10 +137,6 @@ def build_capture_plan(
     run_config_path: str | Path | None = None,
     max_frames: int | None = None,
     warmup_frames: int | None = None,
-    robot_ip: str | None = None,
-    receiver_ip: str | None = None,
-    robot_port: int | None = None,
-    receiver_port: int | None = None,
 ) -> CapturePlan:
     """Build a non-executing capture command plan from ``run_config.json`` data."""
 
@@ -170,16 +159,13 @@ def build_capture_plan(
             ),
         )
     )
-    extended_object_dataset_speed = (
-        config.get("dataset_mode") == "pose_template"
-        and requested_velocity > MAX_CAPTURE_COMMAND_VELOCITY_M_S
-    )
+    dataset_capture = capture.get("intent") == "dataset"
     command_velocity_cap = (
         MAX_OBJECT_DATASET_COMMAND_VELOCITY_M_S
-        if extended_object_dataset_speed
+        if dataset_capture
         else MAX_CAPTURE_COMMAND_VELOCITY_M_S
     )
-    command_protocol = "v1" if extended_object_dataset_speed else "legacy"
+    command_protocol = "v1"
     velocity = bounded_capture_velocity_m_s(
         requested_velocity,
         maximum_velocity_m_s=command_velocity_cap,
@@ -189,18 +175,8 @@ def build_capture_plan(
         raise ValueError("max_frames must be greater than or equal to 0")
     if warmup_frames is not None and warmup_frames < 0:
         raise ValueError("warmup_frames must be greater than or equal to 0")
-    resolved_robot_ip = str(robot_ip or robot.get("robot_ip"))
-    resolved_receiver_ip = str(receiver_ip or robot.get("receiver_ip"))
-    command_port = int(
-        robot_port
-        if robot_port is not None
-        else _robot_int(robot, "command_port", DEFAULT_ROBOT_PORT)
-    )
-    resolved_receiver_port = int(
-        receiver_port
-        if receiver_port is not None
-        else _robot_int(robot, "receiver_port", DEFAULT_RECEIVER_PORT)
-    )
+    resolved_robot_ip = str(robot["robot_ip"])
+    command_port = int(robot["command_port"])
 
     commands: list[CaptureCommandPlan] = []
     notes: list[str] = [
@@ -218,14 +194,10 @@ def build_capture_plan(
             f"{requested_velocity:g} m/s is reduced to the host command cap "
             f"{velocity:g} m/s before START."
         )
-    if command_protocol == "v1":
-        notes.append(
-            "This object-dataset request exceeds the conservative legacy "
-            f"{MAX_CAPTURE_COMMAND_VELOCITY_M_S:g} m/s range, so START uses "
-            "the structured robot_command.v1 protocol. The commissioned "
-            "Sunrise application must support that protocol and applies its "
-            "own A1 angular-speed limit."
-        )
+    notes.append(
+        "START always uses robot_command.v1 and requires the commissioned "
+        "structured-protocol Sunrise application."
+    )
 
     sensor_records: list[Mapping[str, Any]] = []
     enabled_sensors = [
@@ -298,24 +270,11 @@ def build_capture_plan(
         run_root.as_posix(),
         "--capture_vel",
         str(velocity),
-        "--ip",
-        resolved_receiver_ip,
-        "--port",
-        str(resolved_receiver_port),
-        "--ip_robot",
-        resolved_robot_ip,
-        "--port_robot",
-        str(command_port),
+        "--run-id",
+        str(config["run_id"]),
+        "--maximum-command-velocity-m-s",
+        str(command_velocity_cap),
     ]
-    if command_protocol == "v1":
-        receiver_command.extend(
-            [
-                "--protocol",
-                "v1",
-                "--maximum-command-velocity-m-s",
-                str(command_velocity_cap),
-            ]
-        )
     commands.append(
         CaptureCommandPlan(
             role="robot_pose_receiver",

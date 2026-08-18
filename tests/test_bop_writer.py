@@ -14,6 +14,7 @@ from posetestbot.bop.writer import (
     BopSceneExport,
     finalize_official_scene_annotations,
     model_geometry_info,
+    read_depth_scale,
     resolve_annotation_mode,
     targets_from_scene_gt,
     validate_bop_model_ply,
@@ -22,6 +23,16 @@ from posetestbot.bop.writer import (
     write_bop_model_ply,
     write_bop_export_manifest,
 )
+
+
+def test_depth_scale_reader_requires_current_sidecar(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="Missing depth-scale sidecar"):
+        read_depth_scale(tmp_path / "depthscale.txt")
+
+    empty = tmp_path / "depthscale.txt"
+    empty.write_text("")
+    with pytest.raises(ValueError, match="sidecar is empty"):
+        read_depth_scale(empty)
 
 
 def test_large_model_diameter_is_exact_not_aabb_diagonal(tmp_path: Path) -> None:
@@ -78,10 +89,12 @@ def _scene_export(sensor_name: str, scene_id: int) -> BopSceneExport:
     )
 
 
-def test_export_manifest_infers_the_scene_annotation_source(tmp_path: Path) -> None:
+def test_export_manifest_requires_explicit_annotation_contract(tmp_path: Path) -> None:
     manifest_path = write_bop_export_manifest(
         tmp_path,
         [_scene_export("realsense_123", 1)],
+        annotation_source="none",
+        annotation_mode="none",
     )
 
     manifest = json.loads(manifest_path.read_text())
@@ -90,9 +103,9 @@ def test_export_manifest_infers_the_scene_annotation_source(tmp_path: Path) -> N
     assert manifest["annotation_state"] == "absent"
 
 
-def test_annotation_modes_preserve_legacy_blenderproc_meaning() -> None:
-    assert resolve_annotation_mode("none") == "none"
-    assert resolve_annotation_mode("blenderproc") == "pose_and_masks"
+def test_annotation_modes_require_an_exact_source_pair() -> None:
+    assert resolve_annotation_mode("none", "none") == "none"
+    assert resolve_annotation_mode("blenderproc", "pose_and_masks") == "pose_and_masks"
     assert resolve_annotation_mode("blenderproc", "pose") == "pose"
     with pytest.raises(ValueError, match="requires annotation_source"):
         resolve_annotation_mode("none", "pose")
@@ -125,6 +138,8 @@ def test_manifest_records_pose_only_capability_and_provenance(tmp_path: Path) ->
     manifest_path = write_bop_export_manifest(
         tmp_path,
         [export],
+        annotation_source="blenderproc",
+        annotation_mode="pose",
         annotation_provenance={
             "pose_source": "blenderproc_scene_gt",
             "masks": "absent",

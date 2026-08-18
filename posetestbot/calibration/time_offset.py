@@ -19,21 +19,19 @@ import cv2
 import numpy as np
 
 from posetestbot.calibration.attempt_solver import (
+    solve_extrinsic_consensus,
+)
+from posetestbot.calibration.transforms import (
     invert_transform,
     residual_summary,
-    solve_extrinsic_consensus,
+    robot_ee_to_reference,
     transform_from_record,
     transform_residual,
 )
-from posetestbot.calibration.candidates import _robot_ee_to_reference
 
 
 SCHEMA_VERSION = "calibration_time_offset_search.v1"
-LEGACY_IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_cv.v1"
-LOMO_IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_lomo_cv.v2"
-IMPLEMENTATION_REVISION = (
-    "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5"
-)
+IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5"
 SUPPORTED_IMPLEMENTATION_REVISIONS = frozenset({IMPLEMENTATION_REVISION})
 POLICIES = ("auto_offset", "fixed_zero")
 DEFAULT_POLICY = "fixed_zero"
@@ -53,10 +51,8 @@ DEFAULT_MIN_RELATIVE_IMPROVEMENT = 0.10
 DEFAULT_MAX_ROTATION_DEGRADATION_DEG = 0.10
 DEFAULT_MIN_OFFSET_STABILITY_MS = 20.0
 DEFAULT_MAX_LOMO_SEARCH_ADJUSTED_SIGN_P_VALUE = 0.05
-LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY = "every_cross_validation_fold"
 IMPROVEMENT_EVIDENCE_STRATEGY = "leave_one_motion_out_consistency"
 LOMO_CONSISTENCY_STRATEGY = "leave_one_motion_out_candidate_consistency_bonferroni.v1"
-FAILURE_POLICY_FAIL_CLOSED = "fail_closed"
 FAILURE_POLICY_WARN_KEEP_ZERO = "warn_keep_zero"
 
 
@@ -280,7 +276,7 @@ def _companion_estimate(
     target_pose = observation.get("target_to_camera")
     if not isinstance(robot_pose, Mapping) or not isinstance(target_pose, Mapping):
         raise ValueError("time-offset validation requires robot and target transforms")
-    robot = _robot_ee_to_reference(robot_pose)
+    robot = robot_ee_to_reference(robot_pose)
     target_camera = transform_from_record(target_pose)
     if mode == "eye_in_hand":
         return robot @ primary @ target_camera
@@ -778,8 +774,6 @@ def estimate_sensor_time_offset(
     min_relative_improvement: float = DEFAULT_MIN_RELATIVE_IMPROVEMENT,
     max_rotation_degradation_deg: float = DEFAULT_MAX_ROTATION_DEGRADATION_DEG,
     minimum_offset_stability_ms: float = DEFAULT_MIN_OFFSET_STABILITY_MS,
-    improvement_evidence_strategy: str = IMPROVEMENT_EVIDENCE_STRATEGY,
-    failure_policy: str = FAILURE_POLICY_FAIL_CLOSED,
     max_leave_one_motion_out_search_adjusted_sign_p_value: float = (
         DEFAULT_MAX_LOMO_SEARCH_ADJUSTED_SIGN_P_VALUE
     ),
@@ -792,19 +786,6 @@ def estimate_sensor_time_offset(
     robot_timestamps_ns = [int(item["timestamp_ns"]) for item in robot_records]
     if robot_timestamps_ns != sorted(robot_timestamps_ns):
         raise ValueError(f"{sensor_key}: robot-pose evidence is not time ordered")
-    if improvement_evidence_strategy not in {
-        LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY,
-        IMPROVEMENT_EVIDENCE_STRATEGY,
-    }:
-        raise ValueError(
-            "Unsupported time-offset improvement evidence strategy: "
-            f"{improvement_evidence_strategy}"
-        )
-    if failure_policy not in {
-        FAILURE_POLICY_FAIL_CLOSED,
-        FAILURE_POLICY_WARN_KEEP_ZERO,
-    }:
-        raise ValueError(f"Unsupported time-offset failure policy: {failure_policy}")
     if (
         not math.isfinite(max_nearest_pose_delta_ms)
         or max_nearest_pose_delta_ms <= 0.0
@@ -1034,17 +1015,12 @@ def estimate_sensor_time_offset(
                 max_leave_one_motion_out_search_adjusted_sign_p_value
             ),
         )
-        if improvement_evidence_strategy == IMPROVEMENT_EVIDENCE_STRATEGY
-        and candidate_offset_ms != 0.0
+        if candidate_offset_ms != 0.0
         else None
     )
     improvement_evidence_ok = (
-        every_fold_materially_better
-        if improvement_evidence_strategy == LEGACY_IMPROVEMENT_EVIDENCE_STRATEGY
-        else (
-            isinstance(motion_consistency, Mapping)
-            and motion_consistency.get("status") == "ok"
-        )
+        isinstance(motion_consistency, Mapping)
+        and motion_consistency.get("status") == "ok"
     )
     materially_better = aggregate_materially_better and improvement_evidence_ok
     rotation_guard_ok = all(
@@ -1163,58 +1139,50 @@ def estimate_sensor_time_offset(
                 "minimum_relative_translation": min_relative_improvement,
             },
         },
-        *(
-            [
-                {
-                    "name": "cross_validation_fold_materiality",
-                    "status": (
-                        "ok"
-                        if every_fold_materially_better
-                        else "not_needed"
-                        if all_folds_choose_zero
-                        else "warning"
-                        if aggregate_materially_better
-                        else "error"
-                    ),
-                    "actual": per_fold_improvements,
-                    "threshold": {
-                        "minimum_absolute_translation_mm": (
-                            min_absolute_improvement_mm
-                        ),
-                        "minimum_relative_translation": min_relative_improvement,
-                    },
+        *[
+            {
+                "name": "cross_validation_fold_materiality",
+                "status": (
+                    "ok"
+                    if every_fold_materially_better
+                    else "not_needed"
+                    if all_folds_choose_zero
+                    else "warning"
+                    if aggregate_materially_better
+                    else "error"
+                ),
+                "actual": per_fold_improvements,
+                "threshold": {
+                    "minimum_absolute_translation_mm": (min_absolute_improvement_mm),
+                    "minimum_relative_translation": min_relative_improvement,
                 },
-                {
-                    "name": "leave_one_motion_out_timing_consistency",
-                    "status": (
-                        str(motion_consistency["status"])
-                        if isinstance(motion_consistency, Mapping)
-                        else "not_needed"
+            },
+            {
+                "name": "leave_one_motion_out_timing_consistency",
+                "status": (
+                    str(motion_consistency["status"])
+                    if isinstance(motion_consistency, Mapping)
+                    else "not_needed"
+                ),
+                "actual": (
+                    {
+                        "motion_count": motion_consistency["motion_count"],
+                        "methods": motion_consistency["methods"],
+                    }
+                    if isinstance(motion_consistency, Mapping)
+                    else None
+                ),
+                "threshold": {
+                    "minimum_median_absolute_translation_mm": (
+                        min_absolute_improvement_mm
                     ),
-                    "actual": (
-                        {
-                            "motion_count": motion_consistency["motion_count"],
-                            "methods": motion_consistency["methods"],
-                        }
-                        if isinstance(motion_consistency, Mapping)
-                        else None
+                    "minimum_median_relative_translation": (min_relative_improvement),
+                    "maximum_search_adjusted_positive_sign_p_value": (
+                        max_leave_one_motion_out_search_adjusted_sign_p_value
                     ),
-                    "threshold": {
-                        "minimum_median_absolute_translation_mm": (
-                            min_absolute_improvement_mm
-                        ),
-                        "minimum_median_relative_translation": (
-                            min_relative_improvement
-                        ),
-                        "maximum_search_adjusted_positive_sign_p_value": (
-                            max_leave_one_motion_out_search_adjusted_sign_p_value
-                        ),
-                    },
                 },
-            ]
-            if improvement_evidence_strategy == IMPROVEMENT_EVIDENCE_STRATEGY
-            else []
-        ),
+            },
+        ],
         {
             "name": "cross_validated_rotation_guard",
             "status": "ok" if rotation_guard_ok else "error",
@@ -1249,9 +1217,7 @@ def estimate_sensor_time_offset(
         if zero_offset_identified and not blocking
         else "failed"
     )
-    warning_fallback_used = bool(
-        strict_status == "failed" and failure_policy == FAILURE_POLICY_WARN_KEEP_ZERO
-    )
+    warning_fallback_used = strict_status == "failed"
     status = "kept_zero" if warning_fallback_used else strict_status
     if warning_fallback_used:
         checks = [
@@ -1266,14 +1232,7 @@ def estimate_sensor_time_offset(
             for item in checks
         ]
     reason = (
-        (
-            (
-                "motion_disjoint_cross_validation_and_"
-                "leave_one_motion_out_consistency_passed"
-            )
-            if improvement_evidence_strategy == IMPROVEMENT_EVIDENCE_STRATEGY
-            else "motion_disjoint_cross_validation_passed"
-        )
+        "motion_disjoint_cross_validation_and_leave_one_motion_out_consistency_passed"
         if status == "applied"
         else (
             "ambiguous_auto_offset_kept_recorded_zero"
@@ -1343,7 +1302,7 @@ def estimate_sensor_time_offset(
         "reference_pnp_method": DEFAULT_REFERENCE_PNP_METHOD,
         "reference_extrinsic_methods": list(methods),
         "selection_extrinsic_method": selection_method,
-        "improvement_evidence_strategy": improvement_evidence_strategy,
+        "improvement_evidence_strategy": IMPROVEMENT_EVIDENCE_STRATEGY,
         "method_optima_robot_pose_time_offset_ms": optima,
         "fold_candidate_robot_pose_time_offsets_ms": (fold_candidate_offsets),
         "fold_candidate_spread_ms": fold_candidate_spread_ms,
@@ -1414,8 +1373,8 @@ def sign_convention() -> dict[str, Any]:
         "operator_field": "robot_pose_time_offset_ms",
         "operator_equation": "robot_pose_query_time = frame_time + offset",
         "positive_operator_value": "pair the frame with a robot pose recorded later",
-        "legacy_field": "sync_delta_ms",
-        "legacy_equation": "robot_pose_query_time = frame_time - sync_delta",
+        "synchronizer_field": "sync_delta_ms",
+        "synchronizer_equation": "robot_pose_query_time = frame_time - sync_delta",
         "conversion": "sync_delta_ms = -robot_pose_time_offset_ms",
         "raw_timestamps_rewritten": False,
         "physical_clock_synchronization_claimed": False,
