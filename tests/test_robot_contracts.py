@@ -49,10 +49,42 @@ def test_robot_udp_exposes_only_structured_current_commands() -> None:
     }
     assert udp.structured_stop_command() == {
         "schema_version": "robot_command.v1",
-        "command": "exit_idle_program",
+        "command": "stop_after_current_motion",
     }
     assert not hasattr(udp, "legacy_start_command")
     assert not hasattr(udp, "legacy_stop_command")
+
+
+def test_structured_stop_matches_the_commissioned_sunrise_applications() -> None:
+    assert udp.IDLE_EXIT_COMMAND == "stop_after_current_motion"
+    for path in Path("iiwa").glob("*Application.java"):
+        java = path.read_text()
+        assert (
+            'private static final String IDLE_EXIT_COMMAND =\n'
+            '\t\t\t"stop_after_current_motion";' in java
+        ), path.name
+        assert "&& IDLE_EXIT_COMMAND.equals(jsonObject.get(\"command\"));" in java
+        assert '"exit_idle_program"' not in java
+
+
+def test_send_stop_sends_the_commissioned_structured_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[tuple[dict, str, int]] = []
+    monkeypatch.setattr(
+        udp,
+        "send_udp_json",
+        lambda message, ip, port: sent.append((message, ip, port)),
+    )
+    profile = robot_profile()
+
+    message = udp.send_stop(profile)
+
+    assert message == {
+        "schema_version": "robot_command.v1",
+        "command": "stop_after_current_motion",
+    }
+    assert sent == [(message, LAB_ROBOT_IP, DEFAULT_ROBOT_PORT)]
 
 
 @pytest.mark.parametrize("run_id", ["run-1", str(uuid.uuid4()).upper(), ""])

@@ -57,14 +57,15 @@ def test_static_camera_application_uses_base_and_one_extra_taught_point() -> Non
     ]
 
 
-def test_static_camera_grid_stays_at_or_above_bottom_middle_in_base_z() -> None:
+def test_static_camera_grid_and_depth_follow_the_exact_tcp_coordinate_plan() -> None:
     java = JAVA_PATH.read_text()
 
     half_width_match = re.search(r"GRID_HALF_WIDTH_MM = ([0-9.]+);", java)
     row_spacing_match = re.search(r"GRID_ROW_SPACING_MM = ([0-9.]+);", java)
     center_offset_match = re.search(
-        r"PATTERN_CENTER_Z_OFFSET_MM = ([0-9.]+);", java
+        r"PATTERN_CENTER_X_OFFSET_MM = (-?[0-9.]+);", java
     )
+    depth_dither_match = re.search(r"DEPTH_DITHER_MM = ([0-9.]+);", java)
     relative_limit_match = re.search(
         r"MAX_RELATIVE_TRANSLATION_MM = ([0-9.]+);", java
     )
@@ -75,56 +76,60 @@ def test_static_camera_grid_stays_at_or_above_bottom_middle_in_base_z() -> None:
     assert half_width_match is not None
     assert row_spacing_match is not None
     assert center_offset_match is not None
+    assert depth_dither_match is not None
     assert relative_limit_match is not None
     assert bottom_limit_match is not None
     assert start_limit_match is not None
     half_width = float(half_width_match.group(1))
     row_spacing = float(row_spacing_match.group(1))
     center_offset = float(center_offset_match.group(1))
+    depth_dither = float(depth_dither_match.group(1))
     relative_limit = float(relative_limit_match.group(1))
     bottom_limit = float(bottom_limit_match.group(1))
     start_limit = float(start_limit_match.group(1))
 
     assert half_width == 65.0
-    assert row_spacing == center_offset == 50.0
-    assert math.hypot(half_width, row_spacing) < relative_limit == 100.0
+    assert row_spacing == -center_offset == depth_dither == 50.0
+    assert math.hypot(half_width, center_offset) < relative_limit == 100.0
     assert math.hypot(half_width, 2.0 * row_spacing) < bottom_limit == 125.0
+    assert math.hypot(center_offset, depth_dither) < bottom_limit
     assert start_limit == 25.0 < bottom_limit
     assert "radiusMm > MAX_RELATIVE_TRANSLATION_MM" in java
-    assert "PATTERN_CENTER_Z_OFFSET_MM != GRID_ROW_SPACING_MM" in java
+    assert "PATTERN_CENTER_X_OFFSET_MM != -GRID_ROW_SPACING_MM" in java
     assert "furthestPointFromBottomMm > MAX_BOTTOM_MIDDLE_TRANSLATION_MM" in java
-    assert "zFromBottomMiddleMm < 0.0" in java
+    assert "xFromBottomMiddleMm > 0.0" in java
+    assert "X must be non-positive" in java
+    assert "!isFinite(yFromBottomMiddleMm)" in java
+    assert "!isFinite(zFromBottomMiddleMm)" in java
     assert "validateProgramEnvelope();" in java
-    assert "DEPTH_DITHER_MM" not in java
-    assert "runRelativeDepthDither" not in java
 
     grid_body = java.split("private void runRelativePlanarGrid", 1)[1].split(
-        "private void capturePlanarGridLeg", 1
+        "private void runRelativeDepthDither", 1
     )[0]
     grid_calls = [
         tuple(value.strip() for value in match)
         for match in re.findall(
-            r"capturePlanarGridLeg\(\s*"
-            r"([^,]+),\s*([^,]+),\s*"
-            r"([^,]+),\s*([^,]+),\s*"
+            r"captureTranslationLeg\(\s*"
+            r"([^,]+),\s*([^,]+),\s*([^,]+),\s*"
+            r"([^,]+),\s*([^,]+),\s*([^,]+),\s*"
             r'cartVelocityMmS,\s*"([^"]+)"\);',
             grid_body,
         )
     ]
     grid_route = [
-        ("0.0", "0.0"),
-        ("-GRID_HALF_WIDTH_MM", "0.0"),
-        ("-GRID_HALF_WIDTH_MM", "PATTERN_CENTER_Z_OFFSET_MM"),
-        ("-GRID_HALF_WIDTH_MM", "2.0 * GRID_ROW_SPACING_MM"),
-        ("0.0", "2.0 * GRID_ROW_SPACING_MM"),
-        ("GRID_HALF_WIDTH_MM", "2.0 * GRID_ROW_SPACING_MM"),
-        ("GRID_HALF_WIDTH_MM", "PATTERN_CENTER_Z_OFFSET_MM"),
-        ("GRID_HALF_WIDTH_MM", "0.0"),
-        ("0.0", "PATTERN_CENTER_Z_OFFSET_MM"),
+        ("0.0", "0.0", "0.0"),
+        ("0.0", "-GRID_HALF_WIDTH_MM", "0.0"),
+        ("PATTERN_CENTER_X_OFFSET_MM", "-GRID_HALF_WIDTH_MM", "0.0"),
+        ("2.0 * PATTERN_CENTER_X_OFFSET_MM", "-GRID_HALF_WIDTH_MM", "0.0"),
+        ("2.0 * PATTERN_CENTER_X_OFFSET_MM", "0.0", "0.0"),
+        ("2.0 * PATTERN_CENTER_X_OFFSET_MM", "GRID_HALF_WIDTH_MM", "0.0"),
+        ("PATTERN_CENTER_X_OFFSET_MM", "GRID_HALF_WIDTH_MM", "0.0"),
+        ("0.0", "GRID_HALF_WIDTH_MM", "0.0"),
+        ("PATTERN_CENTER_X_OFFSET_MM", "0.0", "0.0"),
     ]
-    assert [call[:2] for call in grid_calls] == grid_route[:-1]
-    assert [call[2:4] for call in grid_calls] == grid_route[1:]
-    assert [call[4] for call in grid_calls] == [
+    assert [call[:3] for call in grid_calls] == grid_route[:-1]
+    assert [call[3:6] for call in grid_calls] == grid_route[1:]
+    assert [call[6] for call in grid_calls] == [
         "grid_bottom_middle_to_bottom_left",
         "grid_bottom_left_to_middle_left",
         "grid_middle_left_to_top_left",
@@ -134,12 +139,39 @@ def test_static_camera_grid_stays_at_or_above_bottom_middle_in_base_z() -> None:
         "grid_middle_right_to_bottom_right",
         "grid_bottom_right_to_center",
     ]
-    grid_helper = java.split("private void capturePlanarGridLeg", 1)[1].split(
+    depth_body = java.split("private void runRelativeDepthDither", 1)[1].split(
+        "private void captureTranslationLeg", 1
+    )[0]
+    depth_calls = [
+        tuple(value.strip() for value in match)
+        for match in re.findall(
+            r"captureTranslationLeg\(\s*"
+            r"([^,]+),\s*([^,]+),\s*([^,]+),\s*"
+            r"([^,]+),\s*([^,]+),\s*([^,]+),\s*"
+            r'cartVelocityMmS,\s*"([^"]+)"\);',
+            depth_body,
+        )
+    ]
+    center = ("PATTERN_CENTER_X_OFFSET_MM", "0.0", "0.0")
+    toward = ("PATTERN_CENTER_X_OFFSET_MM", "0.0", "DEPTH_DITHER_MM")
+    away = ("PATTERN_CENTER_X_OFFSET_MM", "0.0", "-DEPTH_DITHER_MM")
+    assert [call[:3] for call in depth_calls] == [center, toward, center, away]
+    assert [call[3:6] for call in depth_calls] == [toward, center, away, center]
+    assert [call[6] for call in depth_calls] == [
+        "depth_center_to_toward_camera",
+        "depth_toward_camera_to_center",
+        "depth_center_to_away_from_camera",
+        "depth_away_from_camera_to_center",
+    ]
+
+    translation_helper = java.split("private void captureTranslationLeg", 1)[1].split(
         "private void runRelativeOrientationDither", 1
     )[0]
-    assert "toXMm - fromXMm, 0.0, toZMm - fromZMm," in grid_helper
-    assert grid_helper.count("requireGridPointInsideEnvelope(") == 2
-    assert "toYMm" not in grid_helper
+    assert "toXMm - fromXMm," in translation_helper
+    assert "toYMm - fromYMm," in translation_helper
+    assert "toZMm - fromZMm," in translation_helper
+    assert translation_helper.count("requireTcpEndpointInsideEnvelope(") == 2
+    assert "+X moves\n * the target image-down, +Y image-right" in java
 
 
 def test_static_camera_program_waits_for_start_before_any_robot_motion() -> None:
@@ -148,7 +180,7 @@ def test_static_camera_program_waits_for_start_before_any_robot_motion() -> None
         "private void runCapture", 1
     )[0]
     capture_body = java.split("private void runCapture", 1)[1].split(
-        "private void runRelativePlanarGrid", 1
+        "private void moveFromPatternCenterToBottomMiddle", 1
     )[0]
 
     assert run_body.index("waitForStartCommand()") < run_body.index(
@@ -165,6 +197,9 @@ def test_static_camera_program_waits_for_start_before_any_robot_motion() -> None
         capture_body.index("runRelativePlanarGrid(cartVelocityMmS)")
     )
     assert capture_body.index("runRelativePlanarGrid(cartVelocityMmS)") < (
+        capture_body.index("runRelativeDepthDither(cartVelocityMmS)")
+    )
+    assert capture_body.index("runRelativeDepthDither(cartVelocityMmS)") < (
         capture_body.index("runRelativeOrientationDither(cartVelocityMmS)")
     )
     assert capture_body.index("runRelativeOrientationDither(cartVelocityMmS)") < (
@@ -174,7 +209,7 @@ def test_static_camera_program_waits_for_start_before_any_robot_motion() -> None
         "moveFromPatternCenterToBottomMiddle(cartVelocityMmS)"
     ) < capture_body.index("poseStream.finishCapture();")
     assert 'moveToBottomMiddle("capture end anchor confirmation")' not in java
-    assert "runRelativeDepthDither" not in java
+    assert "runRelativeDepthDither" in java
     assert "robot.getCurrentCartesianPosition(" in java
     assert "radiusMm > MAX_START_TRANSLATION_MM" in java
     assert "moveFromBottomMiddleToPatternCenter" not in java
@@ -183,8 +218,8 @@ def test_static_camera_program_waits_for_start_before_any_robot_motion() -> None
         "private void moveFromPatternCenterToBottomMiddle", 1
     )[1].split("private void runRelativePlanarGrid", 1)[0]
     assert (
-        "0.0, PATTERN_CENTER_Z_OFFSET_MM,\n"
-        "\t\t\t\t0.0, 0.0,"
+        "PATTERN_CENTER_X_OFFSET_MM, 0.0, 0.0,\n"
+        "\t\t\t\t0.0, 0.0, 0.0,"
         in bottom_move_body
     )
     assert '"pattern_center_to_bottom_middle"' in bottom_move_body
@@ -205,9 +240,11 @@ def test_static_camera_relative_motion_and_pose_stream_contracts_are_preserved()
     )[1].split("private void settleAtCurrentPose", 1)[0]
 
     assert "Transformation.ofDeg(" in java
-    assert "linRel(offset, referenceFrame)" in java
-    assert "offset, poseTemplateBase, cartVelocityMmS, motionName" in translation_body
-    assert "calibrationStaticBottomMiddle," in orientation_body
+    assert "robot.move(linRel(offset)" in relative_motion_body
+    assert "linRel(offset," not in relative_motion_body
+    assert "ObjectFrame referenceFrame" not in relative_motion_body
+    assert "poseTemplateBase" not in translation_body
+    assert "calibrationStaticBottomMiddle" not in orientation_body
     assert "new Frame(" not in java
     assert "command.runId,\n\t\t\t\tPOSE_TEMPLATE_BASE_PATH);" in java
     assert "poseStream.startMotion(motionName);" in java
@@ -235,8 +272,6 @@ def test_static_camera_program_uses_ordered_center_orientation_sweeps() -> None:
         1
     ].split("private void captureOrientationLeg", 1)[0]
 
-    assert "DEPTH_DITHER_MM" not in java
-    assert "captureDepthLeg" not in java
     orientation_calls = [
         tuple(value.strip() for value in match)
         for match in re.findall(
@@ -274,3 +309,6 @@ def test_static_camera_program_uses_ordered_center_orientation_sweeps() -> None:
     assert "ORIENTATION_DITHER_DEG = 10.0" in java
     assert "captureRelativeOrientation(" in java
     assert "-alphaDeg, -betaDeg, -gammaDeg," not in java
+    assert java.count("captureTranslationLeg(") - 1 == 13
+    assert len(orientation_calls) == 9
+    assert 13 + len(orientation_calls) == 22

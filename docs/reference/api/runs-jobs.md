@@ -18,6 +18,10 @@ durable in-process work submitted through `LocalJobRunner`.
 The `/ui/*` prefix means console-facing composition, not unrestricted file
 access. All supplied paths and identifiers remain validated.
 
+The top-bar run switcher uses the ordered `/ui/runs` index and stores its
+selection only in browser-local context. It changes which contained run is used
+by run-owned pages and actions; it does not mutate, move, or delete a run.
+
 ## Run-folder operations
 
 | Method and path | Contract |

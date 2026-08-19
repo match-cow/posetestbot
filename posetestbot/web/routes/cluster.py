@@ -287,8 +287,9 @@ def _public_job(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise RuntimeError("The controller returned an invalid job")
     job_id = _require_id(value.get("job_id"))
+    controller_payload = value.get("payload")
     payload = _selected_mapping(
-        value.get("payload"),
+        controller_payload,
         {
             "run_root",
             "estimator_id",
@@ -300,6 +301,13 @@ def _public_job(value: Any) -> dict[str, Any]:
             "operator",
         },
     )
+    if (
+        isinstance(controller_payload, Mapping)
+        and controller_payload.get("archive_id") is not None
+    ):
+        payload["archive_id"] = _require_id(
+            controller_payload.get("archive_id"), prefix="archive"
+        )
     result = _selected_mapping(
         value.get("result"),
         {
@@ -1169,6 +1177,29 @@ def restore_cluster_archive(archive_id: str):
                 "operator": operator.strip(),
             },
             idempotency_key=new_idempotency_key("archive-restore"),
+        )
+        return jsonify(_public_job_response(response)), 202
+    except Exception as exc:
+        return _error(exc)
+
+
+@cluster_bp.delete("/cluster/archives/<archive_id>")
+def delete_cluster_archive(archive_id: str):
+    try:
+        _require_cluster_enabled()
+        _require_id(archive_id, prefix="archive")
+        value = _json_object()
+        if set(value) != {"confirm", "operator"}:
+            raise ValueError("Archive deletion contains unsupported fields")
+        if value.get("confirm") is not True:
+            raise ValueError("Archive deletion requires explicit confirmation")
+        operator = value.get("operator")
+        if not isinstance(operator, str) or not 2 <= len(operator.strip()) <= 120:
+            raise ValueError("operator must contain between 2 and 120 characters")
+        response = get_cluster_client().delete_archive(
+            archive_id,
+            {"confirm": True, "operator": operator.strip()},
+            idempotency_key=new_idempotency_key("archive-delete"),
         )
         return jsonify(_public_job_response(response)), 202
     except Exception as exc:

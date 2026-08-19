@@ -37,6 +37,17 @@ An attempt retains `request.json`, `progress.json`, intermediate search and
 candidate files, ranking/check evidence, selected target, candidate profiles,
 and promotion evidence below `processed/calibration/<attempt_id>/`.
 
+`GET /calibration/attempts/<attempt_id>` also derives a non-artifact
+`promotion_review` from the immutable candidate evidence. Alternative solver
+failures are diagnostic and do not block a complete selected bundle. For a
+multi-camera bundle, pairwise disagreement between the independently estimated
+common companion transforms is advisory above 10 mm or 5° and fails closed
+above 20 mm or 10°. A response status of `promotable_with_warnings` enables
+explicit promotion while preserving the exact warning evidence in the promoted
+profiles. The promotion transaction revalidates historical attempts under
+their recorded policy before applying this current retention rule; it does not
+rewrite `ranking.json`.
+
 Typical submission shape:
 
 ```json

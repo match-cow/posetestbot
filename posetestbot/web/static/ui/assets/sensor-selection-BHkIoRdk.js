@@ -1,1 +1,0 @@
-const t="posetestbot.selectedSensors";function s(){try{const e=JSON.parse(localStorage.getItem(t)??"[]");return Array.isArray(e)?new Set(e.filter(r=>typeof r=="string")):new Set}catch{return new Set}}function n(e){localStorage.setItem(t,JSON.stringify([...e].sort()))}export{s as l,n as s};

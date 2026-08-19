@@ -11,10 +11,12 @@ from posetestbot.pipeline.orchestration import (
     capture_job_recipe,
     dataset_processing_commands,
     dataset_processing_job_recipe,
+    execute_capture,
     plan_capture,
     preflight_job_recipe,
     process_dataset,
 )
+from posetestbot.pipeline.preflight import write_run_preflight_report
 from posetestbot.pipeline.run_config import (
     create_run_config,
     sensor_config_from_token,
@@ -208,6 +210,71 @@ def test_plan_and_job_recipes_are_fixed_and_purpose_scoped(tmp_path: Path) -> No
         )
 
 
+def test_capture_rechecks_camera_before_writing_capture_artifacts(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "blocked-before-plan"
+    config = _write_config(run_root, intent="calibration")
+    write_run_preflight_report(
+        run_root,
+        {
+            "schema_version": "run_preflight.v2",
+            "overall_status": "ok",
+            "config": config,
+            "selected_sensor_readiness": {
+                "schema_version": "selected_sensor_readiness.v1",
+                "selected_count": 1,
+                "ready_count": 1,
+                "all_ready": True,
+                "probe_contract": {
+                    "record": False,
+                    "frames_per_camera": 1,
+                    "timeout_s_per_camera": 15.0,
+                },
+                "probes": [
+                    {
+                        "sensor_type": "realsense_d435",
+                        "device_id": SENSOR_ID,
+                        "capture_ready": True,
+                        "status": "ready",
+                        "recorded_output": False,
+                    }
+                ],
+            },
+        },
+    )
+    blocked_readiness = {
+        "schema_version": "selected_sensor_readiness.v1",
+        "selected_count": 1,
+        "ready_count": 0,
+        "all_ready": False,
+        "probes": [
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": SENSOR_ID,
+                "capture_ready": False,
+                "status": "blocked",
+                "message": "Selected camera is held by a crashed recorder.",
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="held by a crashed recorder"):
+        execute_capture(
+            run_root,
+            intent="calibration",
+            allow_cameras=True,
+            allow_real_robot=True,
+            probe_selected_sensors=lambda _config: blocked_readiness,
+        )
+
+    assert not (run_root / "capture_plan.json").exists()
+    assert not (run_root / "capture_plan_preflight_report.json").exists()
+    assert not (run_root / "capture_execution_plan.json").exists()
+    assert not (run_root / "capture_execution_logs").exists()
+    assert not (run_root / f"realsense_{SENSOR_ID}").exists()
+
+
 def test_capture_completion_requires_only_current_raw_contracts(tmp_path: Path) -> None:
     run_root = tmp_path / "capture"
     config = _write_config(run_root, intent="calibration")
@@ -324,6 +391,8 @@ def test_dataset_processing_is_exactly_four_fail_fast_commands(
             "python",
             "scripts/run_camera_rectification.py",
             run_root.as_posix(),
+            "--intrinsic-profiles",
+            INTRINSIC_PROFILES,
             "--overwrite",
         ),
         (

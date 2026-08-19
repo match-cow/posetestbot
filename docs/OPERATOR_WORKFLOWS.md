@@ -9,17 +9,23 @@ Every long-running action is a background job. A submission continues after
 navigation and remains visible on **Jobs** with its resources, status, log, and
 failure evidence.
 
+The compact **Active acquisition run** control in the top bar switches the
+browser-local run context in place, so operators can move between discovered
+runs without leaving the current page. Use **Run folders** beside it when
+creating a fresh acquisition folder or performing inventory, archive, move, or
+delete work. Switching context does not modify either run.
+
 ## Scope of supporting pages
 
 | Page | Scope | Workflow handoff |
 | --- | --- | --- |
 | Dashboard | Read-only status plus the sole manual IIWA Start/Stop controls | Return to the active workflow after checking the cell |
-| Devices | Reusable sensor aliases, read-only discovery, previews, snapshots | Workflow step 1 snapshots/edit run-owned camera settings |
+| Devices | Reusable sensor aliases/mounting/orientation defaults, read-only discovery, previews, snapshots | Workflow step 1 exclusively selects cameras and snapshots/edits run-owned settings |
 | Cell View | Run-owned geometry, camera frames, trajectory, and provenance | Review capture or exported dataset evidence |
 | Calibration Targets | Global reusable printable target bundles | Select the exact physical grid for calibration step 2 |
 | Workpiece Catalogue | Global CAD/geometry metadata and lifecycle | Author inputs before creating a pose template |
 | Pose Templates | Global immutable template authoring and run selection | Confirm placement in dataset step 2 |
-| Run Folders | Contained run inventory, move/delete, cluster archive | Choose a root before creating configuration |
+| Run Folders | Contained run inventory, move/delete, and cluster archive copy/restore/delete | Choose a root before creating configuration |
 | Pose Estimation | Browser-safe handoff to advertised external estimators | Requires an appropriate completed BOP export |
 | BOP Evaluation | Inspect-only standard-result validation | Requires annotations and an immutable BOP19 CSV |
 
@@ -32,6 +38,11 @@ sensor identities, mounting mode, resolution, frame rate, orientation, and
 supervised velocity. Saving writes `run_config.v4`; it does not open hardware
 or authorize motion.
 
+The **Devices** page does not select cameras for a future run. Workflow step 1
+lists detected cameras alongside any saved run cameras; **Use for this
+recording** is the only camera-membership control, and the choice becomes
+durable only when setup is saved.
+
 All enabled cameras in one attempt must use the supported mounting
 arrangement. Robot-mounted cameras observe a grid fixed in
 `PoseTemplateBase`; static cameras observe a grid rigidly attached to the
@@ -41,21 +52,27 @@ robot flange.
 
 Select the immutable bundle that exactly matches the physical board. The run
 records its UUID, hashes, geometry, and mounting frame. Generate a new global
-bundle only when the printed target changes.
+bundle only when the printed target changes. When target selection was opened
+from this workflow step, a successful selection returns directly to step 3;
+the standalone library page remains available for reusable-target authoring.
 
 ### 3. Check readiness
 
 Queue the consolidated preflight and resolve every visible blocker. The saved
-report identifies the configuration checked. Readiness is evidence, not
-execution permission; time-sensitive checks are repeated at capture startup.
+report identifies the configuration checked. Preflight briefly opens every
+enabled selected camera through its configured RGB-D adapter and requires one
+frame, but records nothing. SDK enumeration alone is insufficient: a camera
+held by a stale or crashed recorder blocks readiness. Readiness is evidence,
+not execution permission; the camera-open check is repeated at capture startup.
 
 ### 4. Record calibration images
 
-Mount the selected target as recorded, clear the workcell, and explicitly
-acknowledge both camera access and robot execution. The fixed recipe writes its
-plan, plan preflight, execution plan, status, logs, and completion report.
-Partial evidence is retained if a child fails. Do not send IIWA Stop between
-calibration captures.
+Mount the selected target as recorded, clear the workcell, and use the single
+fresh checkbox to authorize both camera access and robot execution. The fixed
+recipe rechecks selected-camera availability before writing its plan, plan
+preflight, execution plan, status, logs, or raw sensor folders. A blocked camera
+therefore leaves the run reusable. After camera startup begins, partial evidence
+is retained if a child fails. Do not send IIWA Stop between calibration captures.
 
 ### 5. Calculate, review, and publish
 
@@ -98,14 +115,16 @@ library item; return to this workflow to bind it to the active run.
 
 Queue preflight after calibration and placement are confirmed. Resolve missing
 camera profiles, stale hashes, invalid timing policy, target/template conflict,
-storage, status, or path blockers before capture.
+storage, status, or path blockers before capture. Each enabled selected camera
+must also pass the bounded one-frame, non-recording open probe; a merely
+enumerated but process-blocked camera fails readiness.
 
 ### 4. Record the object dataset
 
-Place objects exactly as confirmed, clear the workcell, and submit both fresh
-execution acknowledgements. Raw RGB, depth, current frame metadata, and strict
-`robot_pose.v1` packets are preserved. Never reuse a prior run folder for a new
-physical capture.
+Place objects exactly as confirmed, clear the workcell, and submit the single
+fresh acknowledgement covering both execution permissions. Raw RGB, depth,
+current frame metadata, and strict `robot_pose.v1` packets are preserved. Never
+reuse a prior run folder for a new physical capture.
 
 ### 5. Process frames and create the base BOP export
 
@@ -133,11 +152,16 @@ estimation itself remains in the separate controller/consumer boundary.
 
 ## Physical controls
 
-The Dashboard is the only page with IIWA Start and Stop.
+The Dashboard is the only page with the IIWA **Start program** and **End
+program** controls.
 
-- Start requires a configured run and fresh camera and robot acknowledgements.
-- “Stop / exit idle IIWA program” requires explicit confirmation. It cannot
-  interrupt active motion and is not an emergency stop.
+- Start requires a configured run and one fresh acknowledgement covering
+  camera/receiver readiness and robot motion. The request still carries the
+  separate `allow_cameras` and `allow_real_robot` gates so either missing
+  permission fails closed.
+- **End program** requires explicit confirmation. Its confirmation dialog
+  explains that it cannot interrupt active motion, is not an emergency stop,
+  and exits only an idle waiting program.
 - The target is always the fixed lab profile `172.31.1.147:30300`; the browser
   cannot override IP or port.
 - Capture cancellation stops/cleans child processes but never sends IIWA Stop.

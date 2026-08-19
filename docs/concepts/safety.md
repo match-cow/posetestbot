@@ -26,9 +26,23 @@ same request:
 }
 ```
 
+The console collects these permissions with one fresh combined checkbox, then
+sends both gates in the request. The HTTP and CLI boundaries retain the two
+literal booleans so a missing permission still fails closed.
+
 Strings such as `"true"`, saved browser preferences, earlier acknowledgements,
 and successful status calls do not satisfy this contract. Capture preflight
 separately requires a fresh literal `allow_real_robot: true`.
+
+## Selected-camera readiness
+
+Sensor discovery proves identity and transport visibility, not exclusive
+capture availability. The queued Workflow readiness check briefly starts the
+configured RGB-D stream on every enabled selected camera and requires one frame.
+It records no frames and never commands the robot. A busy, wedged, timed-out, or
+otherwise non-openable camera is **blocked**, even if the SDK still enumerates
+it. Capture repeats this probe before creating capture plans, execution logs, or
+raw sensor folders.
 
 ## IIWA constraints
 

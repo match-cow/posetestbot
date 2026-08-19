@@ -22,7 +22,7 @@ ambiguously retaught frame.
 | Use | Persistent Sunrise frame | Repository frame role |
 | --- | --- | --- |
 | Nine-frame calibration motion waypoints | `/PoseTestBot/TemplateBase` | Motion planning only; not a run transform endpoint |
-| Single-frame static-calibration bottom-center point | `/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle` | Lowest permitted `PoseTemplateBase.Z` grid point; generated X/Z grid uses the parent axes |
+| Single-frame static-calibration bottom-center point | `/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle` | Absolute PTP anchor and 25 mm start-proximity reference; generated relative motion uses live flange/default-TCP axes |
 | Static-calibration and ordinary-capture pose stream | `/PoseTestBot/PoseTemplateBase` | Run `template_base` and static `camera → template_base` result |
 | Calibration board geometry, static cameras | Target bundle `aruco_grid` | Unknown rigid `aruco_grid → robot_flange`, estimated as support evidence |
 | Calibration board geometry, eye-in-hand cameras | Target bundle `aruco_grid` | Explicit or estimated `aruco_grid → template_base` placement |
@@ -35,9 +35,21 @@ relationship to `/PoseTestBot/TemplateBase` as commissioning evidence for the
 motion plan. That relationship is not needed by the static-camera solver.
 The [single-frame static-camera alternative](IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md)
 adds its sole taught bottom-center grid point as a child of that Application
-Data frame; it does not change the pose-stream endpoint. Generated
-translations use the parent `PoseTemplateBase` X/Z axes, not the child
-frame's local axes.
+Data frame; it does not change the pose-stream endpoint. That application
+resolves `PoseTemplateBase` fail-closed but supplies no persistent frame to its
+`LIN_REL` calls: its grid, depth, orientation, and return legs use the live
+robot-flange/default-TCP axes. The commissioned convention is +X
+image-down/toward the floor, +Y robot-left/image-right, and +Z toward the
+primary static camera. The image-plane route therefore uses negative X to move
+up and negative Y to move image-left. This is the robot's flange/default motion
+frame, not a separately offset Workbench `Tool` TCP.
+
+The motion frame and evidence frame are intentionally distinct. Static
+calibration pose packets remain immutable
+`robot_flange → template_base` observations in
+`/PoseTestBot/PoseTemplateBase`, and the reusable result remains
+`camera → PoseTemplateBase`, regardless of which live flange axes generate a
+relative calibration leg.
 
 The word `template_base` in run artifacts is a semantic role, not a Sunrise
 path. Both static-camera calibration and ordinary dataset capture map that role
@@ -173,10 +185,21 @@ packet is still sent three times because UDP delivery is not guaranteed.
 ## Stop and Safety Contract
 
 The application reads the command socket only while idle. A structured UDP
-stop request therefore cannot interrupt the active A1 motion.
+stop request uses the commissioned `robot_command.v1` wire token:
+
+```json
+{
+  "schema_version": "robot_command.v1",
+  "command": "stop_after_current_motion"
+}
+```
+
+Despite the protocol token's name, the socket is not open during motion, so a
+request cannot interrupt the active A1 motion and may be lost if sent then.
 It is not an emergency stop or other safety function; while idle it only exits
-the application. Use the controller's approved safety response for an unsafe
-condition.
+the application. The token is pinned to the commissioned Sunrise deployment
+and must not be renamed on the host without a coordinated controller rollout.
+Use the controller's approved safety response for an unsafe condition.
 
 ## Commissioning Minimum
 

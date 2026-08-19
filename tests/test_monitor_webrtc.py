@@ -83,6 +83,47 @@ def test_bgr_frame_conversion_assigns_90khz_timestamps() -> None:
     assert second.time_base == Fraction(1, 90_000)
 
 
+def test_monitor_track_preserves_pixels_for_browser_orientation(monkeypatch) -> None:
+    image = np.array(
+        [
+            [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+            [[10, 11, 12], [13, 14, 15], [16, 17, 18]],
+        ],
+        dtype=np.uint8,
+    )
+
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.released = False
+
+        def read(self):
+            return True, image.copy()
+
+        def release(self) -> None:
+            self.released = True
+
+    capture = FakeCapture()
+
+    async def run_inline(function, *args):
+        return function(*args)
+
+    monkeypatch.setattr(webrtc.asyncio, "to_thread", run_inline)
+
+    async def receive_frame() -> np.ndarray:
+        track = webrtc.OpenCVVideoTrack(
+            capture,
+            fps=30,
+            selected_path="/dev/video18",
+        )
+        try:
+            return (await track.recv()).to_ndarray(format="bgr24")
+        finally:
+            track.stop()
+
+    assert np.array_equal(asyncio.run(receive_frame()), image)
+    assert capture.released is True
+
+
 def test_brightness_autocalibrator_converges_with_bounded_camera_updates() -> None:
     current = {"value": 0}
     statuses: list[dict] = []

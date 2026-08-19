@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 import time
 from datetime import UTC, datetime
@@ -512,7 +513,7 @@ def sensor_card(page, sensor_key: str):
     return page.locator(f'[data-testid="sensor-card"][data-sensor-key="{sensor_key}"]')
 
 
-def test_unready_camera_is_not_presented_as_usable_and_can_be_deselected(
+def test_unready_camera_is_not_presented_as_usable_or_selectable_on_devices(
     preview_server,
     page,
     monkeypatch,
@@ -523,11 +524,6 @@ def test_unready_camera_is_not_presented_as_usable_and_can_be_deselected(
         "collect_sensor_status",
         fake_sensor_status_with_unready_camera,
     )
-    selected_json = json.dumps(json.dumps([SENSOR_B]))
-    page.add_init_script(
-        f'window.localStorage.setItem("posetestbot.selectedSensors", {selected_json})'
-    )
-
     page.goto(f"{server.url}/#/devices", wait_until="domcontentloaded")
 
     unready = sensor_card(page, SENSOR_B)
@@ -542,18 +538,10 @@ def test_unready_camera_is_not_presented_as_usable_and_can_be_deselected(
     )
     expect(unready.get_by_role("button", name="Snapshot")).to_be_disabled()
 
-    use_in_run = unready.locator('[data-testid="sensor-run-selection"]')
-    expect(use_in_run).to_be_checked()
-    expect(use_in_run).to_be_enabled()
-    use_in_run.click()
-    expect(use_in_run).not_to_be_checked()
-    expect(use_in_run).to_be_disabled()
-    assert (
-        page.evaluate(
-            'JSON.parse(window.localStorage.getItem("posetestbot.selectedSensors"))'
-        )
-        == []
-    )
+    expect(unready.locator('[data-testid="sensor-run-selection"]')).to_have_count(0)
+    expect(
+        page.get_by_text("Camera selection belongs exclusively to Workflow step 1.")
+    ).to_be_visible()
     assert runner.submitted == []
 
 
@@ -652,6 +640,8 @@ def test_sidebar_webcam_monitor_plays_synthetic_webrtc_without_jpegs(
             "data-connection-state", "connected", timeout=15_000
         )
         expect(video).to_be_visible()
+        expect(video).to_have_class(re.compile(r"\brotate-180\b"))
+        assert video.evaluate("element => getComputedStyle(element).rotate") == "180deg"
         wait_for(
             lambda: bool(
                 (status := load_monitor_status(monitor_root))

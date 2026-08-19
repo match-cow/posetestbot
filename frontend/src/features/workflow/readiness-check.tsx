@@ -139,8 +139,8 @@ export function ReadinessCheck({ runRoot, intent, preflight, loading = false, re
     <CardHeader>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <div className="flex items-center gap-2"><CardTitle className="text-base">One readiness check</CardTitle><HelpTip label="readiness check">This single operator step validates saved configuration, provenance, current device/runtime visibility, and the fixed workflow recipe. Capture separately checks live device identity, empty output, and safety immediately before hardware starts.</HelpTip></div>
-          <CardDescription className="mt-1">This does not reserve cameras or prove that capture output is still empty. Nothing physical starts here.</CardDescription>
+          <div className="flex items-center gap-2"><CardTitle className="text-base">One readiness check</CardTitle><HelpTip label="readiness check">This step validates saved configuration and provenance, then briefly opens every enabled selected camera through its configured RGB-D adapter. Each camera must deliver one frame; SDK visibility alone is not enough.</HelpTip></div>
+          <CardDescription className="mt-1">Selected cameras open briefly without recording. The robot never moves, and cameras are released when the check ends.</CardDescription>
         </div>
         <Button onClick={() => check.mutate()} disabled={check.isPending || loading || jobHistoryPending || jobHistoryUnavailable || active} variant={ready ? "outline" : "default"}>
           <RefreshCw aria-hidden="true" className={check.isPending || active ? "animate-spin" : ""} />
@@ -186,7 +186,7 @@ export function ReadinessCheck({ runRoot, intent, preflight, loading = false, re
       </div>}
       <div className={`flex items-start gap-2 rounded-lg border p-3 text-xs ${ready ? "border-success/30 bg-success/5 text-success" : "border-warning/30 bg-warning/5 text-muted-foreground"}`}>
         <ShieldCheck aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-        <span>{ready ? "All required items are ready. Physical capture remains separately gated by two fresh confirmations." : "Resolve every required item, then run this check again. Optional items never block capture."}</span>
+        <span>{ready ? "All required items are ready." : "Resolve every required item, then run this check again. Optional items never block capture."}</span>
       </div>
     </CardContent>
   </Card>

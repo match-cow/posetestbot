@@ -2,8 +2,7 @@ import { useEffect, useMemo, useState } from "react"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Controller, useForm, useWatch } from "react-hook-form"
-import { Camera, CheckCircle2, Gauge, LoaderCircle, RefreshCw, Save, ShieldCheck, TriangleAlert } from "lucide-react"
-import { Link } from "react-router-dom"
+import { Camera, CheckCircle2, Gauge, LoaderCircle, RefreshCw, Save, TriangleAlert } from "lucide-react"
 import { toast } from "sonner"
 import { z } from "zod"
 import { POSE_TEMPLATE_BASE_SUNRISE_PATH } from "@/components/calibration-arrangement"
@@ -16,7 +15,6 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { api, ApiError, errorMessage, query } from "@/lib/api"
 import type { CaptureSynchronization, RunConfig, SensorStatus } from "@/lib/contracts"
-import { loadSelectedSensorKeys } from "@/lib/sensor-selection"
 import { useOperator } from "@/providers/operator-provider"
 
 const DEFAULT_CAPTURE_SPEED_M_S = 0.01
@@ -276,19 +274,19 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
         enabled: sensor.enabled ?? true,
       } as RunSensor
     })
-    const configuredKeys = new Set(rows.map(sensorKey))
-    for (const key of cameraContractLocked ? [] : loadSelectedSensorKeys()) {
-      if (configuredKeys.has(key)) continue
-      const detected = detectedByKey.get(key)
-      if (!detected) continue
-      rows.push({
-        ...detected,
-        display_name: detected.effective_display_name ?? detected.display_name ?? detected.device_id,
-        operator_alias: detected.alias ?? null,
-        mounting_mode: isConfiguredMounting(detected.mounting_mode) ? detected.mounting_mode : UNCONFIGURED_MOUNTING,
-        enabled: true,
-        inverted: Boolean(detected.inverted),
-      } as RunSensor)
+    if (!cameraContractLocked) {
+      const configuredKeys = new Set(rows.map(sensorKey))
+      for (const [key, detected] of detectedByKey) {
+        if (configuredKeys.has(key)) continue
+        rows.push({
+          ...detected,
+          display_name: detected.effective_display_name ?? detected.display_name ?? detected.device_id,
+          operator_alias: detected.alias ?? null,
+          mounting_mode: isConfiguredMounting(detected.mounting_mode) ? detected.mounting_mode : UNCONFIGURED_MOUNTING,
+          enabled: false,
+          inverted: Boolean(detected.inverted),
+        } as RunSensor)
+      }
     }
     return rows.map((sensor) => {
       const savedMountingMode = isConfiguredMounting(sensor.mounting_mode)
@@ -419,8 +417,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
   const save = useMutation({
     mutationFn: async (values: SetupValues) => {
       if (!sensors.data) throw new Error("Camera discovery must finish before saving this setup")
-      if (configuredSensors.length === 0) throw new Error("Select at least one camera on the Devices page")
-      if (enabledSensors.length === 0) throw new Error("Enable at least one camera for this recording")
+      if (enabledSensors.length === 0) throw new Error("Select at least one camera in Workflow step 1")
       if (!cameraMountingReady) throw new Error(`Choose a Static or Robot-mounted value for: ${missingMountingSensorKeys.join(", ")}`)
       const unavailable = enabledSensors.filter((sensor) => {
         const detected = detectedByKey.get(sensorKey(sensor))
@@ -478,23 +475,31 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
         throw new Error("Choose a compatible saved calibration before saving this dataset setup")
       }
 
-      const selectedSensors = configuredSensors.map((sensor) => {
+      const savedSensorKeys = new Set((existing.data?.config.capture.sensors ?? []).map(sensorKey))
+      const selectedSensors = configuredSensors.filter((sensor) => isEnabled(sensor) || savedSensorKeys.has(sensorKey(sensor))).map((sensor) => {
         const key = sensorKey(sensor)
         const operatorAlias = operatorAliasFor(sensor).trim() || null
         const detected = detectedByKey.get(key)
         const fallbackDisplayName = detected?.display_name
           ?? (sensor.operator_alias ? sensorKey(sensor) : sensor.display_name)
           ?? sensor.device_id
+        const metadata = sensor.metadata
         return {
-          ...sensor,
+          sensor_type: sensor.sensor_type,
+          device_id: sensor.device_id,
           display_name: operatorAlias ?? fallbackDisplayName,
           operator_alias: operatorAlias,
+          mounting_mode: sensor.mounting_mode,
           enabled: isEnabled(sensor),
           calibration_profile_id: sensorProfiles[key] ?? (
             mountingModeDrafts[key] || Object.prototype.hasOwnProperty.call(orientationDrafts, key)
               ? null
-              : sensor.calibration_profile_id
+              : sensor.calibration_profile_id ?? null
           ),
+          inverted: Boolean(sensor.inverted),
+          metadata: metadata && typeof metadata === "object" && !Array.isArray(metadata)
+            ? metadata
+            : {},
         }
       })
       const runValues = {
@@ -544,14 +549,59 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
     },
   })
 
-  return <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]" data-testid={`${intent}-run-setup`}>
+  return <div className="space-y-5" data-testid={`${intent}-run-setup`}>
+    {cameraContractLocked && <div id="camera-contract-lock-reason" data-testid="camera-contract-lock" className="flex items-start gap-3 rounded-lg border border-warning/40 bg-warning/10 p-4 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" /><div><div className="font-semibold">Capture reference and camera contract fixed for this acquired run</div><p className="mt-1 leading-relaxed text-muted-foreground">Robot-pose Sunrise reference, camera identity, enabled membership, mounting, orientation, resolution, frame rate, and synchronization can no longer change because captured or derived evidence depends on them. Start a fresh run for a different arrangement.</p>{cameraContractBlockers.length > 0 && <ul className="mt-2 list-disc space-y-1 pl-4 font-mono text-[10px] text-muted-foreground">{cameraContractBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}</div></div>}
+
+    <Card data-testid="run-camera-selection-section" role="region" aria-labelledby="run-camera-selection-heading">
+      <CardHeader className="gap-3 border-b sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <CardTitle id="run-camera-selection-heading" className="flex items-center gap-2 text-base"><Camera className="size-4" />Select cameras for this recording</CardTitle>
+          <CardDescription className="mt-1 max-w-3xl">Camera selection happens only here in Workflow step 1. Alias, mounting, orientation, and selection below belong to this run after you save setup; later Devices-default changes do not overwrite them.</CardDescription>
+        </div>
+        <div className="shrink-0 rounded-lg border bg-muted/30 px-3 py-2 text-right">
+          <div className="text-lg font-semibold leading-none">{enabledSensors.length}</div>
+          <div className="mt-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">of {configuredSensors.length} selected</div>
+        </div>
+      </CardHeader>
+      <CardContent className="pt-4">
+        <div className="text-xs text-muted-foreground">{configuredSensors.length - enabledSensors.length} not selected · {sensors.data?.total_connected ?? 0} connected</div>
+        {configuredSensors.length === 0 && <div className="mt-3 rounded border border-warning/40 bg-warning/10 p-3 text-xs">No cameras are available. Use Devices to troubleshoot discovery, then return to Workflow step 1.</div>}
+        {configuredSensors.length > 0 && enabledSensors.length === 0 && <div className="mt-3 rounded border border-warning/40 bg-warning/10 p-3 text-xs" data-testid="run-camera-selection-required">Select at least one camera here before saving this recording setup.</div>}
+        <div className="mt-4 space-y-3">{configuredSensors.map((sensor) => {
+          const enabled = isEnabled(sensor)
+          const key = sensorKey(sensor)
+          const detected = detectedByKey.get(key)
+          const label = cameraLabel(sensor)
+          const safeKey = key.replaceAll(/[^a-zA-Z0-9_-]/g, "-")
+          const aliasInputId = `run-operator-alias-${safeKey}`
+          const mountingInputId = `run-mounting-mode-${safeKey}`
+          const orientationInputId = `run-orientation-${safeKey}`
+          const readiness = !detected ? "not detected" : detected.capture_ready === false ? "not ready" : "ready"
+          return <div data-testid="run-camera-row" data-sensor-key={key} data-camera-state={enabled ? "selected" : "not-selected"} key={key} className={`rounded-lg border p-4 text-xs transition-colors ${enabled ? "border-primary/35 bg-primary/5" : "border-dashed border-border bg-muted/15"}`}>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <Label className="flex min-w-0 cursor-pointer items-start gap-3">
+                <Checkbox className="mt-0.5" data-testid="run-camera-selection" aria-label={`Select ${label} for this run`} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined} checked={enabled} onCheckedChange={(checked) => { if (!cameraContractLocked) setEnabledOverrides((current) => ({ ...current, [selectedRun]: { ...current[selectedRun], [key]: checked === true } })) }} disabled={setupControlsDisabled || save.isPending || cameraContractLocked} />
+                <span className="min-w-0"><span className="block truncate font-semibold">{label}</span><span className="mt-0.5 block font-mono text-[10px] font-normal text-muted-foreground">{key}</span><span className="mt-1 block text-[11px] font-normal text-muted-foreground">Use for this recording</span></span>
+              </Label>
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${enabled ? "bg-success/15 text-success" : "bg-muted-foreground/15 text-muted-foreground"}`}>{enabled ? "Selected" : "Not selected"}</span>
+            </div>
+            <div className={`mt-4 grid gap-4 lg:grid-cols-3 ${enabled ? "" : "opacity-70"}`}>
+              <div className="space-y-1.5"><Label htmlFor={aliasInputId} className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Operator alias for this run</Label><Input id={aliasInputId} data-testid="run-camera-alias" aria-label={`Operator alias for ${key}`} value={operatorAliasFor(sensor)} placeholder={detected?.display_name ?? sensor.display_name ?? sensor.device_id} onChange={(event) => setOperatorAliasDrafts((current) => ({ ...current, [key]: event.target.value }))} disabled={setupControlsDisabled || save.isPending} /><p className="text-[10px] leading-relaxed text-muted-foreground">Saved in <code>run_config.json</code>. Capture planning copies a selected alias into the plan and manifest; later Devices-default changes do not rename this run.</p></div>
+              <div className="space-y-1.5"><Label htmlFor={mountingInputId} className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Mounting for this run</Label><Select value={isConfiguredMounting(sensor.mounting_mode) ? sensor.mounting_mode : UNCONFIGURED_MOUNTING} onValueChange={(value) => { if (value !== UNCONFIGURED_MOUNTING) updateRunMountingMode(sensor, value as MountingMode) }} disabled={setupControlsDisabled || save.isPending || cameraContractLocked}><SelectTrigger id={mountingInputId} data-testid="run-camera-mounting" aria-label={`Mounting for ${key}`} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined}><SelectValue /></SelectTrigger><SelectContent><SelectItem value={UNCONFIGURED_MOUNTING} disabled>Mounting not configured</SelectItem><SelectItem value="eye_in_hand">Robot-mounted</SelectItem><SelectItem value="static">Static</SelectItem></SelectContent></Select><p className={`text-[10px] leading-relaxed ${isConfiguredMounting(sensor.mounting_mode) ? "text-muted-foreground" : "font-medium text-destructive"}`}>{isConfiguredMounting(sensor.mounting_mode) ? <>Save setup to write this run-owned value to <code>run_config.json</code>. The Devices default does not overwrite an existing run.</> : "Required: choose the camera's physical mount before saving this run."}</p></div>
+              <div className="space-y-1.5"><Label htmlFor={orientationInputId} className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Image orientation for this run</Label><Select value={sensor.inverted ? "inverted" : "normal"} onValueChange={(value) => updateRunOrientation(sensor, value === "inverted")} disabled={setupControlsDisabled || save.isPending || cameraContractLocked || sensor.sensor_type !== "realsense_d435"}><SelectTrigger id={orientationInputId} data-testid="run-camera-orientation" aria-label={`Image orientation for ${key}`} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="normal">Normal</SelectItem><SelectItem value="inverted">Inverted (180°)</SelectItem></SelectContent></Select><p className="text-[10px] leading-relaxed text-muted-foreground">Save setup to persist this run-owned value. Changing it requires orientation-compatible calibration; override is available only for RealSense D435 cameras.</p></div>
+            </div>
+            <div className={`mt-3 flex items-center gap-1 border-t pt-3 text-[10px] ${(readiness !== "ready" || !isConfiguredMounting(sensor.mounting_mode)) && enabled ? "text-destructive" : "text-muted-foreground"}`}><Gauge className="size-3" />{isConfiguredMounting(sensor.mounting_mode) ? `${mountingLabel(sensor.mounting_mode)} camera` : "Mounting not configured"} · {sensor.inverted ? "inverted 180°" : "normal orientation"} · {readiness}</div>
+          </div>
+        })}</div>
+      </CardContent>
+    </Card>
+
     <Card>
       <CardHeader><CardTitle>{intent === "calibration" ? "Calibration recording setup" : "Object dataset recording setup"}</CardTitle><CardDescription>{intent === "calibration" ? "Choose the cameras and capture settings used to record the printed grid." : "Choose the cameras, capture settings, and a previously saved calibration that covers every enabled camera."}</CardDescription></CardHeader>
       <CardContent><form className="space-y-6" aria-busy={setupLookupPending} onSubmit={form.handleSubmit((values) => {
         if (!setupControlsDisabled) save.mutate(values)
       })}>
         <fieldset className="space-y-6" disabled={setupControlsDisabled}>
-        {cameraContractLocked && <div id="camera-contract-lock-reason" data-testid="camera-contract-lock" className="flex items-start gap-3 rounded-lg border border-warning/40 bg-warning/10 p-4 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" /><div><div className="font-semibold">Capture reference and camera contract fixed for this acquired run</div><p className="mt-1 leading-relaxed text-muted-foreground">Robot-pose Sunrise reference, camera identity, enabled membership, mounting, orientation, resolution, frame rate, and synchronization can no longer change because captured or derived evidence depends on them. Start a fresh run for a different arrangement.</p>{cameraContractBlockers.length > 0 && <ul className="mt-2 list-disc space-y-1 pl-4 font-mono text-[10px] text-muted-foreground">{cameraContractBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}</div></div>}
         <div className="grid gap-4 sm:grid-cols-2"><Field id="run-name" label="Run display name (optional)" hint="Human-readable metadata only. Leave blank to use the folder name; changing it does not select or rename storage." error={form.formState.errors.run_name?.message}><Input id="run-name" {...form.register("run_name")} placeholder="Defaults to folder name" /></Field><Field id="resolution" label="Image resolution" hint="Only modes shared by every enabled camera are offered."><Controller control={form.control} name="resolution" render={({ field }) => <Select value={field.value} onValueChange={field.onChange} disabled={cameraContractLocked}><SelectTrigger id="resolution" aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined}><SelectValue /></SelectTrigger><SelectContent>{resolutionOptions.map((resolution) => <SelectItem value={resolution} key={resolution}>{resolution === "720p" ? "1280 × 720" : resolution === "360p" ? "672 × 376" : resolution}</SelectItem>)}</SelectContent></Select>} /></Field></div>
         <div className="grid gap-4 sm:grid-cols-2"><Field id="fps" label={<span className="inline-flex items-center gap-1">Frames per second <HelpTip label="frames per second">The requested RGB-D frame rate for each enabled camera. Higher rates create more data and may exceed a camera or USB connection's supported mode.</HelpTip></span>} hint="How many RGB-D frames each camera should request per second." error={form.formState.errors.fps?.message}><Input id="fps" type="number" min={1} max={60} disabled={cameraContractLocked} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined} {...form.register("fps", { valueAsNumber: true })} /></Field><Field id="velocity" label={<span className="inline-flex items-center gap-1">{intent === "dataset" ? "Requested robot capture speed (m/s)" : "Robot capture speed limit (m/s)"} <HelpTip label="robot capture speed">{captureSpeedHelp}</HelpTip></span>} hint={captureSpeedHint} error={form.formState.errors.velocity?.message}><Input id="velocity" type="number" min="0.01" max={maximumCaptureSpeedMps} step="0.01" {...form.register("velocity", { valueAsNumber: true })} /></Field></div>
 
@@ -570,7 +620,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
         {intent === "dataset" && <section className="space-y-3 rounded-lg border bg-muted/15 p-4" data-testid="bop-annotation-mode-setup" aria-labelledby="bop-annotation-mode-heading">
           <div><h3 id="bop-annotation-mode-heading" className="text-sm font-semibold">BOP annotation outcome</h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">The base image/model export is always produced first. Ground-truth rendering remains a separate optional background job after processing.</p></div>
           <Controller control={form.control} name="annotation_mode" render={({ field }) => <Select value={field.value} onValueChange={field.onChange}><SelectTrigger id="annotation-mode" aria-label="BOP annotation mode"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">Base BOP dataset only</SelectItem><SelectItem value="pose">Optional pose ground truth</SelectItem><SelectItem value="pose_and_masks">Optional pose + masks</SelectItem></SelectContent></Select>} />
-          <p className="text-[11px] leading-relaxed text-muted-foreground">This explicit run contract records the intended final dataset evidence. Selecting an annotated outcome does not queue rendering or authorize hardware.</p>
+          <p className="text-[11px] leading-relaxed text-muted-foreground">This explicit run contract records the intended final dataset evidence. Selecting an annotated outcome does not queue rendering.</p>
         </section>}
 
         {intent === "dataset" && <section className="space-y-3" aria-labelledby="saved-calibration-heading">
@@ -604,45 +654,11 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
               ? <div className="flex min-w-0 items-start gap-2 text-xs" role="alert"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="font-semibold text-destructive">The active run’s setup could not be loaded</div><p className="mt-1 text-muted-foreground">{errorMessage(existing.error)} Existing setup may still be present, so saving remains disabled.</p><Button type="button" variant="outline" size="sm" className="mt-2" onClick={() => existing.refetch()} disabled={existing.isFetching}><RefreshCw className={existing.isFetching ? "animate-spin" : undefined} />Retry setup lookup</Button></div></div>
               : !cameraMountingReady
                 ? <p className="text-xs font-medium text-destructive" data-testid="run-mounting-required">Choose Static or Robot-mounted for every enabled camera. PoseTestBot will not assume a mounting.</p>
-                : <p className="text-xs text-muted-foreground">Saving setup never authorizes a camera or robot action.</p>}
-          <Button type="submit" disabled={setupControlsDisabled || save.isPending || sensors.isPending || !calibrationReady}>{setupLookupPending || save.isPending ? <LoaderCircle className="animate-spin" /> : <Save />}{save.isPending ? (hasCalibrationDraft ? "Validating and saving…" : "Saving…") : (hasCalibrationDraft ? "Validate and save setup" : "Save setup")}</Button>
+                : null}
+          <Button type="submit" className="sm:ml-auto" disabled={setupControlsDisabled || save.isPending || sensors.isPending || enabledSensors.length === 0 || !calibrationReady}>{setupLookupPending || save.isPending ? <LoaderCircle className="animate-spin" /> : <Save />}{save.isPending ? (hasCalibrationDraft ? "Validating and saving…" : "Saving…") : (hasCalibrationDraft ? "Validate and save setup" : "Save setup")}</Button>
         </div>
       </form></CardContent>
     </Card>
-
-    <div className="space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base"><Camera className="size-4" />Cameras for this recording</CardTitle>
-          <CardDescription>Alias, mounting, orientation, and enabled state below belong to this run. Save setup to persist them; later Devices-default changes do not overwrite them.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="metric-number">{enabledSensors.length}</div>
-          <div className="mt-1 text-xs text-muted-foreground">enabled · {configuredSensors.length - enabledSensors.length} disabled · {sensors.data?.total_connected ?? 0} connected</div>
-          {configuredSensors.length === 0 && <div className="mt-3 rounded border border-warning/40 bg-warning/10 p-2 text-xs">Select at least one camera on <Link to="/devices" className="font-semibold underline">Devices</Link>.</div>}
-          <div className="mt-4 space-y-2">{configuredSensors.map((sensor) => {
-            const enabled = isEnabled(sensor)
-            const key = sensorKey(sensor)
-            const detected = detectedByKey.get(key)
-            const label = cameraLabel(sensor)
-            const safeKey = key.replaceAll(/[^a-zA-Z0-9_-]/g, "-")
-            const aliasInputId = `run-operator-alias-${safeKey}`
-            const mountingInputId = `run-mounting-mode-${safeKey}`
-            const orientationInputId = `run-orientation-${safeKey}`
-            const readiness = !detected ? "not detected" : detected.capture_ready === false ? "not ready" : "ready"
-            return <div data-testid="run-camera-row" data-sensor-key={key} data-camera-state={enabled ? "enabled" : "disabled"} key={key} className={`rounded border px-3 py-3 text-xs transition-opacity ${enabled ? "border-border bg-muted" : "border-dashed border-border/70 bg-muted/30 opacity-60"}`}>
-              <div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="truncate font-medium">{label}</div><div className="mt-0.5 font-mono text-[10px] text-muted-foreground">{key}</div></div><span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${enabled ? "bg-success/15 text-success" : "bg-muted-foreground/15 text-muted-foreground"}`}>{enabled ? "Enabled" : "Disabled"}</span></div>
-              <div className="mt-3 space-y-1.5"><Label htmlFor={aliasInputId} className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Operator alias for this run</Label><Input id={aliasInputId} data-testid="run-camera-alias" aria-label={`Operator alias for ${key}`} value={operatorAliasFor(sensor)} placeholder={detected?.display_name ?? sensor.display_name ?? sensor.device_id} onChange={(event) => setOperatorAliasDrafts((current) => ({ ...current, [key]: event.target.value }))} disabled={setupControlsDisabled || save.isPending} /><p className="text-[10px] leading-relaxed text-muted-foreground">Saved in <code>run_config.json</code>. When enabled, capture planning copies it into <code>capture_plan.json</code> and <code>dataset_manifest.json</code>. Changing the Devices default later does not rename this run.</p></div>
-              <div className="mt-3 space-y-1.5"><Label htmlFor={mountingInputId} className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Mounting for this run</Label><Select value={isConfiguredMounting(sensor.mounting_mode) ? sensor.mounting_mode : UNCONFIGURED_MOUNTING} onValueChange={(value) => { if (value !== UNCONFIGURED_MOUNTING) updateRunMountingMode(sensor, value as MountingMode) }} disabled={setupControlsDisabled || save.isPending || cameraContractLocked}><SelectTrigger id={mountingInputId} data-testid="run-camera-mounting" aria-label={`Mounting for ${key}`} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined}><SelectValue /></SelectTrigger><SelectContent><SelectItem value={UNCONFIGURED_MOUNTING} disabled>Mounting not configured</SelectItem><SelectItem value="eye_in_hand">Robot-mounted</SelectItem><SelectItem value="static">Static</SelectItem></SelectContent></Select><p className={`text-[10px] leading-relaxed ${isConfiguredMounting(sensor.mounting_mode) ? "text-muted-foreground" : "font-medium text-destructive"}`}>{isConfiguredMounting(sensor.mounting_mode) ? <>Save setup to write this run-owned value to <code>run_config.json</code>. The Devices default does not overwrite an existing run.</> : "Required: choose the camera's physical mount before saving this run."}</p></div>
-              <div className="mt-3 space-y-1.5"><Label htmlFor={orientationInputId} className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Image orientation for this run</Label><Select value={sensor.inverted ? "inverted" : "normal"} onValueChange={(value) => updateRunOrientation(sensor, value === "inverted")} disabled={setupControlsDisabled || save.isPending || cameraContractLocked || sensor.sensor_type !== "realsense_d435"}><SelectTrigger id={orientationInputId} data-testid="run-camera-orientation" aria-label={`Image orientation for ${key}`} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="normal">Normal</SelectItem><SelectItem value="inverted">Inverted (180°)</SelectItem></SelectContent></Select><p className="text-[10px] leading-relaxed text-muted-foreground">Save setup to persist this run-owned value. Changing it requires orientation-compatible calibration; override is available only for RealSense D435 cameras.</p></div>
-              <Label className="mt-3 flex cursor-pointer items-center gap-2"><Checkbox aria-label={`Enable ${label} for this run`} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined} checked={enabled} onCheckedChange={(checked) => { if (!cameraContractLocked) setEnabledOverrides((current) => ({ ...current, [selectedRun]: { ...current[selectedRun], [key]: checked === true } })) }} disabled={setupControlsDisabled || save.isPending || cameraContractLocked} /><span>Use for this recording</span></Label>
-              <div className={`mt-2 flex items-center gap-1 text-[10px] ${(readiness !== "ready" || !isConfiguredMounting(sensor.mounting_mode)) && enabled ? "text-destructive" : "text-muted-foreground"}`}><Gauge className="size-3" />{isConfiguredMounting(sensor.mounting_mode) ? `${mountingLabel(sensor.mounting_mode)} camera` : "Mounting not configured"} · {sensor.inverted ? "inverted 180°" : "normal orientation"} · {readiness}</div>
-            </div>
-          })}</div>
-        </CardContent>
-      </Card>
-      <Card className="border-primary/25"><CardHeader><CardTitle className="flex items-center gap-2 text-base"><ShieldCheck className="size-4 text-primary-strong" />Safety boundary</CardTitle></CardHeader><CardContent className="text-xs leading-relaxed text-muted-foreground">Setup stores parameters only. Recording later requires a current readiness check plus fresh camera and robot confirmations. Those confirmations are never saved.</CardContent></Card>
-    </div>
   </div>
 }
 

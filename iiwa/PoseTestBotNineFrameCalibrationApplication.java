@@ -51,6 +51,9 @@ public class PoseTestBotNineFrameCalibrationApplication
 	private static final String CALIBRATION_COVERAGE_LOWER_LEFT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerLeft";
 	private static final String CALIBRATION_COVERAGE_LOWER_CENTER_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerCenter";
 	private static final String CALIBRATION_COVERAGE_LOWER_RIGHT_PATH = "/PoseTestBot/TemplateBase/CalibrationCoverageLowerRight";
+	/* Commissioned robot_command.v1 token; coordinate any wire-level rename. */
+	private static final String IDLE_EXIT_COMMAND =
+			"stop_after_current_motion";
 	private static final Charset UTF_8 = Charset.forName("UTF-8");
 
 	/* Commission one phase at a time before enabling both together. */
@@ -465,7 +468,7 @@ public class PoseTestBotNineFrameCalibrationApplication
 
 	private boolean isStopCommand(JSONObject jsonObject) {
 		return "robot_command.v1".equals(jsonObject.get("schema_version"))
-				&& "exit_idle_program".equals(jsonObject.get("command"));
+				&& IDLE_EXIT_COMMAND.equals(jsonObject.get("command"));
 	}
 
 	private void sleep(int millis) {

@@ -65,8 +65,9 @@ Before deployment:
    frames, operator, reviewer, and compile/simulation evidence.
 4. Commission each application's endpoint and swept path in T1 at reduced
    override under the lab safety process.
-5. With explicit authorization and both capture acknowledgements, retain a
-   supervised trial. Never send UDP Stop during repeated calibration.
+5. With explicit authorization and the single acknowledgement covering both
+   capture gates, retain a supervised trial. Never send UDP Stop during
+   repeated calibration.
 6. Generate derived cadence evidence:
 
    ```bash

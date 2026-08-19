@@ -28,6 +28,10 @@ from posetestbot.pipeline.run_config import (
     CAPTURE_INTENTS,
     load_run_config_for_run_root,
 )
+from posetestbot.sensors.readiness import (
+    probe_selected_sensor_readiness,
+    selected_sensor_readiness_matches_config,
+)
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,7 @@ def execute_capture(
     intent: str,
     allow_cameras: bool,
     allow_real_robot: bool,
+    probe_selected_sensors=probe_selected_sensor_readiness,
 ) -> tuple[Path, dict[str, Any]]:
     """Run the fixed supervised physical-capture recipe."""
 
@@ -99,12 +104,31 @@ def execute_capture(
             f"({blocker})"
         )
 
+    # This must precede capture-plan and supervisor artifacts. SDK discovery can
+    # still enumerate a camera held by a crashed recorder, so prove that every
+    # selected adapter can actually open and deliver a frame without recording.
+    selected_sensor_readiness = probe_selected_sensors(config)
+    if not selected_sensor_readiness_matches_config(
+        selected_sensor_readiness,
+        config,
+    ):
+        blocked = [
+            str(probe.get("message"))
+            for probe in selected_sensor_readiness.get("probes", [])
+            if isinstance(probe, Mapping) and probe.get("capture_ready") is not True
+        ]
+        raise ValueError(
+            "Selected cameras are not ready for capture: "
+            + ("; ".join(blocked) if blocked else "readiness probe failed")
+        )
+
     plan_capture(root)
     _, capture_preflight = write_capture_plan_preflight_with_manifest(
         root,
         include_sensor_status=True,
         allow_real_robot=True,
         write_plan_if_missing=False,
+        selected_sensor_readiness=selected_sensor_readiness,
     )
     if capture_preflight["overall_status"] == "error":
         raise ValueError("Capture-plan preflight failed; inspect its checks")
@@ -178,6 +202,8 @@ def dataset_processing_commands(run_root: str | Path) -> tuple[tuple[str, ...], 
             "python",
             "scripts/run_camera_rectification.py",
             root.as_posix(),
+            "--intrinsic-profiles",
+            str(config["intrinsic_calibration_profiles"]),
             "--overwrite",
         ),
         tuple(export_command),

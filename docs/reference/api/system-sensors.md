@@ -67,8 +67,11 @@ therefore conflict with physical capture jobs through the local resource model.
 | `POST /monitoring/webcam/<job_id>/webrtc/offer` | Exchange a bounded SDP offer for a browser WebRTC session |
 
 The monitor is separate from dataset cameras and does not provide capture
-readiness. Worker transport failures normally return `503`; invalid or stale
-job identifiers return `404`/`409`.
+readiness. Its WebRTC worker publishes unmodified frames; the fixed browser
+video view rotates them 180° to correct the UGREEN camera's upside-down
+test-cell mount. This does not alter any dataset-camera frames. Worker
+transport failures normally return `503`; invalid or stale job identifiers
+return `404`/`409`.
 
 See the [complete route index](../http-api-routes.md) for image and asset
 aliases.

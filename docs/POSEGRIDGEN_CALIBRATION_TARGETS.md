@@ -178,7 +178,24 @@ The intent-level calculation façade consumes those saved bundles through:
 
 Attempt creation records stable sensor keys and queues one `cpu`/`disk_io`
 parent job. Promotion is a separate queued transaction and requires passing
-recommendations or explicit passing candidate IDs. The parent job has five
+recommendations or explicit passing candidate IDs. Failed alternative solver
+combinations remain diagnostic evidence and do not invalidate a selected
+passing combination. Multi-camera attempts retain the common algorithm bundle
+whose independently estimated companion transform is most suitable under the
+recorded ranking policy. Pairwise companion disagreement above 10 mm or 5° is
+promotable with a preserved quality warning; disagreement above 20 mm or 10°
+is contradictory and blocks promotion. The doubled hard limit accounts for two
+independently accepted estimates lying at opposite sides of the per-camera
+10 mm / 5° residual bound. Missing, malformed, or individually failed selected
+candidates still fail closed.
+
+The attempt response includes a derived `promotion_review` under the current
+retention policy. This lets an immutable attempt calculated under the former
+10 mm / 5° hard cross-camera cutoff be promoted without rewriting its ranking
+artifact when its recorded numeric evidence remains below the current hard
+limit. Promotion revalidates both the historical record and the current policy
+before writing profiles, and stores the warning evidence in each promoted
+profile. The parent job has five
 operator-visible phases: prepare data, estimate target poses, estimate time
 alignment, compare robot-camera solutions, and validate/rank.
 

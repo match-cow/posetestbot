@@ -10,7 +10,7 @@ Raw acquisition evidence is preserved; processing writes derived output.
 | --- | --- |
 | `run_config.json` | Strict `run_config.v4` intent and hardware/data contract |
 | `dataset_manifest.json` | Run-level artifact ledger and provenance bindings |
-| `run_preflight_report.json` | Current configuration/readiness evidence |
+| `run_preflight_report.json` | Current `run_preflight.v2` configuration/readiness evidence |
 | `hardware_status_report.json` | Read-only hardware snapshot |
 | `capture_plan.json` | Canonical camera/robot plan |
 | `capture_plan_preflight_report.json` | Fresh plan-specific checks |
@@ -22,6 +22,11 @@ Raw acquisition evidence is preserved; processing writes derived output.
 Capture completion requires every enabled sensor to have balanced nonempty
 RGB/depth/current metadata, strict timestamp evidence, a nonempty current
 robot-pose stream, successful children, and clean resource release.
+`run_preflight_report.json` embeds `selected_sensor_readiness.v1`: one bounded,
+non-recording configured-stream probe per enabled selected camera. A prior
+`run_preflight.v1` report does not authorize capture. The capture worker carries
+the successful fresh probe into `capture_plan_preflight_report.json` before
+starting the fixed recipe.
 
 ## Raw and synchronized evidence
 
@@ -52,10 +57,10 @@ failed in-motion matches.
 | `processed/calibration/<attempt_id>/time_offset_search.json` | Explicit fixed-zero or automatic timing evidence |
 | `processed/calibration/<attempt_id>/pnp_candidates.json` | Current PnP evidence |
 | `processed/calibration/<attempt_id>/extrinsic_candidates.json` | Mount-aware transform candidates |
-| `processed/calibration/<attempt_id>/ranking.json` | Candidate ranking/recommendation |
+| `processed/calibration/<attempt_id>/ranking.json` | Immutable calculation-time candidate ranking/recommendation; current promotion eligibility is derived without rewriting it |
 | `processed/calibration/<attempt_id>/checks.json` | Blocking checks and retained warnings |
 | `processed/calibration/<attempt_id>/candidate_profiles.json` | Profiles eligible for review/promotion |
-| `calibration_profiles.json` | Explicitly promoted `calibration.v2` profiles |
+| `calibration_profiles.json` | Explicitly promoted `calibration.v2` profiles, including retained multi-camera consistency warnings |
 
 There are no root-level preflight/observations/candidates/solver/validation
 artifacts from the removed staged calibration implementation.

@@ -258,8 +258,12 @@ def upsert_stage(
     existing["updated_at"] = utc_now_iso()
     if status in {"succeeded", "failed", "canceled"}:
         existing["ended_at"] = existing["updated_at"]
+    else:
+        existing.pop("ended_at", None)
     if message:
         existing["message"] = message
+    else:
+        existing.pop("message", None)
     if artifacts:
         if run_root is None:
             existing["artifacts"] = {key: str(value) for key, value in artifacts.items()}

@@ -61,14 +61,46 @@ function jobScopeLabel(job: Job, selectedRun: string) {
   }
 }
 
-async function writeClipboard(text: string) {
-  if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable in this browser context")
-  await navigator.clipboard.writeText(text)
+function legacyClipboardCopy(text: string, source: HTMLElement) {
+  const textarea = document.createElement("textarea")
+  textarea.value = text
+  textarea.readOnly = true
+  textarea.style.position = "fixed"
+  textarea.style.left = "-9999px"
+  textarea.style.top = "0"
+  textarea.style.opacity = "0"
+  const container = source.closest<HTMLElement>('[role="dialog"]') ?? document.body
+  container.appendChild(textarea)
+  let copied = false
+  try {
+    textarea.focus({ preventScroll: true })
+    textarea.select()
+    textarea.setSelectionRange(0, text.length)
+    copied = document.execCommand("copy")
+  } finally {
+    textarea.remove()
+    if (source.isConnected) source.focus({ preventScroll: true })
+  }
+  if (!copied) throw new Error("The browser denied clipboard access")
 }
 
-async function copyDebugText(label: string, text: string) {
+async function writeClipboard(text: string, source: HTMLElement) {
   try {
-    await writeClipboard(text)
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return
+    }
+  } catch {
+    // The async Clipboard API can be exposed but denied when the console is
+    // opened from a non-secure lab-network address. The click still permits
+    // the selection-based fallback in browsers that support execCommand.
+  }
+  legacyClipboardCopy(text, source)
+}
+
+async function copyDebugText(label: string, text: string, source: HTMLElement) {
+  try {
+    await writeClipboard(text, source)
     toast.success(`${label} copied`)
   } catch (error) {
     toast.error(`${label} could not be copied`, { description: errorMessage(error) })
@@ -296,8 +328,8 @@ export function JobsPage() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3"><StatusBadge status={currentDetail?.status} tone={jobStatusTone(currentDetail?.status)} /><span className="text-xs text-muted-foreground">Return code {currentDetail?.returncode ?? "—"}</span></div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" disabled={!outputText || log.isPending} onClick={() => void copyDebugText("Job output", outputText)} title="Copy the complete process output"><Copy />Copy output</Button>
-            <Button variant="outline" size="sm" disabled={!currentDetail} onClick={() => currentDetail && void copyDebugText("Job context", jobContext(currentDetail))} title="Copy job context and metadata"><Copy />Copy context</Button>
+            <Button variant="outline" size="sm" disabled={!outputText || log.isPending} onClick={(event) => void copyDebugText("Job output", outputText, event.currentTarget)} title="Copy the complete process output"><Copy />Copy output</Button>
+            <Button variant="outline" size="sm" disabled={!currentDetail} onClick={(event) => currentDetail && void copyDebugText("Job context", jobContext(currentDetail), event.currentTarget)} title="Copy job context and metadata"><Copy />Copy context</Button>
           </div>
         </div>
         <pre data-testid="job-log" className="min-h-0 flex-1 overflow-auto rounded-lg bg-[#11130d] p-4 text-xs leading-relaxed text-[#dce4c4]">{log.isError ? `Log unavailable: ${errorMessage(log.error)}` : outputText || "Waiting for log output…"}</pre>

@@ -45,12 +45,24 @@ def _run_input_path(run_root: Path, value: str | None, default: str) -> Path:
     return path if path.is_absolute() else run_root / path
 
 
+def _intrinsic_profiles_path(run_root: Path, cli_value: str | None) -> Path:
+    if cli_value is not None:
+        return _run_input_path(run_root, cli_value, INTRINSIC_CALIBRATION_PROFILES)
+    try:
+        config = load_run_config_for_run_root(run_root)
+    except FileNotFoundError:
+        config = {}
+    return _run_input_path(
+        run_root,
+        config.get("intrinsic_calibration_profiles"),
+        INTRINSIC_CALIBRATION_PROFILES,
+    )
+
+
 def main() -> None:
     args = parse_args()
     run_root = Path(args.run_root)
-    profiles_path = _run_input_path(
-        run_root, args.intrinsic_profiles, INTRINSIC_CALIBRATION_PROFILES
-    )
+    profiles_path = _intrinsic_profiles_path(run_root, args.intrinsic_profiles)
     manifest = load_or_create_run_manifest(run_root)
     upsert_stage(manifest, name="camera_rectification", status="running")
     write_run_manifest(manifest, run_root)

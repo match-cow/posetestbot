@@ -28,6 +28,11 @@ queues the canonical preflight with camera and disk resources:
 A `202` response includes `job_id` and the job snapshot. Work continues after
 navigation and remains visible through `/jobs` and **Jobs**.
 
+The job actively opens each enabled camera selected by `run_config.v4`, starts
+its configured RGB-D stream, requires one frame, and closes it without recording
+or creating a raw sensor folder. A selected camera that is merely enumerated but
+still held by a stale/crashed process makes preflight fail.
+
 ## Supervised capture
 
 | Route | Contract |
@@ -49,10 +54,16 @@ The submission body is exact and both booleans must be literal `true`:
 ```
 
 `intent` must match `run_config.json`, and a fresh successful run preflight is
-required. The server runs one recipe: plan → capture-plan preflight → execution
-plan → supervised execution → capture-completion validation. Cancel requests
-cannot interrupt active IIWA motion and never send the idle-program exit
-command.
+required. Only `run_preflight.v2`, with active evidence matching every currently
+selected camera, can authorize queueing. The server runs one recipe: plan →
+capture-plan preflight → execution plan → supervised execution →
+capture-completion validation. Cancel requests cannot interrupt active IIWA
+motion and never send the idle-program exit command.
+
+Before the recipe writes its first capture artifact, the capture worker repeats
+the bounded selected-camera open probe. Failure rejects capture without creating
+`capture_plan.json`, execution metadata/logs, or raw camera output, so the same
+run remains usable after the camera/backend issue is corrected.
 
 ## Dataset processing
 

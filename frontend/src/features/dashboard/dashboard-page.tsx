@@ -21,14 +21,54 @@ import { useOperator } from "@/providers/operator-provider"
 import { RoomMonitor } from "@/features/dashboard/room-monitor"
 import { ClusterControllerControl } from "@/features/dashboard/cluster-controller-control"
 
-function SummaryCard({ icon: Icon, label, value, status, tone, detail }: { icon: typeof Bot; label: string; value: string; status?: string; tone: StatusTone; detail: string }) {
+interface ConnectedCameraSummary {
+  key: string
+  type: string
+  identity: string
+  usesAlias: boolean
+}
+
+function connectedCameraSummaries(status: SensorStatus | undefined): ConnectedCameraSummary[] {
+  return status?.families.flatMap((family) => family.devices
+    .filter((device) => device.connected !== false)
+    .map((device) => {
+      const explicitAlias = device.alias?.trim()
+      const effectiveName = device.effective_display_name?.trim()
+      const discoveredName = device.display_name?.trim()
+      const inferredAlias = effectiveName && effectiveName !== discoveredName ? effectiveName : undefined
+      const alias = explicitAlias || inferredAlias
+      return {
+        key: `${device.sensor_type}:${device.device_id}`,
+        type: family.display_name?.trim() || titleCase(device.sensor_type.replaceAll("_", " ")),
+        identity: alias || device.device_id,
+        usesAlias: Boolean(alias),
+      }
+    })) ?? []
+}
+
+function SensorSummaryCard({ status, failed }: { status?: SensorStatus; failed: boolean }) {
+  const cameras = connectedCameraSummaries(status)
+  const value = failed ? "Unavailable" : `${status?.total_connected ?? cameras.length} connected`
+  const badgeStatus = failed ? "unavailable" : status?.all_expected_connected ? "connected" : "warning"
+  const tone: StatusTone = failed ? "destructive" : status?.all_expected_connected ? "informational" : "warning"
+
   return (
-    <Card>
+    <Card data-testid="dashboard-sensor-summary">
       <CardContent className="pt-5">
-        <div className="flex items-start justify-between"><div className="grid size-9 place-items-center rounded-lg bg-muted"><Icon className="size-4 text-primary-strong" /></div><StatusBadge status={status ?? value} tone={tone} /></div>
-        <div className="mt-5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{label}</div>
+        <div className="flex items-start justify-between"><div className="grid size-9 place-items-center rounded-lg bg-muted"><Camera className="size-4 text-primary-strong" /></div><StatusBadge status={badgeStatus} tone={tone} /></div>
+        <div className="mt-5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Sensors</div>
         <div className="mt-1 font-display text-lg font-semibold">{value}</div>
-        <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{detail}</p>
+        {failed
+          ? <p className="mt-2 text-xs text-muted-foreground">Camera status could not be loaded.</p>
+          : cameras.length > 0
+            ? <ul aria-label="Connected cameras" className="mt-2 space-y-1.5 text-[11px] leading-snug text-muted-foreground" data-testid="dashboard-connected-cameras">
+              {cameras.map((camera) => <li className="flex min-w-0 items-baseline gap-1" data-testid="dashboard-connected-camera" key={camera.key}>
+                <span className="shrink-0 font-medium text-foreground">{camera.type}</span>
+                <span aria-hidden="true">·</span>
+                <span className={`min-w-0 break-all ${camera.usesAlias ? "font-medium" : "font-mono"}`}>{camera.identity}</span>
+              </li>)}
+            </ul>
+            : <p className="mt-2 text-xs text-muted-foreground">No cameras detected.</p>}
       </CardContent>
     </Card>
   )
@@ -315,8 +355,7 @@ function IiwaQuickControls({ profileStatus }: { profileStatus: "checking" | "con
   const { selectedRun } = useOperator()
   const queryClient = useQueryClient()
   const [command, setCommand] = useState<IiwaCommand | null>(null)
-  const [robotAcknowledged, setRobotAcknowledged] = useState(false)
-  const [camerasAcknowledged, setCamerasAcknowledged] = useState(false)
+  const [startAuthorized, setStartAuthorized] = useState(false)
   const [idleExitConfirmed, setIdleExitConfirmed] = useState(false)
   const robotCommand = useMutation({
     mutationFn: (nextCommand: IiwaCommand) => api<{ job_id: string }>("/robot/commands", {
@@ -328,28 +367,25 @@ function IiwaQuickControls({ profileStatus }: { profileStatus: "checking" | "con
     onSuccess: (data, nextCommand) => {
       toast.success(nextCommand === "start" ? "IIWA start queued" : "IIWA idle-program exit queued", { description: `Job ${data.job_id} continues after navigation; monitor it in Jobs.` })
       setCommand(null)
-      setRobotAcknowledged(false)
-      setCamerasAcknowledged(false)
+      setStartAuthorized(false)
       setIdleExitConfirmed(false)
       queryClient.invalidateQueries({ queryKey: ["jobs"] })
     },
     onError: (error) => toast.error("Robot command was not queued", { description: errorMessage(error) }),
   })
   const openCommand = (nextCommand: IiwaCommand) => {
-    setRobotAcknowledged(false)
-    setCamerasAcknowledged(false)
+    setStartAuthorized(false)
     setIdleExitConfirmed(false)
     setCommand(nextCommand)
   }
   const setDialogOpen = (open: boolean) => {
     if (open) return
     setCommand(null)
-    setRobotAcknowledged(false)
-    setCamerasAcknowledged(false)
+    setStartAuthorized(false)
     setIdleExitConfirmed(false)
   }
   const confirmed = command === "start"
-    ? robotAcknowledged && camerasAcknowledged
+    ? startAuthorized
     : idleExitConfirmed
 
   return (
@@ -359,13 +395,12 @@ function IiwaQuickControls({ profileStatus }: { profileStatus: "checking" | "con
         <div className="mt-5 flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Manual robot control <HelpTip label="robot control status">Configured means the sole lab profile loaded. It does not contact the robot or prove that Sunrise is running.</HelpTip></div>
         <div className="mt-1 font-display text-lg font-semibold">Lab IIWA</div>
         <p className="mt-1 font-mono text-xs text-muted-foreground">{LAB_IIWA_TARGET}</p>
-        <div data-testid="iiwa-stop-warning" className="mt-3 rounded border border-destructive/40 bg-destructive/10 p-2 text-[10px] leading-relaxed"><span className="font-semibold text-destructive">Stop cannot interrupt active motion and is not an emergency stop.</span> It only exits an idle waiting Sunrise program, which then requires a manual restart.</div>
-        <div className="mt-4 grid grid-cols-2 gap-2"><Button size="sm" onClick={() => openCommand("start")} disabled={robotCommand.isPending}><Power />Start IIWA</Button><Button size="sm" variant="destructive" onClick={() => openCommand("stop")} disabled={robotCommand.isPending}><Square />Stop / exit idle IIWA program</Button></div>
+        <div className="mt-4 grid grid-cols-2 gap-2"><Button size="sm" onClick={() => openCommand("start")} disabled={robotCommand.isPending}><Power />Start program</Button><Button size="sm" variant="destructive" onClick={() => openCommand("stop")} disabled={robotCommand.isPending}><Square />End program</Button></div>
       </CardContent>
       <Dialog open={command !== null} onOpenChange={setDialogOpen}>
         <DialogContent>
           <DialogHeader><DialogTitle>Confirm IIWA {command === "stop" ? "idle-program exit" : "start"}</DialogTitle><DialogDescription>The command is sent only to the fixed lab target <span className="font-mono">{LAB_IIWA_TARGET}</span>.</DialogDescription></DialogHeader>
-          {command === "stop" ? <><div className="flex items-start gap-3 rounded-lg border border-destructive/45 bg-destructive/10 p-4 text-sm"><AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" /><div><div className="font-semibold text-destructive">This is not a motion stop</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">It cannot interrupt active motion. It exits only an idle waiting program and requires a manual Sunrise restart.</p></div></div><Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox data-testid="iiwa-idle-exit-confirmation" checked={idleExitConfirmed} onCheckedChange={(value) => setIdleExitConfirmed(value === true)} /><span>I confirm the IIWA program is idle and I intend to exit it.</span></Label></> : <><div className="rounded-lg border border-warning/40 bg-warning/10 p-4"><div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Target</div><div className="mt-1 font-mono text-lg font-semibold">{LAB_IIWA_TARGET}</div><div className="mt-3 text-xs"><span className="font-semibold">Manual test request:</span> 0.1 m/s (100 mm/s)</div></div><Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox data-testid="iiwa-robot-acknowledgement" checked={robotAcknowledged} onCheckedChange={(value) => setRobotAcknowledged(value === true)} /><span>I confirm the workcell is clear and authorize real IIWA motion for this start.</span></Label><Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox data-testid="iiwa-camera-acknowledgement" checked={camerasAcknowledged} onCheckedChange={(value) => setCamerasAcknowledged(value === true)} /><span>I confirm the selected cameras and pose receiver are ready for this start.</span></Label></>}
+          {command === "stop" ? <><div className="flex items-start gap-3 rounded-lg border border-destructive/45 bg-destructive/10 p-4 text-sm"><AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" /><div><div className="font-semibold text-destructive">This is not a motion stop</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">It cannot interrupt active motion. It exits only an idle waiting program and requires a manual Sunrise restart.</p></div></div><Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox data-testid="iiwa-idle-exit-confirmation" checked={idleExitConfirmed} onCheckedChange={(value) => setIdleExitConfirmed(value === true)} /><span>I confirm the IIWA program is idle and I intend to exit it.</span></Label></> : <><div className="rounded-lg border border-warning/40 bg-warning/10 p-4"><div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Target</div><div className="mt-1 font-mono text-lg font-semibold">{LAB_IIWA_TARGET}</div><div className="mt-3 text-xs"><span className="font-semibold">Manual test request:</span> 0.1 m/s (100 mm/s)</div></div><Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox data-testid="iiwa-start-acknowledgement" checked={startAuthorized} onCheckedChange={(value) => setStartAuthorized(value === true)} /><span>I confirm the workcell is clear, the selected cameras and pose receiver are ready, and I authorize real IIWA motion for this start.</span></Label></>}
           <DialogFooter><Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button><Button variant={command === "stop" ? "destructive" : "default"} disabled={!confirmed || robotCommand.isPending || command === null} onClick={() => command && robotCommand.mutate(command)}>{command === "stop" ? <Square /> : <Power />}{robotCommand.isPending ? "Queueing…" : command === "stop" ? "Queue idle-program exit" : "Queue start"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
@@ -431,7 +466,7 @@ export function DashboardPage() {
           <div className="grid min-w-0 grid-rows-[1fr_auto] gap-4">
             <div className="grid gap-4 md:grid-cols-3">
               <StorageSummaryCard storage={storage.data} />
-              <SummaryCard icon={Camera} label="Sensors" value={`${sensors.data?.total_connected ?? 0} connected`} status={sensors.data?.all_expected_connected ? "connected" : "warning"} tone={sensors.data?.all_expected_connected ? "informational" : "warning"} detail="RealSense, OAK-D Pro, and ZED discovery." />
+              <SensorSummaryCard status={sensors.data} failed={sensors.isError} />
               <IiwaQuickControls profileStatus={robotProfileStatus} />
             </div>
             <SupportingStatusStrip preflightStatus={preflight?.status} runtimeItems={runtimeItems} runtimePending={runtime.isPending} runtimeFailed={runtime.isError} />

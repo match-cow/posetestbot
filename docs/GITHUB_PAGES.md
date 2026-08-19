@@ -34,7 +34,7 @@ The navigation is technical and task-oriented:
 4. run-config, artifact, and CLI reference;
 5. specialist calibration, workpiece, template, IIWA, and physical
    commissioning guides; and
-6. the clean-break design record and documentation-maintenance contract.
+6. documentation-maintenance guidance.
 
 Add every Markdown page to `nav` in `mkdocs.yml`. Strict builds fail when a
 navigation target or internal documentation link is missing.

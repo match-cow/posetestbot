@@ -8,7 +8,6 @@ import { ProcessHandoff } from "@/components/process-handoff"
 import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -16,7 +15,6 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, errorMessage } from "@/lib/api"
 import type { PreviewJob, SensorDevice, SensorStatus } from "@/lib/contracts"
-import { loadSelectedSensorKeys, saveSelectedSensorKeys } from "@/lib/sensor-selection"
 import { useOperator } from "@/providers/operator-provider"
 
 const PREVIEW_ON = new Set(["queued", "running"])
@@ -68,7 +66,6 @@ export function DevicesPage() {
   const queryClient = useQueryClient()
   const { currentWorkflow } = useOperator()
   const [aliasDraft, setAliasDraft] = useState<Record<string, AliasDraft>>({})
-  const [selected, setSelected] = useState<Set<string>>(loadSelectedSensorKeys)
   const [detail, setDetail] = useState<SensorDevice | null>(null)
   const [snapshotJobs, setSnapshotJobs] = useState<Record<string, string>>({})
 
@@ -218,16 +215,6 @@ export function DevicesPage() {
       await queryClient.invalidateQueries({ queryKey: ["sensors", "previews"] })
     } catch (error) { toast.error("Preview could not restart", { description: errorMessage(error) }) }
   }
-  const toggleSelected = (key: string, checked: boolean, captureReady: boolean) => {
-    if (checked && !captureReady) return
-    setSelected((current) => {
-      const next = new Set(current)
-      if (checked) next.add(key)
-      else next.delete(key)
-      saveSelectedSensorKeys(next)
-      return next
-    })
-  }
   const previewTransitionPending = startPreview.isPending || stopPreview.isPending
   const anyPreviewBusy = [...previewByKey.values()].some((item) => PREVIEW_BUSY.has(item.job.status))
   const workflowHref = currentWorkflow ? `/workflow/${currentWorkflow.journey}?step=configure` : "/workflow/setup"
@@ -239,17 +226,17 @@ export function DevicesPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Lab hardware" title="Devices" description="Discover and preview cameras, then maintain reusable lab defaults for future runs. Existing runs are edited in Workflow step 1." actions={<Button variant="outline" onClick={() => void refreshDiscovery()} disabled={status.isFetching}><RefreshCw className={status.isFetching ? "animate-spin" : ""} />Refresh discovery</Button>} />
+      <PageHeader eyebrow="Lab hardware" title="Devices" description="Discover and preview cameras, then maintain reusable lab defaults. Camera selection belongs exclusively to Workflow step 1." actions={<Button variant="outline" onClick={() => void refreshDiscovery()} disabled={status.isFetching}><RefreshCw className={status.isFetching ? "animate-spin" : ""} />Refresh discovery</Button>} />
       <ProcessHandoff
-        title="Defaults here; active-run settings in Workflow"
-        description="Alias, mounting, and orientation here are reusable lab defaults that seed new runs. The next-run checkboxes are browser-local only. Workflow step 1 owns the durable alias, mounting, orientation, and membership for the selected run; later default changes never rewrite it."
+        title="Defaults here; camera selection in Workflow step 1"
+        description="Alias, mounting, and orientation here are reusable lab defaults that seed new runs. Workflow step 1 is the only place to select camera membership and owns the durable alias, mounting, and orientation for the selected run; later default changes never rewrite it."
         to={workflowHref}
         action={workflowAction}
       />
 
       {(aliases.isError || aliases.data?.error) && <div className="flex items-start justify-between gap-4 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs" role="alert"><div><div className="font-semibold text-destructive">Reusable device defaults could not be loaded</div><p className="mt-1 text-muted-foreground">{aliases.data?.error ?? errorMessage(aliases.error)} Editing is disabled so retained defaults are not overwritten.</p></div><Button variant="outline" size="sm" onClick={() => void aliases.refetch()} disabled={aliases.isFetching}><RefreshCw className={aliases.isFetching ? "animate-spin" : ""} />Retry defaults</Button></div>}
 
-      <div className="flex items-center justify-between"><div><h2 className="font-display text-xl font-semibold">RGB-D sensor lab defaults</h2><p className="text-sm text-muted-foreground">{captureReadyCount} capture-ready · {status.data?.total_connected ?? 0} connected · {selected.size} in the next-run browser draft</p></div><Button variant="outline" size="sm" onClick={() => stopAllPreviews.mutate()} disabled={!anyPreviewBusy || stopAllPreviews.isPending}><EyeOff />{stopAllPreviews.isPending ? "Stopping previews…" : "Stop all previews"}</Button></div>
+      <div className="flex items-center justify-between"><div><h2 className="font-display text-xl font-semibold">RGB-D sensor lab defaults</h2><p className="text-sm text-muted-foreground">{captureReadyCount} capture-ready · {status.data?.total_connected ?? 0} connected</p></div><Button variant="outline" size="sm" onClick={() => stopAllPreviews.mutate()} disabled={!anyPreviewBusy || stopAllPreviews.isPending}><EyeOff />{stopAllPreviews.isPending ? "Stopping previews…" : "Stop all previews"}</Button></div>
       {status.isPending ? <div className="grid items-start gap-4 md:grid-cols-2 xl:grid-cols-3">{Array.from({ length: 3 }).map((_, index) => <Skeleton className="h-[430px]" key={index} />)}</div> : devices.length === 0 ? <div className="rounded-xl border border-dashed p-10 text-center text-sm text-muted-foreground">No RGB-D sensors were detected. Check SDKs, USB connections, and permissions, then refresh.</div> : <div data-testid="sensor-grid" className="grid items-start gap-4 md:grid-cols-2 xl:grid-cols-3">
         {devices.map((device) => {
           const key = sensorKey(device)
@@ -263,7 +250,6 @@ export function DevicesPage() {
           const previewSupported = device.live_rgb_preview_supported ?? device.sensor_type !== "zed_2i"
           const captureReady = isCaptureReady(device)
           const readinessMessage = captureReadinessMessage(device)
-          const selectedForRun = selected.has(key)
           const snapshotState = snapshotStates.data?.[key]
           const snapshotRecord = snapshotState?.manifest?.sensors?.find((item) => item.sensor_key === key)
           const snapshotJobId = snapshotJobs[key]
@@ -281,7 +267,7 @@ export function DevicesPage() {
               {snapshotJobId && <div data-testid="sensor-snapshot" className="overflow-hidden rounded-lg border border-border bg-muted/20">{snapshotRecord?.rgb_thumbnail ? <img src={`/sensors/snapshots/${snapshotJobId}/image?path=${encodeURIComponent(snapshotRecord.rgb_thumbnail)}`} className="aspect-video w-full object-cover" alt="Latest sensor snapshot" /> : <div className="grid h-16 place-items-center px-3 text-center text-xs text-muted-foreground">{snapshotRecord?.error ?? (PREVIEW_BUSY.has(snapshotState?.job.status ?? "queued") ? "Capturing snapshot…" : "Snapshot did not produce an image")}</div>}</div>}
               <div className="space-y-2"><Label htmlFor={`alias-${key}`}>Default operator alias</Label><div className="flex gap-2"><Input id={`alias-${key}`} value={alias.alias} onChange={(event) => updateAliasDraft(device, event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && aliasDirty && !defaultControlsDisabled) { event.preventDefault(); void persistDefault(device, { alias: alias.alias }, "alias").catch(() => undefined) } }} disabled={defaultControlsDisabled} /><Button variant="outline" onClick={() => void persistDefault(device, { alias: alias.alias }, "alias").catch(() => undefined)} disabled={defaultControlsDisabled || !aliasDirty} aria-label={`Save alias for ${key}`}><Save />Save alias</Button></div><p className={`text-[10px] leading-relaxed ${aliasDirty ? "font-medium text-warning" : "text-muted-foreground"}`}>{aliasDirty ? "Unsaved alias draft. Save it here before leaving." : "Saved lab default; it seeds new runs only. Existing runs keep their saved alias."}</p></div>
               <div className="grid grid-cols-2 gap-3"><div className="space-y-2"><Label className="flex items-center gap-1" htmlFor={`mounting-${key}`}>Mounting default <HelpTip label="camera mounting mode">Robot-mounted cameras move rigidly with the flange. Static cameras remain fixed in the workcell; their calibration uses a moving robot-mounted grid to publish camera → PoseTemplateBase, not to track the hand.</HelpTip></Label><Select value={alias.mounting_mode ?? UNCONFIGURED_MOUNTING} onValueChange={(value) => { if (value !== UNCONFIGURED_MOUNTING) updateMountingMode(device, value as MountingMode) }} disabled={defaultControlsDisabled}><SelectTrigger id={`mounting-${key}`} aria-label={`Mounting default for ${key}`} data-testid="sensor-mounting-mode"><SelectValue /></SelectTrigger><SelectContent><SelectItem value={UNCONFIGURED_MOUNTING} disabled>Mounting not configured</SelectItem><SelectItem value="eye_in_hand">Robot-mounted</SelectItem><SelectItem value="static">Static</SelectItem></SelectContent></Select><p data-testid={!alias.mounting_mode ? "sensor-mounting-required" : undefined} className={`text-[10px] leading-relaxed ${alias.mounting_mode ? "text-muted-foreground" : "font-medium text-destructive"}`}>{alias.mounting_mode ? "Saved immediately as a new-run default. Existing runs change only in Workflow step 1." : "Required before this camera can seed a valid new run. Choose its physical mount; PoseTestBot will not assume Robot-mounted."}</p></div><div className="space-y-2"><Label className="flex items-center gap-1" htmlFor={`orientation-${key}`}>Orientation default <HelpTip label="camera image orientation">Inverted rotates supported camera output by 180° so saved RGB and aligned depth share the physical mounting orientation.</HelpTip></Label><Select value={alias.inverted ? "inverted" : "normal"} onValueChange={(value) => void updateOrientation(device, value === "inverted", preview)} disabled={defaultControlsDisabled || device.sensor_type !== "realsense_d435" || previewStopping || previewTransitionPending}><SelectTrigger id={`orientation-${key}`} data-testid="sensor-orientation" aria-label={`Orientation default for ${key}`} aria-describedby={persistentControlReasons.length ? controlReasonId : undefined}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="normal">Normal</SelectItem><SelectItem value="inverted">Inverted</SelectItem></SelectContent></Select><p className="text-[10px] leading-relaxed text-muted-foreground">Saved immediately as a new-run default. Active previews restart with it.</p></div></div>
-              <div className="flex items-center justify-between rounded-lg bg-muted/55 px-3 py-2"><div><div className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">Next-run browser draft</div><div className="mt-1 flex items-center gap-1"><Label className={`flex items-center gap-2 ${!captureReady && !selectedForRun ? "cursor-not-allowed text-muted-foreground" : ""}`} title={!captureReady && !selectedForRun ? readinessMessage ?? "Camera is not capture-ready" : undefined}><Checkbox data-testid="sensor-run-selection" checked={selectedForRun} disabled={!captureReady && !selectedForRun} onCheckedChange={(value) => toggleSelected(key, value === true, captureReady)} />Include in next run</Label><HelpTip label="run camera draft">This browser-local selection prefills a new run setup. Save Workflow step 1 to change the selected run’s durable camera membership.</HelpTip></div></div><Button variant="ghost" size="sm" onClick={() => setDetail(device)}><Info />Details</Button></div>
+              <div className="flex justify-end"><Button variant="ghost" size="sm" onClick={() => setDetail(device)}><Info />Details</Button></div>
               <div className="grid grid-cols-2 gap-2"><Button data-testid="sensor-preview-toggle" aria-label={`Toggle preview for ${alias?.alias || device.effective_display_name || device.display_name || device.device_id}`} aria-pressed={previewOn} aria-describedby={persistentControlReasons.length ? controlReasonId : undefined} variant={previewOn ? "secondary" : "outline"} disabled={!previewSupported || previewStopping || previewTransitionPending || (!captureReady && !previewOn)} title={!captureReady ? readinessMessage ?? "Camera is not capture-ready" : previewSupported ? undefined : "Live RGB preview is unavailable for this sensor family"} onClick={() => previewOn && preview ? stopPreview.mutate(preview.job.id) : startPreview.mutate(device)}>{!captureReady && !previewOn ? <><EyeOff />Not ready</> : !previewSupported ? <><EyeOff />Unavailable</> : previewStopping ? <><EyeOff />Stopping…</> : previewOn ? <><Eye />Preview on</> : <><EyeOff />Preview off</>}</Button><Button variant="outline" aria-describedby={persistentControlReasons.length ? controlReasonId : undefined} title={!captureReady ? readinessMessage ?? "Camera is not capture-ready" : previewBusy ? "Turn this preview off before taking a snapshot" : undefined} onClick={() => snapshot.mutate(device)} disabled={!captureReady || previewBusy || snapshot.isPending || PREVIEW_BUSY.has(snapshotState?.job.status ?? "")}><Camera />{PREVIEW_BUSY.has(snapshotState?.job.status ?? "") ? "Capturing…" : "Snapshot"}</Button></div>
               {persistentControlReasons.length > 0 && <div id={controlReasonId} data-testid="sensor-disabled-action-reason" className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-[10px] leading-relaxed text-muted-foreground">{persistentControlReasons.map((reason) => <p key={reason}>{reason}</p>)}</div>}
             </CardContent>

@@ -23,10 +23,15 @@ from posetestbot.robot.reference_frames import (
 )
 from posetestbot.robot.status import collect_robot_status
 from posetestbot.runtime.status import collect_runtime_status
+from posetestbot.sensors.readiness import (
+    probe_selected_sensor_readiness,
+    selected_sensor_readiness_checks,
+    selected_sensor_readiness_matches_config,
+)
 from posetestbot.sensors.status import collect_sensor_status
 
 
-SCHEMA_VERSION = "run_preflight.v1"
+SCHEMA_VERSION = "run_preflight.v2"
 
 
 def _check(
@@ -110,6 +115,11 @@ def run_preflight_queue_summary(
         blocker = "failed_preflight"
     elif not matches_config:
         blocker = "stale_preflight"
+    elif not selected_sensor_readiness_matches_config(
+        report.get("selected_sensor_readiness"),
+        config,
+    ):
+        blocker = "invalid_preflight"
     else:
         blocker = None
     return {
@@ -350,13 +360,19 @@ def build_run_preflight(
     collect_robot: Callable[[], dict] = collect_robot_status,
     collect_sensors: Callable[[], dict] = collect_sensor_status,
     collect_runtimes: Callable[[], dict] = collect_runtime_status,
+    probe_selected_sensors: Callable[[Mapping[str, Any]], dict] = (
+        probe_selected_sensor_readiness
+    ),
 ) -> dict[str, Any]:
-    """Build readiness evidence without starting cameras or commanding motion."""
+    """Build readiness evidence, including a no-write selected-camera open probe."""
 
     root = Path(run_root)
     config = load_run_config_for_run_root(root)
     robot = collect_robot()
     sensors = collect_sensors() if include_sensor_status else None
+    selected_sensor_readiness = (
+        probe_selected_sensors(config) if include_sensor_status else None
+    )
     runtimes = collect_runtimes() if include_runtime_status else None
     enabled = _enabled_sensors(config)
     selected_profile = robot.get("selected_profile", {})
@@ -403,8 +419,11 @@ def build_run_preflight(
         checks.append(
             _check(
                 "sensor_status",
-                "warning",
-                "Live sensor discovery was intentionally skipped.",
+                "error",
+                (
+                    "Live sensor discovery and selected-camera open probes were "
+                    "skipped; capture readiness cannot be established."
+                ),
             )
         )
     else:
@@ -418,6 +437,12 @@ def build_run_preflight(
                     "total_connected": detected,
                     "enabled_sensor_count": len(enabled),
                 },
+            )
+        )
+        checks.extend(
+            selected_sensor_readiness_checks(
+                selected_sensor_readiness,
+                config=config,
             )
         )
 
@@ -455,6 +480,7 @@ def build_run_preflight(
         "config": config,
         "robot_status": robot,
         "sensor_status": sensors,
+        "selected_sensor_readiness": selected_sensor_readiness,
         "runtime_status": runtimes,
     }
 
@@ -476,6 +502,9 @@ def write_run_preflight_with_manifest(
     collect_robot: Callable[[], dict] = collect_robot_status,
     collect_sensors: Callable[[], dict] = collect_sensor_status,
     collect_runtimes: Callable[[], dict] = collect_runtime_status,
+    probe_selected_sensors: Callable[[Mapping[str, Any]], dict] = (
+        probe_selected_sensor_readiness
+    ),
 ) -> tuple[Path, dict[str, Any]]:
     root = Path(run_root)
     manifest = load_or_create_run_manifest(root)
@@ -489,6 +518,7 @@ def write_run_preflight_with_manifest(
             collect_robot=collect_robot,
             collect_sensors=collect_sensors,
             collect_runtimes=collect_runtimes,
+            probe_selected_sensors=probe_selected_sensors,
         )
         path = write_run_preflight_report(root, report)
         manifest["robot_profile"] = dict(report["config"].get("robot_profile") or {})

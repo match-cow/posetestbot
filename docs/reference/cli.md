@@ -22,7 +22,7 @@ Status commands do not authorize capture or robot motion.
 | --- | --- |
 | `scripts/create_run_config.py <run> --intent … --annotation-mode …` | Create strict `run_config.v4` and update the run manifest |
 | `scripts/plan_capture.py <run> [--json]` | Write the canonical non-executing capture plan |
-| `scripts/run_preflight.py <run> --check --write` | Write run readiness evidence without authorizing execution |
+| `scripts/run_preflight.py <run> --check --write` | Write readiness evidence, including one non-recorded frame from each selected camera, without authorizing robot execution |
 | `scripts/run_capture.py <run> --intent … --allow-cameras --allow-real-robot` | Internal/supervised worker for the one physical capture recipe |
 | `scripts/process_dataset.py <run>` | Run sync → quality → rectification → calibrated base BOP export |
 

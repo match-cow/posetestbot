@@ -159,7 +159,6 @@ def test_strict_build_has_search_persistent_pages_and_resolved_links(
         "reference/run-config/index.html",
         "OPERATOR_WORKFLOWS/index.html",
         "COMMISSIONING/index.html",
-        "STREAMLINING_PLAN/index.html",
     }
     for relative in expected_pages:
         assert (built_site / relative).is_file(), relative
