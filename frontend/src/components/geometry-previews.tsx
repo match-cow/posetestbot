@@ -95,7 +95,7 @@ function CanvasMeshPreview({
 }
 
 export function contourPoints(contour: PoseTemplateContour) {
-  return Array.isArray(contour) ? contour : contour.points
+  return contour.points
 }
 
 function footprintPath(contours: Array<Array<{ x_mm: number; y_mm: number }>>) {
@@ -255,14 +255,10 @@ export function WorkpieceIsometricThumbnail({ object, className }: { object: Cat
   </div>
 }
 
-function unwrapTemplatePreview(value: PoseTemplatePreview | { preview: PoseTemplatePreview }) {
-  return "preview" in value ? value.preview : value
-}
-
 export function useTemplatePreview(templateUuid: string, enabled = true) {
   return useQuery({
     queryKey: ["pose-template-library-preview", templateUuid],
-    queryFn: async () => unwrapTemplatePreview(await api<PoseTemplatePreview | { preview: PoseTemplatePreview }>(`/pose-templates/library/${templateUuid}/preview`)),
+    queryFn: () => api<PoseTemplatePreview>(`/pose-templates/library/${templateUuid}/preview`),
     enabled: enabled && Boolean(templateUuid),
     staleTime: Infinity,
     retry: false,
@@ -279,23 +275,14 @@ export function useTemplateThumbnail(templateUuid: string, enabled = true) {
   })
 }
 
-function fallbackPage(bundle?: PoseTemplateBundle) {
-  if (bundle?.page?.width_mm && bundle.page.height_mm) return { width_mm: bundle.page.width_mm, height_mm: bundle.page.height_mm }
-  const landscape = bundle?.page?.orientation !== "portrait"
-  return { width_mm: landscape ? 420 : 297, height_mm: landscape ? 297 : 420 }
-}
-
-export function TemplateFootprintThumbnail({ bundle, className }: { bundle: PoseTemplateBundle; className?: string }) {
-  const thumbnail = useTemplateThumbnail(bundle.template_uuid)
-  const page = thumbnail.data?.page ?? fallbackPage(bundle)
-  const pageConfiguration = thumbnail.data?.configuration?.page ?? bundle.configuration?.page ?? bundle.page
-  const [originX, originY] = pageConfiguration?.origin_from_lower_left_mm ?? [15, 15]
-  const compensation = thumbnail.data?.configuration?.print_compensation ?? bundle.print_compensation ?? { x_scale: 1, y_scale: 1 }
+function TemplateFootprintSvg({ bundle, thumbnail }: { bundle: PoseTemplateBundle; thumbnail: PoseTemplateThumbnail }) {
+  const page = thumbnail.page
+  const [originX, originY] = thumbnail.configuration.page.origin_from_lower_left_mm
+  const compensation = thumbnail.configuration.print_compensation
   const compensatedOriginX = page.width_mm / 2 + compensation.x_scale * (originX - page.width_mm / 2)
   const compensatedOriginY = page.height_mm / 2 + compensation.y_scale * (originY - page.height_mm / 2)
-  return <div data-testid={`template-thumbnail-${bundle.template_uuid}`} className={cn("surface-grid relative grid h-40 place-items-center overflow-hidden rounded-lg border bg-muted/60 p-3", className)}>
-    {thumbnail.isPending ? <LoaderCircle className="size-4 animate-spin text-muted-foreground" /> : thumbnail.data ? <>
-      <svg
+  return <>
+    <svg
       viewBox={`0 0 ${page.width_mm} ${page.height_mm}`}
       role="img"
       aria-label={`${bundle.display_name} bounded footprint preview`}
@@ -306,7 +293,7 @@ export function TemplateFootprintThumbnail({ bundle, className }: { bundle: Pose
       <g transform={`translate(0 ${page.height_mm}) scale(1 -1)`}>
         <ellipse cx={compensatedOriginX} cy={compensatedOriginY} rx={2.5 * compensation.x_scale} ry={2.5 * compensation.y_scale} fill="#2374d8" />
         <g transform={`translate(${originX} ${originY})`}>
-          {thumbnail.data.instances.map((instance) => <path
+          {thumbnail.instances.map((instance) => <path
             key={instance.instance_uuid}
             d={footprintPath(instance.compensated_contours)}
             fill="rgba(177,203,33,.3)"
@@ -316,8 +303,16 @@ export function TemplateFootprintThumbnail({ bundle, className }: { bundle: Pose
           />)}
         </g>
       </g>
-      </svg>
-      {thumbnail.data.approximation.truncated ? <span className="absolute bottom-1.5 right-1.5 rounded bg-amber-950/85 px-1.5 py-0.5 text-[8px] font-medium text-amber-100" title={`${thumbnail.data.approximation.included_points} of ${thumbnail.data.approximation.source_points} footprint points shown`}>Simplified</span> : null}
-    </> : <div className="grid place-items-center gap-1 text-[10px] text-muted-foreground"><TriangleAlert className="size-4" />Preview unavailable</div>}
+    </svg>
+    {thumbnail.approximation.truncated ? <span className="absolute bottom-1.5 right-1.5 rounded bg-amber-950/85 px-1.5 py-0.5 text-[8px] font-medium text-amber-100" title={`${thumbnail.approximation.included_points} of ${thumbnail.approximation.source_points} footprint points shown`}>Simplified</span> : null}
+  </>
+}
+
+export function TemplateFootprintThumbnail({ bundle, className }: { bundle: PoseTemplateBundle; className?: string }) {
+  const thumbnail = useTemplateThumbnail(bundle.template_uuid)
+  return <div data-testid={`template-thumbnail-${bundle.template_uuid}`} className={cn("surface-grid relative grid h-40 place-items-center overflow-hidden rounded-lg border bg-muted/60 p-3", className)}>
+    {thumbnail.isPending ? <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
+      : thumbnail.data ? <TemplateFootprintSvg bundle={bundle} thumbnail={thumbnail.data} />
+        : <div className="grid place-items-center gap-1 text-[10px] text-muted-foreground"><TriangleAlert className="size-4" />Preview unavailable</div>}
   </div>
 }

@@ -30,7 +30,6 @@ const outcomes = [
   { id: "export", label: "Copy models and write the base BOP dataset" },
 ]
 
-const PROCESSING_SEQUENCE = "calibrated_capture_to_bop_dataset_dry_run"
 const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "canceling"])
 const FAILED_JOB_STATUSES = new Set(["failed", "canceled", "cancelled"])
 const TERMINAL_JOB_STATUSES = new Set(["succeeded", ...FAILED_JOB_STATUSES])
@@ -38,7 +37,7 @@ const TERMINAL_JOB_STATUSES = new Set(["succeeded", ...FAILED_JOB_STATUSES])
 function isDatasetProcessingJob(job: Job, runRoot: string) {
   return job.scope_kind === "run"
     && job.run_root === runRoot
-    && (job.parameters.pipeline_sequence === PROCESSING_SEQUENCE || job.name === `pipeline-run-config:${PROCESSING_SEQUENCE}`)
+    && job.parameters.purpose === "dataset_processing"
 }
 
 type OutcomeState = "complete" | "queued" | "running" | "verifying" | "failed" | "waiting"
@@ -76,7 +75,7 @@ export function DatasetProcessing({ runRoot, ready, captureComplete, syncComplet
   const failed = FAILED_JOB_STATUSES.has(currentJobStatus ?? "")
   const succeeded = currentJobStatus === "succeeded"
   const process = useMutation({
-    mutationFn: () => api<{ job_id: string }>("/pipeline/run-config", {
+    mutationFn: () => api<{ job_id: string }>("/dataset-processing/jobs", {
       method: "POST",
       body: JSON.stringify({ run_root: runRoot }),
     }),
@@ -131,7 +130,7 @@ export function DatasetProcessing({ runRoot, ready, captureComplete, syncComplet
   const statusDescription = active
     ? currentJobStatus === "queued"
       ? `Job ${currentJobId} is waiting for its CPU and disk resources. It continues after navigation; Jobs shows resource locks, live output, and cancellation.`
-      : `Job ${currentJobId} is executing the five-stage backend sequence. The next unverified outcome is “${outcomes[activeOutcomeIndex].label}”. It continues after navigation; Jobs has the live process log and cancellation.`
+      : `Job ${currentJobId} is executing the fixed four-command recipe. The next unverified outcome is “${outcomes[activeOutcomeIndex].label}”. It continues after navigation; Jobs has the live process log and cancellation.`
     : failed
       ? `Job ${currentJobId} ended with status ${currentJobStatus}${currentJob?.returncode == null ? "" : ` and return code ${currentJob.returncode}`}. Raw capture evidence was preserved. Review the job output, resolve the reported cause, then retry here.`
       : succeeded && !exportComplete
@@ -145,7 +144,7 @@ export function DatasetProcessing({ runRoot, ready, captureComplete, syncComplet
   return <Card data-testid="dataset-processing" className="border-primary/25">
     <CardHeader>
       <CardTitle className="text-base">Process the recorded dataset</CardTitle>
-      <CardDescription>One queued job runs five backend stages grouped into the four operator outcomes below. It synchronizes, validates, rectifies, and writes the base image/model BOP dataset. Ground-truth generation is chosen separately in optional step 6. Raw camera frames and robot poses are never renamed or replaced.</CardDescription>
+      <CardDescription>One queued job runs the fixed four-command recipe below. It synchronizes, validates, rectifies, and writes the base image/model BOP dataset. Ground-truth generation is chosen separately in optional step 6. Raw camera frames and robot poses are never renamed or replaced.</CardDescription>
     </CardHeader>
     <CardContent className="space-y-5">
       <ol className="grid gap-2 sm:grid-cols-2" aria-label="Automatic dataset processing">

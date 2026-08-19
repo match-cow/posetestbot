@@ -10,7 +10,7 @@ const blockerCopy: Record<string, ReadinessBlockerCopy> = {
   },
   stale_preflight: {
     heading: "Setup changed after the last check",
-    description: "Camera, target, template, or pipeline settings changed. Check readiness again for the current setup.",
+    description: "Camera, target, template, or run settings changed. Check readiness again for the current setup.",
   },
   failed_preflight: {
     heading: "A required readiness check failed",

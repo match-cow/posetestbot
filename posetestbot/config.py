@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import os
 from dataclasses import dataclass, replace
 
 
@@ -26,9 +25,9 @@ def bounded_capture_velocity_m_s(
 ) -> float:
     """Return a finite positive command bounded by the selected command path.
 
-    Legacy and calibration acquisition use the conservative 0.03 default.
-    Versioned object-dataset acquisition and explicit manual motion tests may
-    supply their separately bounded command limits.
+    Calibration acquisition uses the conservative 0.03 default. Versioned
+    object-dataset acquisition and explicit manual motion tests may supply
+    their separately bounded command limits.
     """
 
     if isinstance(requested_velocity_m_s, bool):
@@ -80,30 +79,14 @@ class RobotProfile:
         )
 
 
-def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return int(value)
-
-
-def _env_float(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return float(value)
-
-
 def robot_profile() -> RobotProfile:
-    """Return the real lab iiwa profile with environment overrides."""
+    """Return the sole commissioned lab iiwa profile."""
 
     return RobotProfile(
         mode="real",
-        robot_ip=os.getenv("POSETESTBOT_ROBOT_IP", LAB_ROBOT_IP),
-        command_port=_env_int("POSETESTBOT_ROBOT_PORT", DEFAULT_ROBOT_PORT),
-        receiver_ip=os.getenv("POSETESTBOT_RECEIVER_IP", LAB_ROBOT_RECEIVER_IP),
-        receiver_port=_env_int("POSETESTBOT_RECEIVER_PORT", DEFAULT_RECEIVER_PORT),
-        cartesian_velocity_m_s=_env_float(
-            "POSETESTBOT_CAPTURE_VEL", DEFAULT_CAPTURE_VELOCITY_M_S
-        ),
+        robot_ip=LAB_ROBOT_IP,
+        command_port=DEFAULT_ROBOT_PORT,
+        receiver_ip=LAB_ROBOT_RECEIVER_IP,
+        receiver_port=DEFAULT_RECEIVER_PORT,
+        cartesian_velocity_m_s=DEFAULT_CAPTURE_VELOCITY_M_S,
     )

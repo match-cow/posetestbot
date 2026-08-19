@@ -93,21 +93,13 @@ future authorization. See [Safety and authorization](../concepts/safety.md).
 
 ## Safe discovery example
 
-These calls return registered metadata and create a plan-only job; they do not
-start a physical capture:
+These calls inspect status and create a non-executing plan; they do not start a
+physical capture:
 
 ```bash
-curl --fail-with-body http://127.0.0.1:5000/pipeline/workflows
-curl --fail-with-body http://127.0.0.1:5000/pipeline/sequences
-curl --fail-with-body \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "run_root": "working_data/example",
-    "sequence": "real_full_capture_validation",
-    "plan_only": true,
-    "options": {}
-  }' \
-  http://127.0.0.1:5000/pipeline/run-sequence
+curl --fail-with-body http://127.0.0.1:5000/robot/status
+curl --fail-with-body http://127.0.0.1:5000/sensors/status
+uv run python scripts/plan_capture.py working_data/example --json
 ```
 
 ## Reference organization
@@ -115,7 +107,7 @@ curl --fail-with-body \
 - [Complete generated route index](http-api-routes.md)
 - [System, sensors, and monitoring](api/system-sensors.md)
 - [Runs and jobs](api/runs-jobs.md)
-- [Capture and pipeline](api/capture-pipeline.md)
+- [Capture and focused orchestration](api/capture-pipeline.md)
 - [Calibration](api/calibration.md)
 - [Workpieces and pose templates](api/catalogs.md)
 - [BOP and cluster boundary](api/bop-cluster.md)

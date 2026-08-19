@@ -119,9 +119,8 @@ copies the selected evidence and bundle into canonical run artifacts.
 Calibration calculation also binds its selected target snapshot to the
 per-camera Auto time-alignment evidence; neither target geometry nor raw
 timestamps are rewritten. The operator behavior and dataset handoff are
-documented in [OPERATOR_WORKFLOWS.md](OPERATOR_WORKFLOWS.md), while the
-algorithm limits and real replay are retained in
-[EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md](EYE_IN_HAND_CALIBRATION_VALIDATION_20260723.md).
+documented in [OPERATOR_WORKFLOWS.md](OPERATOR_WORKFLOWS.md). Physical
+deployment and acceptance remain in [COMMISSIONING.md](COMMISSIONING.md).
 
 `calibration_target.v2` makes the compensated `corners_mm` for every marker
 authoritative. The target frame is `aruco_grid`, its origin is the compensated
@@ -133,9 +132,8 @@ print compensation again.
 
 Selecting the same target, placement policy, and physical mounting frame again
 is idempotent. A different target, placement, or mounting frame is rejected as
-soon as capture status/logs, raw RGB-D/metadata, raw robot poses, detections,
-calibrated intrinsics, poses, coverage, observations, candidates,
-solver/validation output, promoted profiles, rectification, or BOP output
+soon as capture status/logs, raw RGB-D/metadata, raw robot poses, a calibration
+attempt, promoted profiles, rectification, or BOP output
 exists. Those artifacts already encode which target moved relative to the
 robot, so relabelling them would change the hand-eye equation. The API returns
 the concrete blocker paths; preserve the evidence and create a new run.

@@ -28,8 +28,8 @@ from posetestbot.sensors.contracts import AlignedRgbdFrame, CameraIntrinsics, Se
 SCHEMA_VERSION = "frame_metadata.v1"
 
 
-def ensure_legacy_rgbd_folders(output_path: str | Path) -> Path:
-    """Create the legacy capture folder shape used by later acquisition stages."""
+def ensure_rgbd_folders(output_path: str | Path) -> Path:
+    """Create the current RGB-D capture folder shape."""
 
     output = Path(output_path)
     (output / RGB_DIR).mkdir(parents=True, exist_ok=True)
@@ -47,9 +47,7 @@ def append_frame_metadata(output_path: str | Path, metadata: Mapping[str, Any]) 
 
     output = Path(output_path)
     metadata_path = output / FRAME_METADATA_JSONL
-    line = json.dumps(
-        dict(metadata), separators=(",", ":"), allow_nan=False
-    ) + "\n"
+    line = json.dumps(dict(metadata), separators=(",", ":"), allow_nan=False) + "\n"
     previous_size = metadata_path.stat().st_size if metadata_path.exists() else 0
     try:
         with open(metadata_path, "a", encoding="utf-8") as handle:
@@ -77,13 +75,15 @@ def sync_frame_metadata(output_path: str | Path) -> Path | None:
 
 
 def frame_stem_from_host_wall_ns(host_wall_timestamp_ns: int) -> str:
-    """Return the legacy millisecond timestamp filename stem."""
+    """Return the millisecond timestamp filename stem."""
 
     return str(int(round(host_wall_timestamp_ns / 1_000_000)))
 
 
 def _sensor_type_value(sensor_type: SensorType | str) -> str:
-    return sensor_type.value if isinstance(sensor_type, SensorType) else str(sensor_type)
+    return (
+        sensor_type.value if isinstance(sensor_type, SensorType) else str(sensor_type)
+    )
 
 
 def _write_png(path: Path, image: Any) -> None:
@@ -91,7 +91,9 @@ def _write_png(path: Path, image: Any) -> None:
         raise OSError(f"Failed to write image: {path}")
 
 
-def _validate_rgbd_images(rgb_image: Any, depth_image: Any) -> tuple[np.ndarray, np.ndarray]:
+def _validate_rgbd_images(
+    rgb_image: Any, depth_image: Any
+) -> tuple[np.ndarray, np.ndarray]:
     rgb = np.asarray(rgb_image)
     depth = np.asarray(depth_image)
     if rgb.ndim != 3 or rgb.shape[2] not in {3, 4}:
@@ -113,13 +115,13 @@ def _temporary_png_path(path: Path) -> Path:
     return path.with_name(f".{path.stem}.{uuid.uuid4().hex}.png")
 
 
-def write_legacy_camera_sidecars(
+def write_camera_sidecars(
     output_path: str | Path,
     intrinsics: CameraIntrinsics,
     *,
     include_distortion_in_cam_k: bool = False,
 ) -> dict[str, Path]:
-    """Write legacy camera sidecars shared by calibration and BOP export stages."""
+    """Write current camera sidecars shared by calibration and BOP export."""
 
     output = Path(output_path)
     output.mkdir(parents=True, exist_ok=True)
@@ -129,7 +131,10 @@ def write_legacy_camera_sidecars(
         np.isfinite(value) for value in intrinsics.cam_k
     ):
         raise ValueError("Camera intrinsic matrix must contain 9 finite values")
-    if not np.isfinite(intrinsics.depth_scale_to_mm) or intrinsics.depth_scale_to_mm <= 0:
+    if (
+        not np.isfinite(intrinsics.depth_scale_to_mm)
+        or intrinsics.depth_scale_to_mm <= 0
+    ):
         raise ValueError("Camera depth scale must be finite and positive")
     cam_k = [float(value) for value in intrinsics.cam_k]
     matrix_rows = intrinsics.as_matrix_rows()
@@ -146,13 +151,11 @@ def write_legacy_camera_sidecars(
             + ", ".join(path.as_posix() for path in existing)
         )
 
-    cam_k_text = "".join(
-        f"{row[0]} {row[1]} {row[2]}\n" for row in matrix_rows
-    )
+    cam_k_text = "".join(f"{row[0]} {row[1]} {row[2]}\n" for row in matrix_rows)
     if include_distortion_in_cam_k and intrinsics.distortion:
-        cam_k_text += " ".join(
-            str(float(value)) for value in intrinsics.distortion
-        ) + "\n"
+        cam_k_text += (
+            " ".join(str(float(value)) for value in intrinsics.distortion) + "\n"
+        )
     camera_payload: dict[str, Any] = {
         "cam_K": cam_k,
         "depth_scale": float(intrinsics.depth_scale_to_mm),
@@ -207,7 +210,7 @@ def write_legacy_camera_sidecars(
     }
 
 
-def write_legacy_rgbd_frame(
+def write_rgbd_frame(
     output_path: str | Path,
     *,
     rgb_image: Any,
@@ -229,11 +232,9 @@ def write_legacy_rgbd_frame(
         raise ValueError("frame_index must be greater than or equal to 0")
     if not sensor_id:
         raise ValueError("sensor_id must not be empty")
-    output = ensure_legacy_rgbd_folders(output_path)
+    output = ensure_rgbd_folders(output_path)
     wall_timestamp = (
-        host_wall_timestamp_ns
-        if host_wall_timestamp_ns is not None
-        else time.time_ns()
+        host_wall_timestamp_ns if host_wall_timestamp_ns is not None else time.time_ns()
     )
     stem = frame_stem or frame_stem_from_host_wall_ns(wall_timestamp)
     if not stem.isdigit():
@@ -263,8 +264,7 @@ def write_legacy_rgbd_frame(
         overlaps = sorted(set(extra_metadata) & set(metadata))
         if overlaps:
             raise ValueError(
-                "extra_metadata may not override core field(s): "
-                + ", ".join(overlaps)
+                "extra_metadata may not override core field(s): " + ", ".join(overlaps)
             )
         metadata.update(dict(extra_metadata))
 
@@ -304,12 +304,12 @@ def write_aligned_rgbd_frame(
     frame_stem: str | None = None,
     extra_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Write an `AlignedRgbdFrame` through the legacy capture folder contract."""
+    """Write an `AlignedRgbdFrame` through the current capture contract."""
 
     metadata = dict(frame.exposure_metadata)
     if extra_metadata:
         metadata.update(dict(extra_metadata))
-    return write_legacy_rgbd_frame(
+    return write_rgbd_frame(
         output_path,
         rgb_image=frame.rgb_image,
         depth_image=frame.depth_image_aligned_to_rgb,

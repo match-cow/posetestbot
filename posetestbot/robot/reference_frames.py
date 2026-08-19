@@ -9,6 +9,7 @@ without pretending that path equality proves a frame has not been retaught.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Mapping
 
 
@@ -35,50 +36,62 @@ def normalize_sunrise_reference_frame_path(value: Any) -> str:
 
 def configured_sunrise_reference_frame_path(
     config: Mapping[str, Any],
-) -> str | None:
-    """Read the optional exact robot-pose reference expected by a run config."""
+) -> str:
+    """Read the required exact robot-pose reference from a current run config."""
 
     frames = config.get("frames")
     robot_pose = frames.get("robot_pose") if isinstance(frames, Mapping) else None
     if not isinstance(robot_pose, Mapping):
-        return None
+        raise ValueError("Current run config has no robot-pose frame contract")
     value = robot_pose.get("sunrise_reference_frame_path")
     if value is None:
-        return None
+        raise ValueError("Current run config has no Sunrise reference-frame path")
     return normalize_sunrise_reference_frame_path(value)
 
 
 def robot_pose_reference_evidence(raw_poses: Mapping[str, Any]) -> dict[str, Any]:
     """Extract one immutable reference identity from a raw robot-pose artifact.
 
-    Fully legacy artifacts remain loadable and return explicit unverified
-    evidence.  A partially annotated or identity-changing artifact is rejected:
-    it is neither a coherent v1 stream nor an unambiguous legacy stream.
+    Every record must retain the strict ``robot_pose.v1`` source packet,
+    including its run ID and exact Sunrise reference-frame provenance.
     """
 
     if not isinstance(raw_poses, Mapping) or not raw_poses:
         raise ValueError("Raw robot pose artifact must be a non-empty JSON object")
 
-    identities: set[tuple[str, str, str, str]] = set()
-    annotated_count = 0
-    legacy_count = 0
+    identities: set[tuple[str, str, str, str, str]] = set()
+    pose_count = 0
     for key, raw_record in raw_poses.items():
         if not isinstance(raw_record, Mapping):
             raise ValueError(f"Robot pose {key!r} must be a JSON object")
         packet = raw_record.get("source_packet")
-        if packet is None:
-            legacy_count += 1
-            continue
         if not isinstance(packet, Mapping):
-            raise ValueError(f"Robot pose {key!r} source_packet must be an object")
-        annotated_count += 1
+            raise ValueError(
+                f"Robot pose {key!r} must retain its robot_pose.v1 source_packet"
+            )
+        pose_count += 1
         schema_version = str(packet.get("schema_version") or "")
+        run_id = str(packet.get("run_id") or "")
         from_frame = str(packet.get("from_frame") or "")
         to_frame = str(packet.get("to_frame") or "")
         if schema_version != ROBOT_POSE_PACKET_SCHEMA_VERSION:
             raise ValueError(
                 f"Robot pose {key!r} source packet schema must be "
                 f"{ROBOT_POSE_PACKET_SCHEMA_VERSION}"
+            )
+        try:
+            canonical_run_id = str(uuid.UUID(run_id))
+        except (ValueError, AttributeError) as exc:
+            raise ValueError(
+                f"Robot pose {key!r} source packet has an invalid run_id"
+            ) from exc
+        if run_id != canonical_run_id:
+            raise ValueError(
+                f"Robot pose {key!r} source packet run_id is not canonical"
+            )
+        if packet.get("packet_kind") != "pose":
+            raise ValueError(
+                f"Robot pose {key!r} source packet must have packet_kind=pose"
             )
         if from_frame != "robot_flange" or to_frame != "template_base":
             raise ValueError(
@@ -88,33 +101,25 @@ def robot_pose_reference_evidence(raw_poses: Mapping[str, Any]) -> dict[str, Any
         path = normalize_sunrise_reference_frame_path(
             packet.get("sunrise_reference_frame_path")
         )
-        identities.add((schema_version, from_frame, to_frame, path))
-
-    if annotated_count == 0:
-        return {
-            "schema_version": ROBOT_POSE_REFERENCE_SCHEMA_VERSION,
-            "status": "unverified",
-            "reason": "legacy_robot_pose_packets_omit_sunrise_reference_frame_path",
-            "pose_count": legacy_count,
-        }
-    if legacy_count:
-        raise ValueError(
-            "Raw robot pose artifact mixes v1 packets with legacy packets that omit "
-            "Sunrise reference-frame provenance"
-        )
+        if path != POSE_TEMPLATE_BASE_SUNRISE_PATH:
+            raise ValueError(
+                f"Robot pose {key!r} does not use {POSE_TEMPLATE_BASE_SUNRISE_PATH}"
+            )
+        identities.add((schema_version, run_id, from_frame, to_frame, path))
     if len(identities) != 1:
         raise ValueError(
             "Raw robot pose artifact changes Sunrise reference-frame identity"
         )
-    schema_version, from_frame, to_frame, path = next(iter(identities))
+    schema_version, run_id, from_frame, to_frame, path = next(iter(identities))
     return {
         "schema_version": ROBOT_POSE_REFERENCE_SCHEMA_VERSION,
         "status": "verified",
         "packet_schema_version": schema_version,
+        "run_id": run_id,
         "from": from_frame,
         "to": to_frame,
         "sunrise_reference_frame_path": path,
-        "pose_count": annotated_count,
+        "pose_count": pose_count,
     }
 
 
@@ -122,7 +127,7 @@ def verified_sunrise_reference_frame_path(value: Any) -> str | None:
     """Return the path from verified reference evidence, else ``None``.
 
     The function is intentionally strict for a mapping claiming ``verified``;
-    malformed profile metadata must not silently degrade into legacy status.
+    malformed profile metadata must fail closed.
     """
 
     if not isinstance(value, Mapping) or value.get("status") != "verified":

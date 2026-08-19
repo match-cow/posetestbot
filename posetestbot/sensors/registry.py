@@ -8,7 +8,7 @@ from typing import Any
 from posetestbot.sensors.contracts import MountingMode, SensorType
 
 
-AUTO_DEVICE_IDS = {"", "auto", "default"}
+AUTO_DEVICE_IDS = {"auto"}
 
 
 @dataclass(frozen=True)

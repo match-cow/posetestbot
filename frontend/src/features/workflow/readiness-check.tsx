@@ -37,7 +37,7 @@ const TERMINAL_JOB_STATUSES = new Set(["succeeded", ...FAILED_JOB_STATUSES])
 function isReadinessJob(job: Job, runRoot: string) {
   return job.scope_kind === "run"
     && job.run_root === runRoot
-    && (job.parameters.pipeline_stage === "run_preflight" || job.name === "pipeline:run_preflight")
+    && job.parameters.purpose === "preflight"
 }
 
 export function ReadinessCheck({ runRoot, intent, preflight, loading = false, requirements }: ReadinessCheckProps) {
@@ -80,9 +80,9 @@ export function ReadinessCheck({ runRoot, intent, preflight, loading = false, re
   const jobHistoryUnavailable = jobs.isError
 
   const check = useMutation({
-    mutationFn: () => api<{ job_id: string }>("/pipeline/run", {
+    mutationFn: () => api<{ job_id: string }>("/preflight/jobs", {
       method: "POST",
-      body: JSON.stringify({ stage: "run_preflight", run_root: runRoot, options: { write: true, check: true } }),
+      body: JSON.stringify({ run_root: runRoot }),
     }),
     onSuccess: (data) => {
       setSubmittedJob({ id: data.job_id, runRoot })
@@ -139,7 +139,7 @@ export function ReadinessCheck({ runRoot, intent, preflight, loading = false, re
     <CardHeader>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <div className="flex items-center gap-2"><CardTitle className="text-base">One readiness check</CardTitle><HelpTip label="readiness check">This single operator step validates saved configuration, provenance, current device/runtime visibility, and the planned software stages. Capture separately checks live device identity, empty output, and safety immediately before hardware starts.</HelpTip></div>
+          <div className="flex items-center gap-2"><CardTitle className="text-base">One readiness check</CardTitle><HelpTip label="readiness check">This single operator step validates saved configuration, provenance, current device/runtime visibility, and the fixed workflow recipe. Capture separately checks live device identity, empty output, and safety immediately before hardware starts.</HelpTip></div>
           <CardDescription className="mt-1">This does not reserve cameras or prove that capture output is still empty. Nothing physical starts here.</CardDescription>
         </div>
         <Button onClick={() => check.mutate()} disabled={check.isPending || loading || jobHistoryPending || jobHistoryUnavailable || active} variant={ready ? "outline" : "default"}>

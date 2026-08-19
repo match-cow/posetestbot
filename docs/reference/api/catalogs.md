@@ -45,8 +45,6 @@ catalogue assets.
 | `GET /pose-templates/status` | Inspect source/runtime and library status |
 | `POST /pose-templates/preview` | Queue exact slicing/preview validation |
 | `GET /pose-templates/preview/<request_id>` | Poll preview result |
-| `POST /pose-templates/validate` | Compatibility alias for preview |
-| `GET /pose-templates/validate/<request_id>` | Compatibility result alias |
 | `POST /pose-templates/generate` | Publish an immutable validated bundle |
 | `GET /pose-templates/library` | List active/archived global bundles |
 | `GET /pose-templates/library/<template_uuid>` | Return one bundle and lifecycle state |
@@ -55,7 +53,7 @@ catalogue assets.
 | `GET /pose-templates/library/<template_uuid>/preview` | Return exact preview JSON |
 | `GET /pose-templates/library/<template_uuid>/thumbnail` | Return bounded thumbnail JSON/image response |
 | `GET /pose-templates/library/<template_uuid>/download/<kind>` | Download an allow-listed bundle artifact |
-| `GET …/assets/<instance_uuid>/<kind>` | Return an allow-listed per-instance asset; both supported URL aliases are in the route index |
+| `GET /pose-templates/library/<template_uuid>/assets/<instance_uuid>/<kind>` | Return an allow-listed per-instance asset |
 
 Deleted template UUIDs are never reused. Existing run snapshots remain
 independent of library retirement.
@@ -66,7 +64,6 @@ independent of library retirement.
 | --- | --- |
 | `GET /pose-templates/runs/selection?run_root=…` | Read selected immutable bundle, instances, placements, and transaction state |
 | `POST /pose-templates/runs/selection` | Atomically replace run selection and `object_instances.json` |
-| `POST /pose-templates/runs/placement` | Compatibility alias for selection/placement update |
 
 Replacement uses a durable hidden transaction journal so recovery cannot
 expose a half-updated run. See

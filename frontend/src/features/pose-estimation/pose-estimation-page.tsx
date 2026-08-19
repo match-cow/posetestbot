@@ -83,7 +83,7 @@ export function PoseEstimationPage() {
     refetchInterval: (state) => state.state.data?.jobs.some((job) => ACTIVE.has(job.state)) ? 2_000 : 10_000,
   })
   const latestRunJob = useMemo(
-    () => history.data?.jobs.find((job) => job.payload.run_root === selectedRun && (job.payload.estimator_id ?? "foundationpose") === effectiveEstimatorId) ?? null,
+    () => history.data?.jobs.find((job) => job.payload.run_root === selectedRun && job.payload.estimator_id === effectiveEstimatorId) ?? null,
     [effectiveEstimatorId, history.data, selectedRun],
   )
   const submittedJobId = submittedJob?.runRoot === selectedRun ? submittedJob.jobId : null
@@ -145,7 +145,7 @@ export function PoseEstimationPage() {
     <PageHeader
       eyebrow="Inspect · external estimator"
       title="Pose Estimation"
-      description="Stage the active run's immutable BOP export to a qualified estimator runtime selected from the external cluster controller. This is not an acquisition pipeline stage."
+      description="Stage the active run's immutable BOP export to a qualified estimator runtime selected from the external cluster controller. This is not an acquisition stage."
       actions={<>
         <Button asChild variant="outline"><Link to="/run-folders"><Archive />Cluster storage</Link></Button>
         <Button variant="outline" onClick={() => { void setup.refetch(); void history.refetch() }} disabled={setup.isFetching || history.isFetching}><RefreshCw className={setup.isFetching || history.isFetching ? "animate-spin" : undefined} />Refresh evidence</Button>
@@ -185,7 +185,7 @@ export function PoseEstimationPage() {
                 </div>
                 {setup.data.oracle_mask_contract && <div className="rounded-lg border border-warning/35 bg-warning/5 p-3 text-xs leading-relaxed text-warning-foreground">
                   <div className="flex items-center gap-2 font-semibold"><AlertTriangle className="size-4" />Oracle-mask qualification</div>
-                  <p className="mt-1">This v1 run does not measure detection or segmentation. Each row uses a known visible instance mask, reports score 1.0, and estimates every target independently without tracking across images or cameras.</p>
+                  <p className="mt-1">This qualified run does not measure detection or segmentation. Each row uses a known visible instance mask, reports score 1.0, and estimates every target independently without tracking across images or cameras.</p>
                 </div>}
                 {setup.data.blockers.length > 0 && <div className="space-y-2" aria-label="Pose estimation blockers">
                   {setup.data.blockers.map((blocker) => <div key={`${blocker.code}-${blocker.message}`} className="flex gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"><AlertTriangle className="mt-0.5 size-4 shrink-0" /><span>{blocker.message}</span></div>)}
@@ -237,7 +237,7 @@ export function PoseEstimationPage() {
             <CardContent className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.7fr)]">
               <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
                 <Metric label="SLURM job" value={currentJob.slurm_job_id ?? "pending"} />
-                <Metric label="Estimator" value={String(currentJob.payload.estimator_id ?? "foundationpose")} />
+                <Metric label="Estimator" value={String(currentJob.payload.estimator_id ?? "unreported")} />
                 <Metric label="Profile" value={String(currentJob.payload.profile_id ?? "—")} />
                 <Metric label="Updated" value={formatDate(currentJob.updated_at)} />
                 <Metric label="Estimates" value={currentJob.result?.estimate_count ?? "—"} detail={currentJob.result ? `${currentJob.result.failure_count} target failures retained` : undefined} />

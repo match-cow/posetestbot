@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mounting-frame",
+        required=True,
         choices=("robot_flange", "template_base"),
     )
     parser.add_argument("--library-root")

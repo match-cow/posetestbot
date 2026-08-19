@@ -87,11 +87,7 @@ def _thumbnail_catalog_summary(value: Any) -> dict[str, Any]:
 
     if not isinstance(value, Mapping):
         return {}
-    return {
-        key: value[key]
-        for key in ("obj_id", "name")
-        if key in value
-    }
+    return {key: value[key] for key in ("obj_id", "name") if key in value}
 
 
 def _orientation_id(source_sha256: str, orientation: Mapping[str, Any]) -> str:
@@ -213,9 +209,7 @@ def build_orientation_analysis(
         "recognition_mesh": extracted.get(
             "recognition_mesh", extracted["preview_mesh"]
         ),
-        "recognition_mesh_approximation": extracted[
-            "recognition_mesh_approximation"
-        ],
+        "recognition_mesh_approximation": extracted["recognition_mesh_approximation"],
         "orientations": orientations,
     }
 
@@ -253,9 +247,11 @@ def _validate_preview_mesh(
             )
         ):
             raise ValueError(f"{label} face is invalid")
-    if max_json_bytes is not None and len(
-        _canonical_json({"vertices": vertices, "faces": faces})
-    ) > max_json_bytes:
+    if (
+        max_json_bytes is not None
+        and len(_canonical_json({"vertices": vertices, "faces": faces}))
+        > max_json_bytes
+    ):
         raise ValueError(f"{label} exceeds its bounded JSON size")
 
 
@@ -314,7 +310,9 @@ def _validate_recognition_approximation(
         raise ValueError(f"{label} topology_preserved is invalid")
     resolution = value.get("spatial_resolution")
     if resolution is not None and (
-        not isinstance(resolution, int) or isinstance(resolution, bool) or resolution < 2
+        not isinstance(resolution, int)
+        or isinstance(resolution, bool)
+        or resolution < 2
     ):
         raise ValueError(f"{label} spatial_resolution is invalid")
     reason = value.get("fallback_reason")
@@ -620,16 +618,10 @@ def load_catalog_orientation_thumbnail(
         record["catalog_uuid"], catalog_root=root, canonical_path=canonical
     )
     thumbnail_path = cache.with_name(ORIENTATION_THUMBNAIL_FILENAME)
-    try:
-        if thumbnail_path.stat().st_size > ORIENTATION_THUMBNAIL_MAX_BYTES:
-            raise ValueError("Orientation thumbnail exceeds its bounded size limit")
-        with open(thumbnail_path, "r", encoding="utf-8") as handle:
-            value = json.load(handle)
-    except FileNotFoundError:
-        analysis = load_catalog_orientation_analysis(
-            record["catalog_uuid"], catalog_root=root
-        )
-        return build_orientation_thumbnail(analysis)
+    if thumbnail_path.stat().st_size > ORIENTATION_THUMBNAIL_MAX_BYTES:
+        raise ValueError("Orientation thumbnail exceeds its bounded size limit")
+    with open(thumbnail_path, "r", encoding="utf-8") as handle:
+        value = json.load(handle)
     validated = _validate_orientation_thumbnail(
         value,
         catalog_uuid=record["catalog_uuid"],

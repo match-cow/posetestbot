@@ -1,16 +1,11 @@
-"""Canonical artifact names used by current scripts and rewrite modules."""
+"""Canonical artifact names used by current PoseTestBot workflows."""
 
 from __future__ import annotations
 
 RAW_ROBOT_EE_POSES = "raw_robot_ee_poses.json"
 ROBOT_POSE_CADENCE_REPORT = "robot_pose_cadence_report.json"
 MATCH_ROBOT_EE_POSES = "match_robot_ee_poses.json"
-ARUCO_POSE_ESTIMATION = "aruco_pose_estimation.json"
 ARUCO_DETECTIONS = "aruco_detections.json"
-CHARUCO_POSE_ESTIMATION = "charuco_pose_estimation.json"
-CHECKERBOARD_POSE_ESTIMATION = "checkerboard_pose_estimation.json"
-CALIBRATION_TARGET_POSE_ESTIMATION = "calibration_target_pose_estimation.json"
-ARUCO_COVERAGE_REPORT = "aruco_coverage_report.json"
 CAM_K = "cam_K.txt"
 DEPTH_SCALE = "depthscale.txt"
 CAMERA_JSON = "camera.json"
@@ -19,8 +14,6 @@ FRAME_METADATA_JSONL = "frame_metadata.jsonl"
 DATASET_MANIFEST = "dataset_manifest.json"
 RUN_CONFIG = "run_config.json"
 RUN_PREFLIGHT_REPORT = "run_preflight_report.json"
-REWRITE_GATE_REPORT = "rewrite_gate_report.json"
-REWRITE_STATUS_REPORT = "rewrite_status_report.json"
 HARDWARE_STATUS_REPORT = "hardware_status_report.json"
 CAPTURE_PLAN = "capture_plan.json"
 CAPTURE_PLAN_PREFLIGHT_REPORT = "capture_plan_preflight_report.json"
@@ -35,7 +28,6 @@ BLENDERPROC_RENDER_PLAN = "blenderproc_render_plan.json"
 BOP_ANNOTATION_GENERATION_REPORT = "generation_report.json"
 POSE_TEMPLATE_SELECTION = "pose_template_selection.json"
 OBJECT_INSTANCES = "object_instances.json"
-PIPELINE_SEQUENCE_PLAN = "pipeline_sequence_plan.json"
 BOP_EXPORT_MANIFEST = "bop_export_manifest.json"
 BOP_FRAME_MAP_JSON = "posetestbot_bop_frame_map.json"
 BOP_DATASET_INFO = "dataset_info.json"
@@ -50,16 +42,9 @@ INTRINSIC_CALIBRATION_PROFILES = "intrinsic_calibration_profiles.json"
 INTRINSIC_COMPARISON = "intrinsic_comparison.json"
 TIME_OFFSET_SEARCH = "time_offset_search.json"
 CAMERA_RECTIFICATION_REPORT = "camera_rectification_report.json"
-CALIBRATION_OBSERVATIONS = "calibration_observations.json"
-CALIBRATION_CANDIDATES = "calibration_candidates.json"
-CALIBRATION_PROFILES_FROM_OBSERVATIONS = "calibration_profiles_from_observations.json"
-CALIBRATION_SOLVER_REPORT = "calibration_solver_report.json"
-CALIBRATION_PROFILES_SOLVED = "calibration_profiles_solved.json"
-CALIBRATION_VALIDATION_REPORT = "calibration_validation_report.json"
-CALIBRATION_PREFLIGHT_REPORT = "calibration_preflight_report.json"
 DERIVED_CAMERA_EE_TRANSFORM = "camera_ee_transform_from_calibration_profiles.json"
 
-LEGACY_SENSOR_METADATA_ARTIFACTS = (
+CURRENT_SENSOR_METADATA_ARTIFACTS = (
     CAM_K,
     DEPTH_SCALE,
     CAMERA_JSON,

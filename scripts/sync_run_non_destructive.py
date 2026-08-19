@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--timestamp-source",
-        choices=("host_received", "host_wall", "sensor", "filename"),
+        choices=("host_received", "host_wall", "sensor"),
         default=None,
         help=(
             "Manual timestamp source. Runs with a selected calibration always "
@@ -61,11 +61,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--robot-timestamp-source",
-        choices=("host_received", "host_wall", "filename"),
+        choices=("host_received", "host_wall"),
         default=None,
         help=(
-            "Robot-pose timestamp source. Required for sensor/filename frame "
-            "timestamps; inferred only for matching host clock sources."
+            "Robot-pose timestamp source. Required for sensor timestamps; "
+            "inferred only for matching host clock sources."
         ),
     )
     parser.add_argument(

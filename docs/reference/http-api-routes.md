@@ -2,7 +2,7 @@
 
 # Complete HTTP route index
 
-This index contains all **137** non-static Flask rules registered by
+This index contains all **116** non-static Flask rules registered by
 `posetestbot.web.app.create_app`. It is generated from the running route map,
 so aliases and mixed-method rules appear exactly as Flask exposes them.
 
@@ -38,12 +38,7 @@ uv run python scripts/generate_http_api_reference.py --check
 | `POST` | `/calibration/attempts` | JSON | Calibration attempt create | `calibration.calibration_attempt_create_endpoint` |
 | `GET` | `/calibration/attempts/<attempt_id>` | JSON | Calibration attempt | `calibration.calibration_attempt_endpoint` |
 | `POST` | `/calibration/attempts/<attempt_id>/promote` | JSON | Calibration attempt promote | `calibration.calibration_attempt_promote_endpoint` |
-| `GET, POST` | `/calibration/candidates` | JSON | Calibration candidates | `calibration_stages.calibration_candidates_endpoint` |
-| `GET, POST` | `/calibration/observations` | JSON | Calibration observations | `calibration_stages.calibration_observations_endpoint` |
-| `GET, POST` | `/calibration/preflight` | JSON | Calibration preflight | `calibration_stages.calibration_preflight_endpoint` |
 | `GET` | `/calibration/setup` | JSON | Calibration setup | `calibration.calibration_setup_endpoint` |
-| `GET, POST` | `/calibration/solver` | JSON | Calibration solver | `calibration_stages.calibration_solver_endpoint` |
-| `GET, POST` | `/calibration/validation` | JSON | Calibration validation | `calibration_stages.calibration_validation_endpoint` |
 
 ## Calibration targets
 
@@ -64,10 +59,7 @@ uv run python scripts/generate_http_api_reference.py --check
 
 | Method | Path | Returns | Purpose | Flask endpoint |
 | --- | --- | --- | --- | --- |
-| `GET, POST` | `/capture-plan` | JSON | Capture plan | `capture.capture_plan_endpoint` |
-| `GET, POST` | `/capture-plan/execution` | JSON | Capture plan execution | `capture.capture_plan_execution_endpoint` |
-| `GET, POST` | `/capture-plan/preflight` | JSON | Capture plan preflight | `capture.capture_plan_preflight_endpoint` |
-| `GET` | `/capture/jobs` | JSON | List capture jobs | `capture.list_capture_jobs` |
+| `GET, POST` | `/capture/jobs` | JSON | List capture jobs | `capture.list_capture_jobs` |
 | `POST` | `/capture/jobs/<job_id>/stop` | JSON | Stop capture job | `capture.stop_capture_job` |
 | `GET` | `/capture/status` | JSON | Capture execution status | `capture.capture_execution_status` |
 
@@ -88,6 +80,15 @@ uv run python scripts/generate_http_api_reference.py --check
 | `GET` | `/cluster/pose-estimation/setup` | JSON | Cluster pose setup | `cluster.cluster_pose_setup` |
 | `GET` | `/cluster/status` | JSON | Cluster status | `cluster.cluster_status` |
 
+## Focused orchestration
+
+| Method | Path | Returns | Purpose | Flask endpoint |
+| --- | --- | --- | --- | --- |
+| `POST` | `/dataset-processing/jobs` | JSON | Dataset processing jobs | `orchestration.dataset_processing_jobs` |
+| `POST` | `/preflight/jobs` | JSON | Preflight jobs | `orchestration.preflight_jobs` |
+| `POST` | `/robot/commands` | JSON | Robot commands | `orchestration.robot_commands` |
+| `GET, POST` | `/run-config` | JSON | Run config | `orchestration.run_config` |
+
 ## Local jobs and commands
 
 | Method | Path | Returns | Purpose | Flask endpoint |
@@ -96,7 +97,6 @@ uv run python scripts/generate_http_api_reference.py --check
 | `GET` | `/jobs/<job_id>` | JSON | Get job | `jobs_commands.get_job` |
 | `POST` | `/jobs/<job_id>/cancel` | JSON | Cancel job | `jobs_commands.cancel_job` |
 | `GET` | `/jobs/<job_id>/log` | Text | Get job log | `jobs_commands.get_job_log` |
-| `POST` | `/run-command` | JSON | Run command | `jobs_commands.run_command` |
 
 ## Monitoring
 
@@ -123,7 +123,6 @@ uv run python scripts/generate_http_api_reference.py --check
 | --- | --- | --- | --- | --- |
 | `GET` | `/ui/bootstrap` | JSON | Ui bootstrap | `ui.ui_bootstrap` |
 | `GET` | `/ui/calibrations` | JSON | Calibration library | `calibration_library.calibration_library` |
-| `POST` | `/ui/calibrations` | JSON | Select calibration compatibility alias | `calibration_library.select_calibration_compatibility_alias` |
 | `POST` | `/ui/calibrations/select` | JSON | Select calibration | `calibration_library.select_calibration` |
 | `GET` | `/ui/cell-calibration-target-pdf` | File | Ui cell calibration target pdf | `ui.ui_cell_calibration_target_pdf` |
 | `GET` | `/ui/cell-pose-template-assets/<instance_uuid>/<asset_kind>` | File | Ui cell pose template asset | `ui.ui_cell_pose_template_asset` |
@@ -138,22 +137,6 @@ uv run python scripts/generate_http_api_reference.py --check
 | `GET` | `/ui/runs` | JSON | Ui runs | `ui.ui_runs` |
 | `GET` | `/ui/storage` | JSON | Ui storage | `ui.ui_storage` |
 
-## Pipeline
-
-| Method | Path | Returns | Purpose | Flask endpoint |
-| --- | --- | --- | --- | --- |
-| `GET, POST` | `/pipeline/preflight` | JSON | Pipeline preflight | `pipeline.pipeline_preflight` |
-| `GET` | `/pipeline/recommendations` | JSON | Pipeline recommendations | `pipeline.pipeline_recommendations` |
-| `POST` | `/pipeline/run` | JSON | Run pipeline stage | `pipeline.run_pipeline_stage` |
-| `POST` | `/pipeline/run-config` | JSON | Run pipeline from config | `pipeline.run_pipeline_from_config` |
-| `POST` | `/pipeline/run-sequence` | JSON | Run pipeline sequence | `pipeline.run_pipeline_sequence` |
-| `GET` | `/pipeline/sequences` | JSON | Pipeline sequences | `pipeline.pipeline_sequences` |
-| `GET` | `/pipeline/sequences/<sequence_id>` | JSON | Pipeline sequence | `pipeline.pipeline_sequence` |
-| `GET` | `/pipeline/stages` | JSON | Pipeline stages | `pipeline.pipeline_stages` |
-| `GET` | `/pipeline/stages/<stage_id>` | JSON | Pipeline stage | `pipeline.pipeline_stage` |
-| `GET` | `/pipeline/workflows` | JSON | Pipeline workflows | `pipeline.pipeline_workflows` |
-| `GET, POST` | `/run-config` | JSON | Run config | `pipeline.run_config` |
-
 ## Pose templates
 
 | Method | Path | Returns | Purpose | Flask endpoint |
@@ -165,17 +148,13 @@ uv run python scripts/generate_http_api_reference.py --check
 | `POST` | `/pose-templates/library/<template_uuid>/<action>` | JSON | Library action | `pose_templates.library_action` |
 | `GET` | `/pose-templates/library/<template_uuid>/assets/<instance_uuid>/<kind>` | File | Library asset | `pose_templates.library_asset` |
 | `GET` | `/pose-templates/library/<template_uuid>/download/<kind>` | File | Library download | `pose_templates.library_download` |
-| `GET` | `/pose-templates/library/<template_uuid>/instances/<instance_uuid>/assets/<kind>` | File | Library asset | `pose_templates.library_asset` |
 | `GET` | `/pose-templates/library/<template_uuid>/preview` | JSON | Library preview | `pose_templates.library_preview` |
 | `GET` | `/pose-templates/library/<template_uuid>/thumbnail` | JSON | Library thumbnail | `pose_templates.library_thumbnail` |
 | `POST` | `/pose-templates/preview` | JSON | Preview | `pose_templates.preview` |
 | `GET` | `/pose-templates/preview/<request_id>` | JSON | Preview result | `pose_templates.preview_result` |
-| `POST` | `/pose-templates/runs/placement` | JSON | Run selection update | `pose_templates.run_selection_update` |
 | `GET` | `/pose-templates/runs/selection` | JSON | Run selection detail | `pose_templates.run_selection_detail` |
 | `POST` | `/pose-templates/runs/selection` | JSON | Run selection update | `pose_templates.run_selection_update` |
 | `GET` | `/pose-templates/status` | JSON | Source status | `pose_templates.source_status` |
-| `POST` | `/pose-templates/validate` | JSON | Preview | `pose_templates.preview` |
-| `GET` | `/pose-templates/validate/<request_id>` | JSON | Preview result | `pose_templates.preview_result` |
 | `GET` | `/pose-templates/workpieces/<catalog_uuid>/orientation-thumbnail` | JSON | Workpiece orientation thumbnail | `pose_templates.workpiece_orientation_thumbnail` |
 | `GET` | `/pose-templates/workpieces/<catalog_uuid>/orientations` | JSON | Workpiece orientations | `pose_templates.workpiece_orientations` |
 | `POST` | `/pose-templates/workpieces/<catalog_uuid>/orientations` | JSON | Analyze workpiece orientations | `pose_templates.analyze_workpiece_orientations` |

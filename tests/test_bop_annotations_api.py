@@ -22,7 +22,12 @@ class _Job:
         }
 
 
-def _setup(*, pose_ready: bool = True, full_ready: bool = True) -> dict:
+def _setup(
+    *,
+    configured_mode: str = "pose_and_masks",
+    pose_ready: bool = True,
+    full_ready: bool = True,
+) -> dict:
     def readiness(ready: bool) -> dict:
         return {
             "ready": ready,
@@ -34,7 +39,7 @@ def _setup(*, pose_ready: bool = True, full_ready: bool = True) -> dict:
 
     return {
         "schema_version": "bop_annotation_setup.v1",
-        "readiness": readiness(pose_ready),
+        "configured_mode": configured_mode,
         "readiness_by_mode": {
             "pose": readiness(pose_ready),
             "pose_and_masks": readiness(full_ready),
@@ -114,13 +119,24 @@ def test_api_applies_readiness_to_the_selected_product_only(
         "/bop/annotations",
         json={"run_root": run.as_posix(), "mode": "pose_and_masks"},
     )
-    pose = client.post(
+    mismatch = client.post(
         "/bop/annotations",
         json={"run_root": run.as_posix(), "mode": "pose"},
     )
 
     assert full.status_code == 400
     assert "Not ready" in full.get_json()["output"]
+    assert mismatch.status_code == 400
+    assert "does not match run_config.json" in mismatch.get_json()["output"]
+    monkeypatch.setattr(
+        route,
+        "inspect_annotation_setup",
+        lambda _run_root, app_root: _setup(configured_mode="pose"),
+    )
+    pose = client.post(
+        "/bop/annotations",
+        json={"run_root": run.as_posix(), "mode": "pose"},
+    )
     assert pose.status_code == 202
     assert len(submissions) == 1
 

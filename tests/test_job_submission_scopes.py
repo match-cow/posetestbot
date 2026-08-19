@@ -8,10 +8,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 EXPECTED_DIRECT_SUBMISSIONS = {
     "posetestbot/web/route_support.py": {
-        "run_command": "global",
-        "run_pipeline_stage": "run",
-        "run_pipeline_sequence": "run",
-        "run_pipeline_from_config": "run",
+        "_submit_recipe": "run",
+        "robot_commands": "<forwarded>",
     },
     "posetestbot/web/routes/bop_annotations.py": {
         "queue_bop_annotations": "run",

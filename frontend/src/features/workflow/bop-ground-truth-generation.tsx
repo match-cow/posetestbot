@@ -37,12 +37,7 @@ function shortHash(value: string | null) {
 
 export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGroundTruthGenerationProps) {
   const queryClient = useQueryClient()
-  const [selection, setSelection] = useState<{ runRoot: string; mode: BopAnnotationMode }>({
-    runRoot,
-    mode: "pose_and_masks",
-  })
   const [submittedJob, setSubmittedJob] = useState<{ runRoot: string; id: string } | null>(null)
-  const selectedMode = selection.runRoot === runRoot ? selection.mode : "pose_and_masks"
   const submittedJobId = submittedJob?.runRoot === runRoot ? submittedJob.id : null
 
   const jobs = useQuery({
@@ -69,6 +64,9 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
     queryFn: () => api<BopAnnotationSetup>(query("/bop/annotations/setup", { run_root: runRoot })),
     refetchInterval: active ? 1_000 : false,
   })
+  const configuredMode = setup.data?.configured_mode ?? "none"
+  const selectedMode: BopAnnotationMode = configuredMode === "pose" ? "pose" : "pose_and_masks"
+  const annotationRequested = configuredMode !== "none"
   const generate = useMutation({
     mutationFn: () => api<{ job_id: string; job: Job }>("/bop/annotations", {
       method: "POST",
@@ -95,11 +93,12 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
 
   const output = setup.data?.current_output ?? null
   const fullEvidenceReady = output?.mode === "pose_and_masks" && output.verified && output.evaluation_ready
-  const selectedReadiness = setup.data?.readiness_by_mode?.[selectedMode] ?? setup.data?.readiness
+  const selectedReadiness = setup.data?.readiness_by_mode[selectedMode]
   const queueBlockers = Array.from(new Set([
     ...(!bopExportComplete ? ["Complete the base BOP image/model export before generating annotations."] : []),
-    ...(selectedReadiness && !selectedReadiness.ready && selectedReadiness.blockers.length === 0 ? [`${modeLabel(selectedMode)} is not ready for this run.`] : []),
-    ...(selectedReadiness?.blockers.map((issue) => issue.message) ?? []),
+    ...(!annotationRequested ? ["Run setup records base BOP export only; change the annotation outcome in Workflow step 1 to request ground truth."] : []),
+    ...(annotationRequested && selectedReadiness && !selectedReadiness.ready && selectedReadiness.blockers.length === 0 ? [`${modeLabel(selectedMode)} is not ready for this run.`] : []),
+    ...(annotationRequested ? selectedReadiness?.blockers.map((issue) => issue.message) ?? [] : []),
     ...(active ? ["Wait for the active ground-truth job to finish or cancel it from Jobs."] : []),
   ]))
 
@@ -166,13 +165,15 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
             <div className="flex justify-end"><Button type="button" variant="outline" size="sm" onClick={refresh}><RefreshCw aria-hidden="true" />Refresh readiness</Button></div>
 
             <fieldset>
-              <legend className="text-sm font-semibold">Optional annotation version</legend>
-              <div className="mt-3 grid gap-4 xl:grid-cols-2" role="radiogroup" aria-label="BOP ground-truth annotation version">
+              <legend className="text-sm font-semibold">Configured optional annotation outcome</legend>
+              <p className="mt-1 text-xs text-muted-foreground">This choice is owned by <Link className="font-medium text-primary-strong underline-offset-4 hover:underline" to="/workflow/dataset?step=configure">Workflow step 1</Link>. Return there to change it before queueing derived evidence.</p>
+              {configuredMode === "none" && <div className="mt-3 rounded-lg border bg-muted/20 p-4 text-xs"><div className="font-semibold">Base BOP dataset only</div><p className="mt-1 text-muted-foreground">No ground-truth job is requested for this run. The verified image/model export remains the complete configured outcome.</p></div>}
+              {annotationRequested && <div className="mt-3 grid gap-4 xl:grid-cols-2" role="radiogroup" aria-label="BOP ground-truth annotation version">
                 <button
                   type="button"
                   role="radio"
                   aria-checked={selectedMode === "pose"}
-                  onClick={() => setSelection({ runRoot, mode: "pose" })}
+                  disabled
                   className={cn("rounded-xl border p-4 text-left transition-colors", selectedMode === "pose" ? "border-primary bg-primary/5 ring-1 ring-primary/30" : "hover:border-foreground/25")}
                 >
                   <span className="flex items-start gap-3">
@@ -190,7 +191,7 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
                   type="button"
                   role="radio"
                   aria-checked={selectedMode === "pose_and_masks"}
-                  onClick={() => setSelection({ runRoot, mode: "pose_and_masks" })}
+                  disabled
                   className={cn("rounded-xl border p-4 text-left transition-colors", selectedMode === "pose_and_masks" ? "border-primary bg-primary/5 ring-1 ring-primary/30" : "hover:border-foreground/25")}
                 >
                   <span className="flex items-start gap-3">
@@ -203,14 +204,14 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
                     </span>
                   </span>
                 </button>
-              </div>
+              </div>}
             </fieldset>
 
-            {(selectedReadiness?.blockers.length ?? 0) > 0 && <div role="alert" data-testid="bop-annotation-blockers" className="rounded-lg border border-warning/40 bg-warning/5 p-4">
+            {annotationRequested && (selectedReadiness?.blockers.length ?? 0) > 0 && <div role="alert" data-testid="bop-annotation-blockers" className="rounded-lg border border-warning/40 bg-warning/5 p-4">
               <div className="flex items-center gap-2 text-xs font-semibold text-warning-foreground"><AlertTriangle aria-hidden="true" className="size-4" />Ground truth cannot be queued yet</div>
               <ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-relaxed text-muted-foreground">{selectedReadiness?.blockers.map((issue) => <li key={`${issue.code}:${issue.message}`}>{issue.message}</li>)}</ul>
             </div>}
-            {(selectedReadiness?.warnings.length ?? 0) > 0 && <div className="rounded-lg border bg-muted/20 p-4">
+            {annotationRequested && (selectedReadiness?.warnings.length ?? 0) > 0 && <div className="rounded-lg border bg-muted/20 p-4">
               <div className="text-xs font-semibold">Readiness notes</div>
               <ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-relaxed text-muted-foreground">{selectedReadiness?.warnings.map((issue) => <li key={`${issue.code}:${issue.message}`}>{issue.message}</li>)}</ul>
             </div>}
@@ -269,7 +270,7 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
             </div>}
             <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
               <p className="max-w-3xl text-xs leading-relaxed text-muted-foreground">This creates derived BOP annotations only. It never changes raw RGB-D frames, robot poses, the selected template, or calibration snapshots. The background job continues after navigation and remains recoverable in <Link className="font-medium text-primary-strong underline-offset-4 hover:underline" to="/jobs">Jobs</Link>.</p>
-              <Button type="button" onClick={() => generate.mutate()} disabled={queueBlockers.length > 0 || generate.isPending || active}>
+              <Button type="button" onClick={() => generate.mutate()} disabled={!annotationRequested || queueBlockers.length > 0 || generate.isPending || active}>
                 {generate.isPending || active ? <LoaderCircle aria-hidden="true" className="animate-spin" /> : <Play aria-hidden="true" />}
                 {generate.isPending ? "Queueing…" : active ? "Generating…" : selectedMode === "pose" ? "Generate pose GT" : "Generate pose + masks"}
               </Button>

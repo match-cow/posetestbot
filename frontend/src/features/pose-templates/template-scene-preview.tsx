@@ -280,12 +280,8 @@ export function TemplateScenePreview({ bundle, preview }: { bundle: PoseTemplate
   const [webgl] = useState(hasWebGLSupport)
   const [focus, setFocus] = useState<FocusTarget>("objects")
   const [meshDetails, setMeshDetails] = useState<Record<string, ExactMeshDetail>>({})
-  const width = preview.page?.width_mm ?? bundle.page?.width_mm ?? (bundle.page?.orientation === "portrait" ? 297 : 420)
-  const height = preview.page?.height_mm ?? bundle.page?.height_mm ?? (bundle.page?.orientation === "portrait" ? 420 : 297)
+  const page = preview.page
   const origin = preview.configuration?.page?.origin_from_lower_left_mm
-    ?? bundle.configuration?.page?.origin_from_lower_left_mm
-    ?? bundle.page?.origin_from_lower_left_mm
-    ?? [15, 15]
   const renderable = preview.instances.flatMap((instance) => {
     const transform = instance.pose_template_from_object?.matrix
     const meshHash = instance.preview_mesh_sha256
@@ -307,7 +303,10 @@ export function TemplateScenePreview({ bundle, preview }: { bundle: PoseTemplate
   }, [])
 
   if (!webgl) return <EmptyScene message="Interactive 3D is unavailable in this browser. The exact footprint preview remains available above." />
-  if (!renderable.length) return <EmptyScene message="This legacy template has no bounded preview mesh. Its exact footprint remains available above." />
+  if (!page || !origin) return <EmptyScene message="This template does not satisfy the current immutable-preview page contract." />
+  if (!renderable.length) return <EmptyScene message="This template does not satisfy the current bounded-preview contract. Its exact footprint remains available above." />
+  const width = page.width_mm
+  const height = page.height_mm
 
   return <div
     className="grid size-full grid-cols-[minmax(0,1fr)_15rem] overflow-hidden bg-[#0b1218]"

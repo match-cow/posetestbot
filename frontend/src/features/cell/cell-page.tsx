@@ -37,16 +37,6 @@ type CellPresentation = {
   transform: CellTransform
 }
 
-const IDENTITY_PRESENTATION: CellPresentation = {
-  mode: "reference_z_up",
-  transform: {
-    semantics: "entity_to_parent",
-    parent_frame: "display",
-    translation_mm: [0, 0, 0],
-    rotation_quaternion_wxyz: [1, 0, 0, 0],
-  },
-}
-
 function hasWebGL() {
   try {
     const canvas = document.createElement("canvas")
@@ -65,23 +55,33 @@ function transformProps(transform: CellTransform) {
 }
 
 function cellPresentation(scene: CellScene): CellPresentation {
-  const raw = scene.coordinate_system.presentation as Partial<CellPresentation> | undefined
-  if (!raw || typeof raw.mode !== "string" || !raw.transform) return IDENTITY_PRESENTATION
-  return { mode: raw.mode, transform: raw.transform }
+  return scene.coordinate_system.presentation
 }
 
 function cellTrajectory(scene: CellScene): CellTrajectoryMetadata {
-  if (scene.trajectory) return scene.trajectory
-  const referenceFrame = typeof scene.coordinate_system.reference_frame === "string" ? scene.coordinate_system.reference_frame : "template_base"
-  const referenceFrameLabel = typeof scene.coordinate_system.reference_frame_label === "string" ? scene.coordinate_system.reference_frame_label : referenceFrame === "template_base" ? "PoseTemplateBase" : titleCase(referenceFrame)
-  return {
-    entity_id: "robot_flange",
-    label: "Robot flange",
-    reference_frame: referenceFrame,
-    reference_frame_label: referenceFrameLabel,
-    source_timeline_id: scene.default_timeline_id,
-    derivation: "legacy_cell_scene_recorded_robot_flange_preview",
+  return scene.trajectory
+}
+
+function requireCurrentCellScene(value: unknown): CellScene {
+  if (!value || typeof value !== "object") {
+    throw new Error("Cell response does not satisfy the current cell_scene.v1 contract.")
   }
+  const scene = value as Partial<CellScene>
+  const coordinateSystem = scene.coordinate_system
+  if (
+    scene.schema_version !== "cell_scene.v1"
+    || !coordinateSystem
+    || coordinateSystem.reference_frame !== "template_base"
+    || coordinateSystem.reference_frame_label !== "PoseTemplateBase"
+    || !coordinateSystem.presentation
+    || !scene.trajectory
+    || !Array.isArray(scene.entities)
+    || !Array.isArray(scene.timelines)
+    || !Array.isArray(scene.trajectory_preview)
+  ) {
+    throw new Error("Cell response does not satisfy the current cell_scene.v1 contract.")
+  }
+  return scene as CellScene
 }
 
 function statusColor(status: CellEntity["status"]) {
@@ -546,7 +546,7 @@ function CameraFramesSection({ timelines, selectedTimelineIds, selectedRun, fram
 
 export function CellPage() {
   const { currentWorkflow, selectedRun } = useOperator()
-  const sceneQuery = useQuery({ queryKey: ["cell-scene", selectedRun], queryFn: () => api<CellScene>(query("/ui/cell-scene", { run_root: selectedRun })) })
+  const sceneQuery = useQuery({ queryKey: ["cell-scene", selectedRun], queryFn: async () => requireCurrentCellScene(await api<unknown>(query("/ui/cell-scene", { run_root: selectedRun }))), retry: false })
   if (sceneQuery.isPending) return <div className="grid min-h-[60vh] place-items-center text-sm text-muted-foreground">Building cell scene…</div>
   if (sceneQuery.isError || !sceneQuery.data) return <Card className="border-destructive/40"><CardHeader><CardTitle>Cell scene unavailable</CardTitle><CardDescription>{sceneQuery.error instanceof Error ? sceneQuery.error.message : "The selected run could not be composed."}</CardDescription></CardHeader></Card>
   const workflowHref = currentWorkflow ? activeWorkflowHref(currentWorkflow) : "/workflow/setup"
@@ -574,7 +574,6 @@ function CellSceneView({ selectedRun, scene, workflowHref }: { selectedRun: stri
   const presentation = cellPresentation(scene)
   const targetAligned = presentation.mode === "calibration_target_front"
   const trajectoryMetadata = cellTrajectory(scene)
-  const legacySceneResponse = scene.trajectory === undefined
   const trajectoryLabel = `${trajectoryMetadata.label} trajectory · ${trajectoryMetadata.reference_frame_label}`
 
   const timeline = scene?.timelines.find((item) => item.id === timelineId)
@@ -635,7 +634,6 @@ function CellSceneView({ selectedRun, scene, workflowHref }: { selectedRun: stri
   return <div className="space-y-5">
     <PageHeader eyebrow="Dataset contents" title="Cell View" description="Read-only inspection of cell geometry, exact flange poses, and retained synchronized RGB-D evidence." />
     <ProcessHandoff title="Inspect evidence here; change it in Workflow" description="Cell never edits transforms, images, or depth data. Use it to compare geometry and retained evidence, then return to the guided workflow to resolve missing calibration, capture, synchronization, or export evidence." to={workflowHref} action="Open workflow" />
-    {legacySceneResponse && <div data-testid="cell-scene-version-warning" className="flex items-start gap-3 rounded-lg border border-amber-500/35 bg-amber-500/8 p-4 text-sm"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" /><div><div className="font-semibold">Cell backend restart required</div><p className="mt-1 text-xs text-muted-foreground">This response predates target-trajectory metadata. Cell View remains usable and shows the recorded robot-flange path; restart the PoseTestBot web service to load the PoseTemplateBase calibration-target trajectory.</p></div></div>}
     {(scene.warnings.length > 0 || unresolved.length > 0) && <div className="flex items-start gap-3 rounded-lg border border-amber-500/35 bg-amber-500/8 p-4 text-sm"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" /><div className="min-w-0"><div className="font-semibold">Partial cell scene</div><div className="mt-1 text-xs text-muted-foreground">{unresolvedCameras.length > 0 ? `${unresolvedCameras.length} camera${unresolvedCameras.length === 1 ? " is" : "s are"} hidden until this run has matching promoted calibration profiles. The recorded trajectory and available template evidence remain visible.` : "Available scene evidence remains visible."}</div>{otherIssues.length > 0 && <details className="mt-2"><summary className="cursor-pointer text-xs font-medium">Show {otherIssues.length} provenance detail{otherIssues.length === 1 ? "" : "s"}</summary><ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-muted-foreground">{otherIssues.map((message, index) => <li key={index}>{message}</li>)}</ul></details>}</div></div>}
     <Card className="overflow-hidden"><CardHeader className="border-b"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle>3D cell</CardTitle><CardDescription data-testid="cell-coordinate-convention" className="flex flex-wrap items-center gap-1">{targetAligned ? "Target-aligned · right-handed · origin top-left · +X right · +Y down · +Z into grid · millimetres" : "PoseTemplateBase · right-handed · +Z up · millimetres"} · no pose interpolation · <AxisLegend /> <HelpTip label="cell coordinate and timeline display">Transforms are rendered from stored evidence in millimetres. Local coordinate frames use red X, green Y, and blue Z axes. For static-camera calibration, the fixed camera and the robot-carried target trajectory stay in PoseTemplateBase; the target path composes its promoted grid-to-flange attachment with each exact recorded flange pose. Timeline playback never interpolates or invents a robot pose between frames.</HelpTip></CardDescription></div><div className="flex flex-wrap gap-2"><Button size="sm" variant={preset === "perspective" ? "default" : "outline"} onClick={() => setPreset("perspective")}><Focus />Perspective</Button><Button size="sm" variant={preset === "top" ? "default" : "outline"} onClick={() => setPreset("top")}><ScanLine />Top</Button><Button size="sm" variant={preset === "front" ? "default" : "outline"} onClick={() => setPreset("front")}><Crosshair />Front</Button><Button size="sm" variant="outline" aria-label="Reset cell view" onClick={() => { setPreset("perspective"); setResetToken((value) => value + 1) }}><RotateCcw /></Button></div></div></CardHeader>
       <CardContent className="p-0">{webgl ? <div className="h-[620px] min-w-0"><CellCanvas scene={scene} visible={visible} pose={pose} trajectory={trajectory} selected={selected} onSelect={setSelected} preset={preset} resetToken={resetToken} /></div> : <div data-testid="cell-webgl-fallback" className="grid h-[620px] min-w-0 place-items-center p-10 text-center"><div><AlertTriangle className="mx-auto mb-3 size-8 text-amber-500" /><div className="font-semibold">WebGL is unavailable</div><p className="mt-2 max-w-md text-sm text-muted-foreground">The component and provenance list remains available. Use a browser with WebGL support to orbit the scene.</p></div></div>}</CardContent>

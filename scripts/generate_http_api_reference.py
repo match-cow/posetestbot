@@ -37,13 +37,14 @@ def _group(path: str) -> str:
         ("/calibration/", "Calibration"),
         ("/capture", "Capture"),
         ("/cluster/", "External cluster controller proxy"),
+        ("/dataset-processing/", "Focused orchestration"),
         ("/jobs", "Local jobs and commands"),
-        ("/run-command", "Local jobs and commands"),
         ("/monitoring/", "Monitoring"),
-        ("/pipeline/", "Pipeline"),
         ("/pose-templates/", "Pose templates"),
+        ("/preflight/", "Focused orchestration"),
+        ("/robot/commands", "Focused orchestration"),
         ("/robot/", "System status"),
-        ("/run-config", "Pipeline"),
+        ("/run-config", "Focused orchestration"),
         ("/runtime/", "System status"),
         ("/sensors/", "Sensors"),
         ("/sync/", "Synchronization"),
@@ -188,8 +189,12 @@ def render_route_index(application: Flask) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group(required=True)
-    action.add_argument("--write", action="store_true", help="replace the generated file")
-    action.add_argument("--check", action="store_true", help="fail if the file is stale")
+    action.add_argument(
+        "--write", action="store_true", help="replace the generated file"
+    )
+    action.add_argument(
+        "--check", action="store_true", help="fail if the file is stale"
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     return parser.parse_args()
 

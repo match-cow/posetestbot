@@ -20,7 +20,6 @@ from posetestbot.io.artifacts import (
     BOP_DIR,
     BOP_EXPORT_MANIFEST,
     CALIBRATION_PROFILES,
-    CALIBRATION_VALIDATION_REPORT,
     CAPTURE_EXECUTION_LOGS_DIR,
     CAPTURE_EXECUTION_REPORT,
     DATASET_MANIFEST,
@@ -33,18 +32,20 @@ from posetestbot.io.artifacts import (
     SYNCHRONIZED_DIR,
 )
 from posetestbot.io.atomic import atomic_write_json
-from posetestbot.pipeline.run_config import load_run_config_for_run_root
+from posetestbot.pipeline.run_config import (
+    load_run_config_for_run_root,
+    validate_run_config,
+)
 from posetestbot.sensors.registry import sensor_folder_name
 
 
 INVENTORY_SCHEMA_VERSION = "run_folder_inventory.v1"
 MAINTENANCE_SCHEMA_VERSION = "run_folder_maintenance.v1"
-LOCATION_SCHEMA_VERSION = "run_folder_location.v1"
-LOCATION_FILE = ".posetestbot_run_location.json"
+RETIRED_LOCATION_FILE = ".posetestbot_run_location.json"
 INVENTORY_FILENAME = "run_folder_inventory.json"
 ROOT_LOCK_FILE = ".posetestbot_run_folders.lock"
 MOVE_STAGING_PREFIX = ".posetestbot_run_move_"
-TRANSACTION_SCHEMA_VERSION = "run_folder_transaction.v1"
+TRANSACTION_SCHEMA_VERSION = "run_folder_transaction.v2"
 TRANSACTION_PREFIX = ".posetestbot_run_folder_transaction_"
 TRANSACTION_PATTERN = re.compile(
     rf"^{re.escape(TRANSACTION_PREFIX)}(?P<id>[0-9a-f]{{32}})\.json$"
@@ -210,7 +211,9 @@ def validate_expected_identity(
         or device < 0
         or inode <= 0
     ):
-        raise ValueError("expected_identity requires nonnegative device and positive inode")
+        raise ValueError(
+            "expected_identity requires nonnegative device and positive inode"
+        )
     actual = run_identity(path)
     if actual != {"device": device, "inode": inode}:
         raise RuntimeError(
@@ -239,9 +242,7 @@ def resolve_direct_run_folder(
     if resolved != path or resolved.parent not in roots:
         raise ValueError("Run folder resolution changed unexpectedly")
     if require_marker and not _has_run_marker(path):
-        raise ValueError(
-            f"Run folder must contain {RUN_CONFIG} or {DATASET_MANIFEST}"
-        )
+        raise ValueError(f"Run folder must contain {RUN_CONFIG} or {DATASET_MANIFEST}")
     return path
 
 
@@ -492,13 +493,12 @@ def _config_summary(root: Path) -> tuple[dict[str, Any], Mapping[str, Any] | Non
                 "valid": False,
                 "error": str(exc),
                 "run_name": None,
-                "sequence": None,
-                "plan_only": None,
+                "run_id": None,
+                "intent": None,
+                "annotation_mode": None,
             },
             _read_json_object(root / RUN_CONFIG),
         )
-    pipeline = config.get("pipeline")
-    pipeline = pipeline if isinstance(pipeline, Mapping) else {}
     return (
         {
             "valid": True,
@@ -506,16 +506,9 @@ def _config_summary(root: Path) -> tuple[dict[str, Any], Mapping[str, Any] | Non
             "run_name": (
                 str(config["run_name"]) if config.get("run_name") is not None else None
             ),
-            "sequence": (
-                str(pipeline["sequence_id"])
-                if pipeline.get("sequence_id") is not None
-                else None
-            ),
-            "plan_only": (
-                pipeline.get("plan_only")
-                if isinstance(pipeline.get("plan_only"), bool)
-                else None
-            ),
+            "run_id": str(config["run_id"]),
+            "intent": str(config["capture"]["intent"]),
+            "annotation_mode": str(config["bop"]["annotation_mode"]),
         },
         config,
     )
@@ -616,64 +609,9 @@ def _evidence_summary(root: Path, sensors: list[dict[str, Any]]) -> dict[str, bo
             _contains_real_entry(root / PROCESSED_DIR / SYNCHRONIZED_DIR)
             or _regular_file(root / SYNC_QUALITY_REPORT)
         ),
-        "calibration": (
-            _regular_file(root / CALIBRATION_PROFILES)
-            or _regular_file(root / CALIBRATION_VALIDATION_REPORT)
-        ),
+        "calibration": _regular_file(root / CALIBRATION_PROFILES),
         "bop_export": _regular_file(root / BOP_DIR / BOP_EXPORT_MANIFEST),
-        "bop_evaluation": _contains_real_entry(
-            root / PROCESSED_DIR / "bop_evaluation"
-        ),
-    }
-
-
-def _load_location(root: Path, *, strict: bool = False) -> dict[str, Any] | None:
-    path = root / LOCATION_FILE
-    if os.path.lexists(path) and not _regular_file(path):
-        if strict:
-            raise ValueError(
-                f"Run location metadata must be a regular file: {path}"
-            )
-        return None
-    value = _read_json_object(path)
-    if value is None or value.get("schema_version") != LOCATION_SCHEMA_VERSION:
-        if strict and os.path.lexists(path):
-            raise ValueError(f"Run location metadata is invalid: {path}")
-        return None
-    original = value.get("original_path")
-    current = value.get("current_path")
-    transaction_id = value.get("transaction_id")
-    aliases = value.get("aliases")
-    history = value.get("history")
-    if (
-        not isinstance(original, str)
-        or (current is not None and not isinstance(current, str))
-        or (transaction_id is not None and not isinstance(transaction_id, str))
-        or not isinstance(aliases, list)
-        or not all(isinstance(item, str) for item in aliases)
-        or not isinstance(history, list)
-    ):
-        if strict:
-            raise ValueError(f"Run location metadata is invalid: {path}")
-        return None
-    return {
-        "schema_version": LOCATION_SCHEMA_VERSION,
-        "original_path": original,
-        "current_path": current,
-        "transaction_id": transaction_id,
-        "aliases": list(dict.fromkeys(aliases)),
-        "history": [dict(item) for item in history if isinstance(item, Mapping)],
-    }
-
-
-def _public_location(root: Path) -> dict[str, Any] | None:
-    value = _load_location(root)
-    if value is None:
-        return None
-    return {
-        "original_path": value["original_path"],
-        "aliases": value["aliases"],
-        "history_count": len(value["history"]),
+        "bop_evaluation": _contains_real_entry(root / PROCESSED_DIR / "bop_evaluation"),
     }
 
 
@@ -765,7 +703,8 @@ def inspect_run_folder(storage_root: Path, root: Path) -> dict[str, Any]:
         "contents": {
             "dataset_mode": (
                 str(config["dataset_mode"])
-                if isinstance(config, Mapping) and config.get("dataset_mode") is not None
+                if isinstance(config, Mapping)
+                and config.get("dataset_mode") is not None
                 else None
             ),
             "resolution": (
@@ -800,7 +739,6 @@ def inspect_run_folder(storage_root: Path, root: Path) -> dict[str, Any]:
             }
             for name, value in sorted(breakdown_totals.items())
         },
-        "relocation": _public_location(root),
     }
 
 
@@ -1025,10 +963,7 @@ def _quarantine_run(
             "device": int(isolated.st_dev),
             "inode": int(isolated.st_ino),
         }
-        if (
-            not stat.S_ISDIR(isolated.st_mode)
-            or isolated_identity != opened_identity
-        ):
+        if not stat.S_ISDIR(isolated.st_mode) or isolated_identity != opened_identity:
             raise RuntimeError(
                 "Run folder changed while it was being isolated; no mutation was applied"
             )
@@ -1063,122 +998,6 @@ def _restore_quarantined_run(quarantine: Path, run: Path) -> None:
     _durable_rename(quarantine, run)
 
 
-def _link_target_path(alias: Path, link_value: str) -> Path:
-    target = Path(link_value)
-    if not target.is_absolute():
-        target = alias.parent / target
-    return _lexical_absolute(target)
-
-
-def _recorded_aliases(
-    target: Path,
-    *,
-    allowed_roots: Iterable[str | Path],
-    location: Mapping[str, Any] | None,
-) -> list[tuple[Path, str]]:
-    """Validate aliases named by the run-owned location record.
-
-    Never infer ownership from an arbitrary symlink merely resolving to the
-    run. Only aliases explicitly recorded by PoseTestBot are eligible for
-    replacement or cleanup.
-    """
-
-    if location is None:
-        return []
-    roots = set(_normalized_roots(allowed_roots))
-    aliases: list[tuple[Path, str]] = []
-    seen: set[Path] = set()
-    for value in location["aliases"]:
-        candidate = Path(value).expanduser()
-        if not candidate.is_absolute():
-            raise ValueError("Recorded compatibility aliases must be absolute paths")
-        alias = _lexical_absolute(candidate)
-        if alias in seen:
-            continue
-        seen.add(alias)
-        if alias == target or alias.parent not in roots:
-            raise ValueError(
-                f"Recorded compatibility alias is outside an allowed direct-child "
-                f"path: {alias}"
-            )
-        if not os.path.lexists(alias):
-            continue
-        if not alias.is_symlink():
-            raise RuntimeError(f"Recorded compatibility alias was replaced: {alias}")
-        try:
-            expected_link = os.readlink(alias)
-            resolved = alias.resolve(strict=True)
-        except OSError as exc:
-            raise RuntimeError(
-                f"Recorded compatibility alias cannot be verified: {alias}"
-            ) from exc
-        if _link_target_path(alias, expected_link) != target or resolved != target:
-            raise RuntimeError(
-                f"Recorded compatibility alias target changed: {alias}"
-            )
-        aliases.append((alias, expected_link))
-    return aliases
-
-
-def _unlink_verified_alias(
-    alias: Path,
-    expected_link: str,
-    link_target: Path,
-    *,
-    resolved_target: Path | None = None,
-) -> None:
-    resolved_target = resolved_target or link_target
-    if not alias.is_symlink():
-        raise RuntimeError(f"Compatibility alias changed before cleanup: {alias}")
-    if (
-        os.readlink(alias) != expected_link
-        or _link_target_path(alias, expected_link) != link_target
-        or alias.resolve(strict=True) != resolved_target
-    ):
-        raise RuntimeError(f"Compatibility alias target changed before cleanup: {alias}")
-    alias.unlink()
-
-
-def _unlink_alias_after_target_removal(
-    alias: Path,
-    expected_link: str,
-    removed_target: Path,
-) -> None:
-    """Remove a saved alias after its target tree no longer exists."""
-
-    if not alias.is_symlink():
-        raise RuntimeError(f"Compatibility alias changed before cleanup: {alias}")
-    if (
-        os.readlink(alias) != expected_link
-        or _link_target_path(alias, expected_link) != removed_target
-    ):
-        raise RuntimeError(f"Compatibility alias target changed before cleanup: {alias}")
-    alias.unlink()
-
-
-def _destination_for_move(
-    source: Path,
-    destination_root: Path,
-    *,
-    recorded_aliases: Mapping[Path, str],
-) -> tuple[Path, tuple[Path, str] | None]:
-    destination = destination_root / source.name
-    if not os.path.lexists(destination):
-        return destination, None
-    expected_link = recorded_aliases.get(destination)
-    if expected_link is not None and destination.is_symlink():
-        try:
-            if (
-                os.readlink(destination) == expected_link
-                and _link_target_path(destination, expected_link) == source
-                and destination.resolve(strict=True) == source
-            ):
-                return destination, (destination, expected_link)
-        except OSError:
-            pass
-    raise FileExistsError(f"Destination run folder already exists: {destination}")
-
-
 def preflight_move_run_folder(
     source: str | Path,
     destination_root: str | Path,
@@ -1199,25 +1018,18 @@ def preflight_move_run_folder(
         )
     if target_root == run.parent:
         raise ValueError("Run folder is already stored in destination_root")
-    location = _load_location(run, strict=True)
-    aliases = _recorded_aliases(
-        run,
-        allowed_roots=allowed_roots,
-        location=location,
-    )
-    destination, alias = _destination_for_move(
-        run,
-        target_root,
-        recorded_aliases=dict(aliases),
-    )
+    if os.path.lexists(run / RETIRED_LOCATION_FILE):
+        raise ValueError(
+            "Run contains retired relocation metadata and must not be moved"
+        )
+    destination = target_root / run.name
+    if os.path.lexists(destination):
+        raise FileExistsError(f"Destination run folder already exists: {destination}")
     return {
         "source": run,
         "destination_root": target_root,
         "destination_root_identity": run_identity(target_root),
         "destination": destination,
-        "destination_alias": alias,
-        "location": location,
-        "recorded_aliases": aliases,
     }
 
 
@@ -1233,9 +1045,7 @@ def _signature(path: Path) -> dict[str, Any]:
         current, relative = stack.pop()
         metadata = current.lstat()
         if metadata.st_dev != root_device:
-            raise ValueError(
-                f"Run tree crosses a filesystem boundary at {relative}"
-            )
+            raise ValueError(f"Run tree crosses a filesystem boundary at {relative}")
         mode = metadata.st_mode
         kind = (
             "link"
@@ -1337,9 +1147,7 @@ def _copy_tree_with_content_hash(source: Path, destination: Path) -> str:
 
         metadata = current.lstat()
         if metadata.st_dev != source_device:
-            raise ValueError(
-                f"Run tree crosses a filesystem boundary at {relative}"
-            )
+            raise ValueError(f"Run tree crosses a filesystem boundary at {relative}")
         mode = metadata.st_mode
         if stat.S_ISDIR(mode):
             if relative == Path(".") and _real_directory(copied):
@@ -1405,9 +1213,7 @@ def _content_signature(path: Path) -> str:
         current, relative = stack.pop()
         metadata = current.lstat()
         if metadata.st_dev != root_device:
-            raise ValueError(
-                f"Run tree crosses a filesystem boundary at {relative}"
-            )
+            raise ValueError(f"Run tree crosses a filesystem boundary at {relative}")
         mode = metadata.st_mode
         if stat.S_ISDIR(mode):
             children = _directory_children_nofollow(
@@ -1449,54 +1255,6 @@ def _verified_tree_evidence(path: Path) -> tuple[dict[str, Any], str]:
     if before != after:
         raise RuntimeError(f"Run tree changed during content verification: {path}")
     return after, content_sha256
-
-
-def _write_location_after_move(
-    storage_path: Path,
-    *,
-    source: Path,
-    current_path: Path | None = None,
-    aliases: list[Path],
-    existing: Mapping[str, Any] | None,
-    transaction_id: str | None = None,
-) -> dict[str, Any]:
-    published_path = current_path or storage_path
-    if (
-        transaction_id is not None
-        and existing is not None
-        and existing.get("transaction_id") == transaction_id
-        and existing.get("current_path") == published_path.as_posix()
-    ):
-        return dict(existing)
-    history = list(existing.get("history", [])) if existing else []
-    history.append(
-        {
-            "moved_at": utc_now_iso(),
-            "from": source.as_posix(),
-            "to": published_path.as_posix(),
-        }
-    )
-    value = {
-        "schema_version": LOCATION_SCHEMA_VERSION,
-        "original_path": (
-            str(existing["original_path"]) if existing else source.as_posix()
-        ),
-        "current_path": published_path.as_posix(),
-        "transaction_id": transaction_id,
-        "aliases": sorted(
-            {
-                item.as_posix()
-                for item in aliases
-                if item != published_path
-            }
-        ),
-        "history": history,
-    }
-    path = storage_path / LOCATION_FILE
-    if path.is_symlink():
-        raise ValueError(f"Run location metadata must not be a symbolic link: {path}")
-    atomic_write_json(path, value)
-    return value
 
 
 def _validated_identity_value(value: Any, *, label: str) -> dict[str, int]:
@@ -1568,26 +1326,14 @@ def _finish_transaction(path: Path) -> None:
     _fsync_directory(path.parent)
 
 
-def _transaction_alias_records(
-    aliases: Iterable[tuple[Path, str]],
-) -> list[dict[str, str]]:
-    return [
-        {"path": path.as_posix(), "link": link}
-        for path, link in aliases
-    ]
-
-
 def _new_transaction(
     *,
     operation: str,
     source: Path,
     expected_identity: Mapping[str, Any],
-    aliases: list[tuple[Path, str]],
-    prior_location: Mapping[str, Any] | None = None,
     source_tree_signature: Mapping[str, Any] | None = None,
     destination_root: Path | None = None,
     destination_root_identity: Mapping[str, Any] | None = None,
-    destination_alias: tuple[Path, str] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     if operation not in {"move", "delete"}:
         raise ValueError("Run-folder transaction operation is invalid")
@@ -1602,16 +1348,10 @@ def _new_transaction(
                 label="destination_root_identity",
             )
     transaction_id = uuid.uuid4().hex
-    journal_path = (
-        source.parent / f"{TRANSACTION_PREFIX}{transaction_id}.json"
-    )
-    quarantine = (
-        source.parent / f"{MOVE_STAGING_PREFIX}source_{transaction_id}"
-    )
+    journal_path = source.parent / f"{TRANSACTION_PREFIX}{transaction_id}.json"
+    quarantine = source.parent / f"{MOVE_STAGING_PREFIX}source_{transaction_id}"
     destination = (
-        destination_root / source.name
-        if destination_root is not None
-        else None
+        destination_root / source.name if destination_root is not None else None
     )
     staging = (
         destination_root / f"{MOVE_STAGING_PREFIX}staging_{transaction_id}"
@@ -1629,37 +1369,22 @@ def _new_transaction(
         "source_root": source.parent.as_posix(),
         "expected_identity": dict(expected_identity),
         "quarantine": quarantine.as_posix(),
-        "aliases": _transaction_alias_records(aliases),
-        "prior_location": (
-            dict(prior_location) if prior_location is not None else None
-        ),
         "destination_root": (
-            destination_root.as_posix()
-            if destination_root is not None
-            else None
+            destination_root.as_posix() if destination_root is not None else None
         ),
         "destination_root_identity": (
-            dict(destination_root_identity)
-            if destination_root is not None
-            else None
+            dict(destination_root_identity) if destination_root is not None else None
         ),
         "destination": destination.as_posix() if destination is not None else None,
         "staging": staging.as_posix() if staging is not None else None,
         "staging_identity": None,
         "destination_identity": None,
         "source_tree_signature": (
-            dict(source_tree_signature)
-            if source_tree_signature is not None
-            else None
+            dict(source_tree_signature) if source_tree_signature is not None else None
         ),
         "copy_content_sha256": None,
         "final_destination_signature": None,
         "final_destination_content_sha256": None,
-        "destination_alias": (
-            destination_alias[0].as_posix()
-            if destination_alias is not None
-            else None
-        ),
         "confirmed_delete": operation == "delete",
     }
     _write_transaction(journal_path, value)
@@ -1699,8 +1424,32 @@ def _load_transaction(
     ):
         raise ValueError(f"Run-folder transaction journal is invalid: {journal_path}")
     raw = _read_json_object(journal_path)
+    current_fields = {
+        "schema_version",
+        "transaction_id",
+        "operation",
+        "phase",
+        "created_at",
+        "updated_at",
+        "source",
+        "source_root",
+        "expected_identity",
+        "quarantine",
+        "destination_root",
+        "destination_root_identity",
+        "destination",
+        "staging",
+        "staging_identity",
+        "destination_identity",
+        "source_tree_signature",
+        "copy_content_sha256",
+        "final_destination_signature",
+        "final_destination_content_sha256",
+        "confirmed_delete",
+    }
     if (
         raw is None
+        or set(raw) != current_fields
         or raw.get("schema_version") != TRANSACTION_SCHEMA_VERSION
         or raw.get("transaction_id") != match.group("id")
         or raw.get("operation") not in {"move", "delete"}
@@ -1742,54 +1491,9 @@ def _load_transaction(
     if quarantine != expected_quarantine:
         raise ValueError("Run-folder transaction quarantine path is invalid")
 
-    raw_aliases = raw.get("aliases")
-    if not isinstance(raw_aliases, list):
-        raise ValueError("Run-folder transaction aliases are invalid")
-    aliases: list[tuple[Path, str]] = []
-    seen_aliases: set[Path] = set()
-    for item in raw_aliases:
-        if (
-            not isinstance(item, Mapping)
-            or not isinstance(item.get("link"), str)
-        ):
-            raise ValueError("Run-folder transaction alias is invalid")
-        alias = _transaction_direct_path(
-            item.get("path"),
-            label="alias",
-            roots=roots,
-        )
-        link = str(item["link"])
-        if (
-            alias == source
-            or alias in seen_aliases
-            or _link_target_path(alias, link) != source
-        ):
-            raise ValueError("Run-folder transaction alias ownership is invalid")
-        seen_aliases.add(alias)
-        aliases.append((alias, link))
-    prior_location_raw = raw.get("prior_location")
-    if prior_location_raw is not None and (
-        not isinstance(prior_location_raw, Mapping)
-        or prior_location_raw.get("schema_version") != LOCATION_SCHEMA_VERSION
-        or not isinstance(prior_location_raw.get("original_path"), str)
-        or not isinstance(prior_location_raw.get("aliases"), list)
-        or not all(
-            isinstance(item, str)
-            for item in prior_location_raw.get("aliases", [])
-        )
-        or not isinstance(prior_location_raw.get("history"), list)
-    ):
-        raise ValueError("Run-folder transaction prior location is invalid")
-    prior_location = (
-        dict(prior_location_raw)
-        if isinstance(prior_location_raw, Mapping)
-        else None
-    )
-
     destination_root: Path | None = None
     destination: Path | None = None
     staging: Path | None = None
-    destination_alias: tuple[Path, str] | None = None
     destination_root_identity: dict[str, int] | None = None
     if operation == "move":
         destination_root_value = raw.get("destination_root")
@@ -1799,10 +1503,7 @@ def _load_transaction(
         ):
             raise ValueError("Run-folder transaction destination root is invalid")
         destination_root = _lexical_absolute(destination_root_value)
-        if (
-            destination_root not in roots
-            or destination_root == source.parent
-        ):
+        if destination_root not in roots or destination_root == source.parent:
             raise ValueError("Run-folder transaction destination root is invalid")
         destination_root_identity = _validated_identity_value(
             raw.get("destination_root_identity"),
@@ -1821,34 +1522,16 @@ def _load_transaction(
         if (
             destination != destination_root / source.name
             or staging
-            != destination_root
-            / f"{MOVE_STAGING_PREFIX}staging_{transaction_id}"
+            != destination_root / f"{MOVE_STAGING_PREFIX}staging_{transaction_id}"
         ):
             raise ValueError("Run-folder transaction destination paths are invalid")
-        destination_alias_value = raw.get("destination_alias")
-        if destination_alias_value is not None:
-            alias_path = _transaction_direct_path(
-                destination_alias_value,
-                label="destination alias",
-                roots=roots,
-            )
-            matches = [item for item in aliases if item[0] == alias_path]
-            if alias_path != destination or len(matches) != 1:
-                raise ValueError(
-                    "Run-folder transaction destination alias is invalid"
-                )
-            destination_alias = matches[0]
-    elif (
-        raw.get("confirmed_delete") is not True
-        or any(
-            raw.get(name) is not None
-            for name in (
-                "destination_root",
-                "destination_root_identity",
-                "destination",
-                "staging",
-                "destination_alias",
-            )
+    elif raw.get("confirmed_delete") is not True or any(
+        raw.get(name) is not None
+        for name in (
+            "destination_root",
+            "destination_root_identity",
+            "destination",
+            "staging",
         )
     ):
         raise ValueError("Run-folder delete transaction is not confirmed")
@@ -1903,18 +1586,13 @@ def _load_transaction(
     )
     if operation == "move":
         if source_tree_signature is None:
-            raise ValueError(
-                "Run-folder move transaction source signature is missing"
-            )
+            raise ValueError("Run-folder move transaction source signature is missing")
         if (
             staging_identity is not None
-            and raw["phase"]
-            in {"copy_verified", "destination_published", "committed"}
+            and raw["phase"] in {"copy_verified", "destination_published", "committed"}
             and copy_content_sha256 is None
         ):
-            raise ValueError(
-                "Run-folder move transaction copy evidence is missing"
-            )
+            raise ValueError("Run-folder move transaction copy evidence is missing")
         if raw["phase"] in {"committed", "destination_verified"} and (
             final_destination_signature is None
             or final_destination_content_sha256 is None
@@ -1941,8 +1619,6 @@ def _load_transaction(
         "source": source,
         "expected_identity": expected_identity,
         "quarantine": quarantine,
-        "aliases": aliases,
-        "prior_location": prior_location,
         "destination_root": destination_root,
         "destination_root_identity": destination_root_identity,
         "destination": destination,
@@ -1953,7 +1629,6 @@ def _load_transaction(
         "copy_content_sha256": copy_content_sha256,
         "final_destination_signature": final_destination_signature,
         "final_destination_content_sha256": final_destination_content_sha256,
-        "destination_alias": destination_alias,
     }
 
 
@@ -1987,83 +1662,6 @@ def _remove_validated_tree(
     _fsync_directory(path.parent)
 
 
-def _restore_transaction_alias(
-    alias: Path,
-    saved_link: str,
-    *,
-    source: Path,
-    destination: Path | None,
-) -> None:
-    if not os.path.lexists(alias):
-        alias.symlink_to(saved_link, target_is_directory=True)
-        _fsync_directory(alias.parent)
-        return
-    if not alias.is_symlink():
-        raise RuntimeError(f"Transaction alias path is occupied: {alias}")
-    current_link = os.readlink(alias)
-    current_target = _link_target_path(alias, current_link)
-    if current_link == saved_link and current_target == source:
-        return
-    if destination is None or current_target != destination:
-        raise RuntimeError(f"Transaction alias target changed: {alias}")
-    alias.unlink()
-    alias.symlink_to(saved_link, target_is_directory=True)
-    _fsync_directory(alias.parent)
-
-
-def _publish_transaction_alias(alias: Path, destination: Path) -> None:
-    if not os.path.lexists(alias):
-        alias.symlink_to(destination, target_is_directory=True)
-        _fsync_directory(alias.parent)
-        return
-    if not alias.is_symlink():
-        raise RuntimeError(f"Transaction alias path is occupied: {alias}")
-    current_link = os.readlink(alias)
-    current_target = _link_target_path(alias, current_link)
-    if current_target == destination and current_link == destination.as_posix():
-        return
-    if alias.resolve(strict=True) != destination:
-        raise RuntimeError(f"Transaction alias target changed: {alias}")
-    alias.unlink()
-    alias.symlink_to(destination, target_is_directory=True)
-    _fsync_directory(alias.parent)
-
-
-def _restore_transaction_location(
-    transaction: Mapping[str, Any],
-    *,
-    source: Path,
-) -> None:
-    path = source / LOCATION_FILE
-    prior = transaction.get("prior_location")
-    current = _read_json_object(path) if os.path.lexists(path) else None
-    if prior is None:
-        if not os.path.lexists(path):
-            return
-        if (
-            current is None
-            or current.get("transaction_id") != transaction["transaction_id"]
-        ):
-            raise RuntimeError(
-                "Run-folder transaction location metadata changed during rollback"
-            )
-        path.unlink()
-        _fsync_directory(source)
-        return
-    if os.path.lexists(path) and (
-        current is None
-        or (
-            dict(current) != dict(prior)
-            and current.get("transaction_id") != transaction["transaction_id"]
-        )
-    ):
-        raise RuntimeError(
-            "Run-folder transaction location metadata changed during rollback"
-        )
-    atomic_write_json(path, prior)
-    _fsync_directory(source)
-
-
 def _remove_transaction_staging(transaction: Mapping[str, Any]) -> None:
     staging = transaction.get("staging")
     if not isinstance(staging, Path) or not os.path.lexists(staging):
@@ -2087,6 +1685,36 @@ def _remove_transaction_staging(transaction: Mapping[str, Any]) -> None:
         _fsync_directory(staging.parent)
         return
     _remove_validated_tree(staging, expected_identity=identity)
+
+
+def _rebind_current_run_config(
+    tree_root: Path,
+    *,
+    permitted_current_roots: tuple[Path, ...],
+    new_root: Path,
+) -> None:
+    """Rebind one current run config while its tree is transaction-isolated."""
+
+    path = tree_root / RUN_CONFIG
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("Moved run must contain a regular current run_config.json")
+    with open(path, "r", encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError("Moved run config must be a JSON object")
+    recorded = Path(str(value.get("run_root", ""))).resolve()
+    permitted = {candidate.resolve() for candidate in permitted_current_roots}
+    if recorded not in permitted:
+        raise ValueError(
+            "Moved run config path does not match the durable transaction endpoints"
+        )
+    canonical_new_root = new_root.resolve().as_posix()
+    if value.get("run_root") == canonical_new_root:
+        return
+    value["run_root"] = canonical_new_root
+    validate_run_config(value)
+    atomic_write_json(path, value)
+    _fsync_directory(tree_root)
 
 
 def _recover_move_transaction(transaction: dict[str, Any]) -> str:
@@ -2116,38 +1744,19 @@ def _recover_move_transaction(transaction: dict[str, Any]) -> str:
             )
         if not _real_directory(destination):
             if os.path.lexists(destination):
-                destination_alias = transaction.get("destination_alias")
-                if (
-                    destination_alias is None
-                    or destination_alias[0] != destination
-                ):
-                    raise RuntimeError(
-                        "Committed run-folder destination path is occupied"
-                    )
-                _unlink_alias_after_target_removal(
-                    destination_alias[0],
-                    destination_alias[1],
-                    source,
-                )
-                _fsync_directory(destination.parent)
+                raise RuntimeError("Committed run-folder destination path is occupied")
             candidate = (
-                transaction["staging"]
-                if staging_identity is not None
-                else quarantine
+                transaction["staging"] if staging_identity is not None else quarantine
             )
             validate_expected_identity(candidate, identity)
             _assert_no_nested_mounts(candidate)
             _durable_rename(candidate, destination)
         validate_expected_identity(destination, identity)
-        location = _load_location(destination, strict=True)
-        if (
-            location is None
-            or location.get("transaction_id") != transaction["transaction_id"]
-            or location.get("current_path") != destination.as_posix()
-        ):
-            raise RuntimeError(
-                "Committed run-folder transaction location evidence is missing"
-            )
+        _rebind_current_run_config(
+            destination,
+            permitted_current_roots=(source, destination),
+            new_root=destination,
+        )
         if transaction["phase"] == "committed":
             actual_signature, actual_content_sha256 = _verified_tree_evidence(
                 destination
@@ -2166,11 +1775,10 @@ def _recover_move_transaction(transaction: dict[str, Any]) -> str:
                 transaction["raw"],
                 phase="destination_verified",
             )
-        _publish_transaction_alias(source, destination)
-        for alias, _saved_link in transaction["aliases"]:
-            if alias == destination:
-                continue
-            _publish_transaction_alias(alias, destination)
+        if os.path.lexists(source):
+            raise RuntimeError(
+                "Committed run-folder move left the original path occupied"
+            )
         if os.path.lexists(quarantine):
             _remove_validated_tree(
                 quarantine,
@@ -2181,18 +1789,14 @@ def _recover_move_transaction(transaction: dict[str, Any]) -> str:
         return "completed_move"
 
     if source.is_symlink():
-        expected_link = destination.as_posix()
-        if (
-            os.readlink(source) != expected_link
-            or source.resolve(strict=True) != destination
-        ):
-            raise RuntimeError(
-                f"Run-folder transaction source alias changed: {source}"
-            )
-        source.unlink()
-        _fsync_directory(source.parent)
-    elif os.path.lexists(source):
+        raise RuntimeError("Run-folder transaction source became a symbolic link")
+    if os.path.lexists(source):
         validate_expected_identity(source, expected_identity)
+        _rebind_current_run_config(
+            source,
+            permitted_current_roots=(source, destination),
+            new_root=source,
+        )
 
     quarantine_exists = os.path.lexists(quarantine)
     destination_is_real = _real_directory(destination)
@@ -2202,6 +1806,11 @@ def _recover_move_transaction(transaction: dict[str, Any]) -> str:
             raise RuntimeError(
                 "Run-folder transaction cannot restore an occupied source path"
             )
+        _rebind_current_run_config(
+            quarantine,
+            permitted_current_roots=(source, destination),
+            new_root=source,
+        )
         _restore_quarantined_run(quarantine, source)
         if destination_is_real:
             identity = destination_identity or staging_identity
@@ -2217,6 +1826,11 @@ def _recover_move_transaction(transaction: dict[str, Any]) -> str:
                 raise RuntimeError(
                     "Run-folder transaction cannot restore an occupied source path"
                 )
+            _rebind_current_run_config(
+                destination,
+                permitted_current_roots=(source, destination),
+                new_root=source,
+            )
             _durable_rename(destination, source)
         else:
             identity = destination_identity or staging_identity
@@ -2233,15 +1847,7 @@ def _recover_move_transaction(transaction: dict[str, Any]) -> str:
         raise RuntimeError("Run-folder transaction lost its authoritative source")
 
     validate_expected_identity(source, expected_identity)
-    _restore_transaction_location(transaction, source=source)
     _remove_transaction_staging(transaction)
-    for alias, saved_link in transaction["aliases"]:
-        _restore_transaction_alias(
-            alias,
-            saved_link,
-            source=source,
-            destination=destination,
-        )
     _finish_transaction(transaction["journal_path"])
     return "rolled_back_move"
 
@@ -2277,11 +1883,6 @@ def _recover_delete_transaction(transaction: dict[str, Any]) -> str:
         )
         _update_transaction(journal_path, raw, phase="committed")
 
-    for alias, expected_link in transaction["aliases"]:
-        if not os.path.lexists(alias):
-            continue
-        _unlink_alias_after_target_removal(alias, expected_link, source)
-        _fsync_directory(alias.parent)
     _finish_transaction(journal_path)
     return "resumed_delete"
 
@@ -2361,7 +1962,9 @@ def recover_run_folder_transactions(
                         "transaction_id": (
                             transaction["transaction_id"]
                             if transaction is not None
-                            else match.group("id") if match is not None else None
+                            else match.group("id")
+                            if match is not None
+                            else None
                         ),
                         "operation": (
                             transaction["operation"]
@@ -2399,7 +2002,7 @@ def move_run_folder(
     expected_destination_root_identity: Mapping[str, Any] | None = None,
     allowed_roots: Iterable[str | Path],
 ) -> dict[str, Any]:
-    """Move one real run and retain old absolute-path compatibility aliases."""
+    """Move one real run without preserving an alias at the old path."""
 
     roots = _normalized_roots(allowed_roots)
     maintenance = recover_run_folder_transactions(roots)
@@ -2411,9 +2014,7 @@ def move_run_folder(
         source,
         destination_root,
         expected_identity=expected_identity,
-        expected_destination_root_identity=(
-            expected_destination_root_identity
-        ),
+        expected_destination_root_identity=(expected_destination_root_identity),
         allowed_roots=roots,
     )
     run: Path = initial["source"]
@@ -2428,16 +2029,12 @@ def move_run_folder(
             allowed_roots=roots,
         )
         destination: Path = checked["destination"]
-        destination_alias: tuple[Path, str] | None = checked["destination_alias"]
-        existing_location: Mapping[str, Any] | None = checked["location"]
-        prior_aliases: list[tuple[Path, str]] = checked["recorded_aliases"]
         journal_path: Path | None = None
         transaction: dict[str, Any] | None = None
         quarantine: Path | None = None
         staging: Path | None = None
         cleanup_warning: str | None = None
         cleanup_remaining_path: str | None = None
-        location: Mapping[str, Any] | None = None
         try:
             # This full no-follow preflight happens under both root locks and
             # before any journal or quarantine path is created.
@@ -2446,12 +2043,9 @@ def move_run_folder(
                 operation="move",
                 source=run,
                 expected_identity=expected_identity,
-                aliases=prior_aliases,
-                prior_location=existing_location,
                 source_tree_signature=source_tree_signature,
                 destination_root=target_root,
                 destination_root_identity=pinned_destination_root_identity,
-                destination_alias=destination_alias,
             )
             quarantine = Path(transaction["quarantine"])
             staging = Path(transaction["staging"])
@@ -2507,21 +2101,10 @@ def move_run_folder(
                     copy_content_sha256=source_content_sha256,
                 )
                 candidate = staging
-            aliases = [
-                run,
-                *[
-                    alias
-                    for alias, _expected_link in prior_aliases
-                    if alias not in {run, destination}
-                ],
-            ]
-            location = _write_location_after_move(
+            _rebind_current_run_config(
                 candidate,
-                source=run,
-                current_path=destination,
-                aliases=aliases,
-                existing=existing_location,
-                transaction_id=transaction["transaction_id"],
+                permitted_current_roots=(run, destination),
+                new_root=destination,
             )
             _fsync_directory(candidate)
             (
@@ -2535,9 +2118,7 @@ def move_run_folder(
                 phase="committed",
                 destination_identity=candidate_identity,
                 final_destination_signature=final_destination_signature,
-                final_destination_content_sha256=(
-                    final_destination_content_sha256
-                ),
+                final_destination_content_sha256=(final_destination_content_sha256),
             )
             recovery = _load_transaction(
                 journal_path,
@@ -2545,7 +2126,6 @@ def move_run_folder(
             )
             if _recover_move_transaction(recovery) != "completed_move":
                 raise RuntimeError("Committed run-folder move did not roll forward")
-            location = _load_location(destination, strict=True)
             quarantine = None
             staging = None
         except Exception as operation_exc:
@@ -2564,27 +2144,18 @@ def move_run_folder(
                 ) from operation_exc
             if recovery_action != "completed_move":
                 raise
-            location = _load_location(destination, strict=True)
             cleanup_warning = (
                 f"{type(operation_exc).__name__}: {operation_exc}; "
                 "the committed move was recovered"
             )
 
-    if location is None:
-        raise RuntimeError("Run-folder move completed without location evidence")
     return {
         "status": "moved",
         "source_run_root": run.as_posix(),
         "destination_run_root": destination.as_posix(),
-        "compatibility_alias": run.as_posix(),
         "source_cleanup_complete": cleanup_warning is None,
         "source_cleanup_warning": cleanup_warning,
         "source_cleanup_remaining_path": cleanup_remaining_path,
-        "relocation": {
-            "original_path": location["original_path"],
-            "aliases": location["aliases"],
-            "history_count": len(location["history"]),
-        },
     }
 
 
@@ -2594,7 +2165,7 @@ def delete_run_folder(
     expected_identity: Mapping[str, Any],
     allowed_roots: Iterable[str | Path],
 ) -> dict[str, Any]:
-    """Permanently remove one run and only aliases verified to resolve to it."""
+    """Permanently remove one current run folder."""
 
     roots = _normalized_roots(allowed_roots)
     maintenance = recover_run_folder_transactions(roots)
@@ -2607,12 +2178,10 @@ def delete_run_folder(
     with _storage_locks((run.parent,)):
         run = resolve_direct_run_folder(run, allowed_roots=roots)
         validate_expected_identity(run, expected_identity)
-        location = _load_location(run, strict=True)
-        aliases = _recorded_aliases(
-            run,
-            allowed_roots=roots,
-            location=location,
-        )
+        if os.path.lexists(run / RETIRED_LOCATION_FILE):
+            raise ValueError(
+                "Run contains retired relocation metadata and must not be deleted"
+            )
         # Fail while the selected run is still visible if traversal would
         # cross a device or a same-device bind mount.
         _signature(run)
@@ -2620,7 +2189,6 @@ def delete_run_folder(
             operation="delete",
             source=run,
             expected_identity=expected_identity,
-            aliases=aliases,
         )
         quarantine = Path(transaction["quarantine"])
         quarantine = _quarantine_run(
@@ -2642,12 +2210,8 @@ def delete_run_folder(
             transaction,
             phase="committed",
         )
-        for alias, expected_link in aliases:
-            _unlink_alias_after_target_removal(alias, expected_link, run)
-            _fsync_directory(alias.parent)
         _finish_transaction(journal_path)
     return {
         "status": "deleted",
         "source_run_root": run.as_posix(),
-        "deleted_aliases": [alias.as_posix() for alias, _link in aliases],
     }

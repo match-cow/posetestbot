@@ -248,7 +248,6 @@ def analyze_workpiece_orientations(catalog_uuid: str):
 
 
 @pose_templates_bp.post("/pose-templates/preview")
-@pose_templates_bp.post("/pose-templates/validate")
 def preview():
     request_path: Path | None = None
     try:
@@ -256,18 +255,13 @@ def preview():
         configuration = value.get("configuration")
         if not isinstance(configuration, dict):
             raise ValueError("configuration must be an object")
-        request_kind = "validate" if request.path.endswith("/validate") else "preview"
         request_id, request_path = _write_request(
-            request_kind, {"configuration": configuration}
+            "preview", {"configuration": configuration}
         )
         output = request_path.parent / "preview.json"
         try:
             job = job_runner.submit(
-                name=(
-                    "pose_template_validation"
-                    if request_kind == "validate"
-                    else "pose_template_preview"
-                ),
+                name="pose_template_preview",
                 command=[
                     "uv",
                     "run",
@@ -294,13 +288,11 @@ def preview():
 
 
 @pose_templates_bp.get("/pose-templates/preview/<request_id>")
-@pose_templates_bp.get("/pose-templates/validate/<request_id>")
 def preview_result(request_id: str):
     try:
         if not request_id.isalnum() or len(request_id) != 32:
             raise ValueError("Invalid preview request ID")
-        request_kind = "validate" if "/validate/" in request.path else "preview"
-        path = REQUEST_ROOT / request_kind / request_id / "preview.json"
+        path = REQUEST_ROOT / "preview" / request_id / "preview.json"
         with open(path, "r", encoding="utf-8") as handle:
             value = json.load(handle)
         response = jsonify(value)
@@ -421,9 +413,6 @@ def library_thumbnail(template_uuid: str):
 @pose_templates_bp.get(
     "/pose-templates/library/<template_uuid>/assets/<instance_uuid>/<kind>"
 )
-@pose_templates_bp.get(
-    "/pose-templates/library/<template_uuid>/instances/<instance_uuid>/assets/<kind>"
-)
 def library_asset(template_uuid: str, instance_uuid: str, kind: str):
     """Serve a verified immutable per-instance mesh or texture snapshot."""
 
@@ -510,7 +499,6 @@ def run_selection_detail():
 
 
 @pose_templates_bp.post("/pose-templates/runs/selection")
-@pose_templates_bp.post("/pose-templates/runs/placement")
 def run_selection_update():
     try:
         value = _json()

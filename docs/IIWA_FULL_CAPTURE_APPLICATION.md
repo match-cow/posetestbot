@@ -63,12 +63,8 @@ transforms in one consistent dataset `template_base`.
 
 ## Command and Motion Contract
 
-Both accepted start shapes interpret their value as Cartesian metres per
-second:
-
-```json
-{"start": 0.01}
-```
+The only accepted start command is structured `robot_command.v1`; velocity is
+Cartesian metres per second:
 
 ```json
 {
@@ -77,7 +73,7 @@ second:
   "cartesian_velocity_m_s": 0.01,
   "receiver_ip": "172.31.1.169",
   "receiver_port": 8080,
-  "run_id": "example-run"
+  "run_id": "12345678-1234-4234-9234-123456789abc"
 }
 ```
 
@@ -98,16 +94,12 @@ Cartesian request without a separate 0.03 m/s clamp, then limits the computed
 A1 angular velocity to 3°/s. Its final relative joint velocity is therefore
 bounded by that A1 limit.
 
-Calibration and legacy ordinary acquisition retain the conservative 0.03 m/s
-host command cap. An object-dataset request above 0.03 m/s uses the structured
-`robot_command.v1` shape and is bounded at 1.00 m/s by the canonical plan and
-receiver. This candidate understands that shape; an older application that
-only looks for the legacy `start` field will not start from it. The separately
-acknowledged Dashboard/Devices manual motion-test command remains a legacy
-`0.1` request, so an older application may interpret it as 10% relative joint
-velocity. The confirmation dialog exposes that requested manual value. These
-ordinary software limits are not safety-rated. Record the exact installed
-model and verify the actual speed in Workbench/T1. The product values are
+Calibration capture is capped at 0.03 m/s. Object-dataset configuration is
+bounded at 1.00 m/s by the current plan and receiver. The separately
+acknowledged Dashboard manual motion-test request is also structured and uses
+the fixed reviewed test velocity. These software limits are not safety-rated.
+Record the exact installed model and verify the actual speed in Workbench/T1.
+The product values are
 available in KUKA's official
 [LBR iiwa 7 R800 data sheet](https://www.kuka.com/-/media/kuka-downloads/imported/8350ff3ca11642998dbdc81dcc2ed44c/0000246832_pl.pdf)
 and
@@ -155,11 +147,9 @@ task requests a 10 ms `BestEffort` period (100 Hz nominal); this is a measured
 commissioning target, not a KLI real-time guarantee. See the dedicated
 [cadence decision and acceptance procedure](IIWA_POSE_STREAM_CADENCE.md).
 
-The command-supplied receiver address and port take precedence. When
-`receiver_ip` is omitted, the controller uses the lab fallback
-`172.31.1.169`. An explicitly blank or wildcard receiver IP means “use the
-start-command sender address.” Ports outside 1–65535 and non-positive or
-non-finite velocities are rejected with controller-log errors.
+The structured command must contain a nonblank receiver address, a port in
+1–65535, and the run UUID. Missing fields, wildcard addresses, and non-positive
+or non-finite velocities are rejected with controller-log errors.
 
 Every new pose packet contains:
 
@@ -170,12 +160,11 @@ Every new pose packet contains:
 - `sunrise_reference_frame_path=/PoseTestBot/PoseTemplateBase`; and
 - KUKA XYZ in millimetres plus A/B/C in radians.
 
-The hardened Python receiver remains compatible with legacy packets. For v1
-packets it validates an unchanging run/frame identity and increasing sequence,
-retains sender metadata under `source_packet`, and records sequence gaps as
-estimated UDP loss. Host receive/wall timestamps remain the synchronization
-authority; controller timestamps are diagnostic because the two clocks are not
-assumed synchronized.
+The Python receiver accepts only `robot_pose.v1`. It validates the requested
+run UUID, unchanging frame identity, and increasing sequence, retains the full
+packet under `source_packet`, and records sequence gaps as estimated UDP loss.
+Host receive/wall timestamps remain the synchronization authority; controller
+timestamps are diagnostic because the two clocks are not assumed synchronized.
 
 Packet parsing, socket creation, pose sending, terminal retries, and thread
 interruptions are logged instead of being silently swallowed. The terminal
@@ -183,8 +172,8 @@ packet is still sent three times because UDP delivery is not guaranteed.
 
 ## Stop and Safety Contract
 
-The application reads the command socket only while idle. A legacy or
-structured UDP stop request therefore cannot interrupt the active A1 motion.
+The application reads the command socket only while idle. A structured UDP
+stop request therefore cannot interrupt the active A1 motion.
 It is not an emergency stop or other safety function; while idle it only exits
 the application. Use the controller's approved safety response for an unsafe
 condition.

@@ -17,8 +17,9 @@ export interface RunIndexItem {
   path: string
   name: string
   run_name: string | null
-  sequence: string | null
-  plan_only: boolean | null
+  run_id: string | null
+  intent: "calibration" | "dataset" | null
+  annotation_mode: "none" | "pose" | "pose_and_masks" | null
   config_valid: boolean
   config_error: string | null
   modified_at: string
@@ -58,18 +59,6 @@ export interface Overview {
   config_error: string | null
   calibration_sync: CalibrationSyncOverview
   sidebar: OverviewSection[]
-  steps: Array<{
-    index: number
-    id: string
-    stage_id: string
-    label: string
-    description: string
-    status: string
-    resources: string[]
-    artifacts: OverviewSection["artifacts"]
-  }>
-  recommendations: Array<Record<string, JsonValue>>
-  recommendation_error: string | null
 }
 
 export interface RunStorage {
@@ -131,8 +120,9 @@ export interface RunFolder {
     valid: boolean
     error: string | null
     run_name: string | null
-    sequence: string | null
-    plan_only: boolean | null
+    run_id: string | null
+    intent: "calibration" | "dataset" | null
+    annotation_mode: "none" | "pose" | "pose_and_masks" | null
   }
   contents: {
     dataset_mode: string | null
@@ -152,11 +142,6 @@ export interface RunFolder {
     allocated_bytes: number
     file_count: number
   }>
-  relocation: {
-    original_path: string
-    aliases: string[]
-    history_count: number
-  } | null
 }
 
 export interface RunFolderInventory {
@@ -237,7 +222,7 @@ export interface Job {
   parameters: Record<string, JsonValue>
   log_path: string
   visibility: "operator" | "service"
-  scope_kind: "run" | "library" | "global" | "unknown"
+  scope_kind: "run" | "library" | "global"
   run_root: string | null
   process_pid?: number | null
   process_group_id?: number | null
@@ -285,12 +270,9 @@ export interface ClusterRuntimeIdentity {
   qualification_manifest_sha256?: string
   qualification_blockers?: string[]
   ready?: boolean
-  foundationpose_revision?: string
   bop_toolkit_revision?: string
   sif_sha256?: string | null
   weights_sha256?: string | null
-  foundationpose_license?: string
-  foundationpose_license_sha256?: string
   qualified?: boolean
   [key: string]: JsonValue | undefined
 }
@@ -360,12 +342,12 @@ export interface ClusterControllerServiceStatus {
 }
 
 export interface ClusterPoseSetup {
-  schema_version: "cluster_pose_estimation_setup.v1" | "cluster_estimation_setup.v2"
+  schema_version: "cluster_estimation_setup.v2"
   run_root: string
   ready: boolean
-  estimator_id?: string | null
-  estimator?: ClusterEstimator | null
-  estimators?: ClusterEstimator[]
+  estimator_id: string | null
+  estimator: ClusterEstimator | null
+  estimators: ClusterEstimator[]
   dataset: {
     dataset_alias: string
     dataset_sha256: string
@@ -460,9 +442,8 @@ export interface CaptureJob {
   id: string
   name: string
   status: string
-  kind: string | null
-  stage: string | null
-  sequence: string | null
+  kind: "capture"
+  intent: "calibration" | "dataset"
   run_root: string | null
   resources: string[]
   message: string | null
@@ -483,48 +464,23 @@ export interface CaptureState {
   status_artifact: Record<string, JsonValue> | null
 }
 
-export interface PipelineParameter {
-  name: string
-  flag: string
-  kind: "str" | "path" | "int" | "float" | "bool"
-  path_scope: "run" | "input" | "output" | "repository" | null
-  required: boolean
-  default: JsonValue
-  choices: string[]
-  multiple: boolean
-  help: string
-}
-
-export interface PipelineStage {
-  id: string
-  label: string
-  description: string
-  resources: string[]
-  parameters: PipelineParameter[]
-}
-
-export interface PipelineSequence {
-  id: string
-  label: string
-  description: string
-  steps: Array<{ id: string; stage_id: string; [key: string]: JsonValue }>
-}
-
 export interface CaptureSynchronization {
   schema_version: "capture_synchronization.v1"
   mode: "timestamp_aligned"
 }
 
 export interface RunConfig {
-  schema_version: string
+  schema_version: "run_config.v4"
+  run_id: string
   run_name: string
   run_root: string
   robot_profile: Record<string, JsonValue>
   capture: {
+    intent: "calibration" | "dataset"
     resolution: string
     fps: number
     velocity_m_s: number
-    synchronization?: CaptureSynchronization
+    synchronization: CaptureSynchronization
     sensors: Array<{
       sensor_type: string
       device_id: string
@@ -574,10 +530,8 @@ export interface RunConfig {
       [key: string]: JsonValue | undefined
     }
   } | null
-  pipeline: {
-    sequence_id: string
-    plan_only: boolean
-    options: Record<string, JsonValue>
+  bop: {
+    annotation_mode: "none" | "pose" | "pose_and_masks"
   }
 }
 
@@ -651,9 +605,9 @@ export interface RecognitionMeshApproximation {
   fallback_reason: string | null
 }
 
-export type PoseTemplateContour =
-  | Array<{ x_mm: number; y_mm: number }>
-  | { points: Array<{ x_mm: number; y_mm: number }> }
+export interface PoseTemplateContour {
+  points: Array<{ x_mm: number; y_mm: number }>
+}
 
 export interface PoseTemplateOrientation {
   orientation_id: string
@@ -920,13 +874,25 @@ export interface CellTrajectoryMetadata {
 
 export interface CellScene {
   schema_version: "cell_scene.v1"
-  coordinate_system: Record<string, JsonValue>
+  coordinate_system: {
+    units: "millimetres"
+    handedness: "right"
+    up_axis: string
+    reference_frame: "template_base"
+    reference_frame_label: "PoseTemplateBase"
+    sunrise_reference_frame_path: string
+    transform_semantics: "entity_to_parent"
+    presentation: {
+      mode: string
+      transform: CellTransform
+    }
+  }
   run_root: string
   entities: CellEntity[]
   warnings: Array<{ code: string; message: string }>
   timelines: CellTimelineMetadata[]
   default_timeline_id: string | null
-  trajectory?: CellTrajectoryMetadata
+  trajectory: CellTrajectoryMetadata
   trajectory_preview: CellPose[]
   object_selection: {
     objectless: boolean
@@ -998,17 +964,17 @@ export interface BopAnnotationOutput {
 export interface BopAnnotationSetup {
   schema_version: string
   run_root: string
+  configured_mode: "none" | BopAnnotationMode
   runtime: BopAnnotationRuntime
   toolkit: BopAnnotationToolkit
-  readiness: BopAnnotationReadiness
-  readiness_by_mode?: Record<BopAnnotationMode, BopAnnotationReadiness>
+  readiness_by_mode: Record<BopAnnotationMode, BopAnnotationReadiness>
   current_output: BopAnnotationOutput | null
   counts: {
     sensors: number
     frames: number
     instances: number
   }
-  provenance?: Record<string, JsonValue>
+  provenance: Record<string, JsonValue>
 }
 
 export interface BopEvaluationIssue {

@@ -302,23 +302,29 @@ def test_bundle_hashes_tampering_selection_placements_and_replacement_blockers(
     manifest_path.write_bytes(original_manifest)
 
     run = tmp_path / "run"
-    write_run_config_with_manifest(run, create_run_config(run_root=run))
+    write_run_config_with_manifest(
+        run,
+        create_run_config(
+            capture_intent="calibration", bop_annotation_mode="none", run_root=run
+        ),
+    )
     selected = select_target_bundle(
         run_root=run,
         target_id=bundle["target_id"],
         placement_mode="unknown",
+        mounting_frame="template_base",
         library_root=library,
     )
     assert selected["status"] == "selected"
     assert "placement" not in json.loads((run / "calibration_target.json").read_text())
     assert validate_run_target_selection(run)["placement_mode"] == "unknown"
-    with pytest.raises(ValueError, match="mounting_frame is missing"):
-        validate_run_target_selection(run, require_mounting_frame=True)
+    assert validate_run_target_selection(run)["mounting_frame"] == "template_base"
 
     unchanged = select_target_bundle(
         run_root=run,
         target_id=bundle["target_id"],
         placement_mode="unknown",
+        mounting_frame="template_base",
         library_root=library,
     )
     assert unchanged["status"] == "unchanged"
@@ -328,6 +334,7 @@ def test_bundle_hashes_tampering_selection_placements_and_replacement_blockers(
         run_root=run,
         target_id=bundle["target_id"],
         placement_mode="template_base_identity",
+        mounting_frame="template_base",
         library_root=library,
     )
     assert changed["selection"]["placement"]["transform"]["translation_mm"] == [
@@ -348,16 +355,23 @@ def test_bundle_hashes_tampering_selection_placements_and_replacement_blockers(
             run_root=run,
             target_id=bundle["target_id"],
             placement_mode="posegridgen_board_to_base",
+            mounting_frame="template_base",
             library_root=library,
         )
     assert captured.value.blockers == replacement_blockers(run)
 
     posed_run = tmp_path / "posed-run"
-    write_run_config_with_manifest(posed_run, create_run_config(run_root=posed_run))
+    write_run_config_with_manifest(
+        posed_run,
+        create_run_config(
+            capture_intent="calibration", bop_annotation_mode="none", run_root=posed_run
+        ),
+    )
     result = select_target_bundle(
         run_root=posed_run,
         target_id=bundle["target_id"],
         placement_mode="posegridgen_board_to_base",
+        mounting_frame="template_base",
         library_root=library,
     )
     transform = result["selection"]["placement"]["transform"]
@@ -391,7 +405,12 @@ def test_explicit_target_mounting_is_bound_to_camera_group_and_raw_capture(
     )
     write_run_config_with_manifest(
         run,
-        create_run_config(run_root=run, sensors=sensors),
+        create_run_config(
+            capture_intent="calibration",
+            bop_annotation_mode="none",
+            run_root=run,
+            sensors=sensors,
+        ),
     )
 
     selected = select_target_bundle(
@@ -434,14 +453,14 @@ def test_explicit_target_mounting_is_bound_to_camera_group_and_raw_capture(
     blockers = replacement_blockers(run)
     assert "realsense_1/frame_metadata.jsonl" in blockers
     assert RAW_ROBOT_EE_POSES in blockers
-    with pytest.raises(CalibrationTargetConflict) as captured:
-        select_target_bundle(
-            run_root=run,
-            target_id=bundle["target_id"],
-            placement_mode="unknown",
-            library_root=library,
-        )
-    assert RAW_ROBOT_EE_POSES in captured.value.blockers
+    unchanged = select_target_bundle(
+        run_root=run,
+        target_id=bundle["target_id"],
+        placement_mode="unknown",
+        mounting_frame="robot_flange",
+        library_root=library,
+    )
+    assert unchanged["status"] == "unchanged"
 
 
 def test_bundle_validation_rejects_symlinks(tmp_path: Path) -> None:
@@ -472,11 +491,17 @@ def test_selection_promotion_rolls_back_every_active_artifact(
         library_root=library,
     )
     run = tmp_path / "run"
-    write_run_config_with_manifest(run, create_run_config(run_root=run))
+    write_run_config_with_manifest(
+        run,
+        create_run_config(
+            capture_intent="calibration", bop_annotation_mode="none", run_root=run
+        ),
+    )
     select_target_bundle(
         run_root=run,
         target_id=bundle["target_id"],
         placement_mode="unknown",
+        mounting_frame="template_base",
         library_root=library,
     )
     tracked = [
@@ -513,6 +538,7 @@ def test_selection_promotion_rolls_back_every_active_artifact(
             run_root=run,
             target_id=bundle["target_id"],
             placement_mode="template_base_identity",
+            mounting_frame="template_base",
             library_root=library,
         )
 
@@ -544,11 +570,17 @@ def test_bundle_deletion_protects_active_target_and_is_atomic(
         library_root=library,
     )
     run = tmp_path / "run"
-    write_run_config_with_manifest(run, create_run_config(run_root=run))
+    write_run_config_with_manifest(
+        run,
+        create_run_config(
+            capture_intent="calibration", bop_annotation_mode="none", run_root=run
+        ),
+    )
     select_target_bundle(
         run_root=run,
         target_id=active["target_id"],
         placement_mode="unknown",
+        mounting_frame="template_base",
         library_root=library,
     )
 

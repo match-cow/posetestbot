@@ -55,12 +55,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--require-timestamp-source",
-        choices=("host_received", "host_wall", "sensor", "filename"),
+        choices=("host_received", "host_wall", "sensor"),
         help="Warn when a sync report used a different timestamp source.",
     )
     parser.add_argument(
         "--require-robot-timestamp-source",
-        choices=("host_received", "host_wall", "filename"),
+        choices=("host_received", "host_wall"),
         help="Error when a sync report cannot prove this robot timestamp source.",
     )
     parser.add_argument(

@@ -1,6 +1,6 @@
 """Run-scoped BOP19 result inspection, simulation, and evaluation artifacts.
 
-This module deliberately does not register a pipeline stage.  It consumes an
+This module is deliberately outside acquisition orchestration. It consumes an
 already exported ``bop/`` tree and writes only below
 ``processed/bop_evaluation/``.
 """
@@ -45,7 +45,6 @@ EXTERNAL_POSE_JOB_RE = re.compile(
     r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 PROVENANCE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$")
 RUNTIME_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 SLURM_JOB_ID_RE = re.compile(r"^[0-9]{1,32}$")
@@ -1115,10 +1114,7 @@ def _generic_runtime_artifact(value: Any, *, label: str) -> dict[str, str]:
     if not isinstance(value, Mapping) or set(value) != {"filename", "sha256"}:
         raise ValueError(f"{label} must be exact filename/hash evidence")
     filename = value.get("filename")
-    if (
-        not isinstance(filename, str)
-        or RUNTIME_FILENAME_RE.fullmatch(filename) is None
-    ):
+    if not isinstance(filename, str) or RUNTIME_FILENAME_RE.fullmatch(filename) is None:
         raise ValueError(f"{label}.filename is invalid")
     return {
         "filename": filename,
@@ -1160,8 +1156,7 @@ def _generic_external_result_provenance(
         or not input_contracts
         or len(set(input_contracts)) != len(input_contracts)
         or any(
-            not isinstance(contract, str)
-            or CONTRACT_ID_RE.fullmatch(contract) is None
+            not isinstance(contract, str) or CONTRACT_ID_RE.fullmatch(contract) is None
             for contract in input_contracts
         )
         or output_contract != "bop19.csv.v1"
@@ -1271,8 +1266,7 @@ def _generic_external_result_provenance(
         or not profiles
         or len(set(profiles)) != len(profiles)
         or any(
-            not isinstance(profile, str)
-            or PROVENANCE_KEY_RE.fullmatch(profile) is None
+            not isinstance(profile, str) or PROVENANCE_KEY_RE.fullmatch(profile) is None
             for profile in profiles
         )
     ):
@@ -1393,163 +1387,16 @@ def _external_result_provenance(
         raise ValueError("Controller provenance belongs to another job")
     if value.get("dataset_sha256") != expected_dataset_sha256:
         raise ValueError("Controller provenance does not match the staged dataset")
-    if isinstance(value.get("estimator"), Mapping):
-        return _generic_external_result_provenance(
-            value,
-            external_job_id=external_job_id,
-            expected_dataset_sha256=expected_dataset_sha256,
-            source_provenance_sha256=source_provenance_sha256,
-            source_path=source_path,
-            validation=validation,
-        )
-    contracts = {
-        "method": "foundationpose",
-        "oracle_mask_contract": "bop_mask_visib_gt_instance.v1",
-        "score_contract": "constant_1.0_no_detection_confidence",
-        "execution_contract": "independent_register_per_target_no_tracking.v1",
-    }
-    for field, expected in contracts.items():
-        if value.get(field) != expected:
-            raise ValueError(f"Controller provenance has invalid {field}")
-    units = {
-        "bop_model": "millimetres",
-        "bop_depth": "millimetres",
-        "foundationpose": "metres",
-        "result_translation": "millimetres",
-    }
-    if value.get("units") != units:
-        raise ValueError("Controller provenance has invalid unit evidence")
-
-    external_job = value.get("external_job")
-    if (
-        not isinstance(external_job, Mapping)
-        or external_job.get("provider") != "posetestbot-cluster"
-        or external_job.get("job_id") != external_job_id
-        or not isinstance(external_job.get("slurm_job_id"), str)
-        or SLURM_JOB_ID_RE.fullmatch(external_job["slurm_job_id"]) is None
-    ):
-        raise ValueError("Controller provenance has invalid external-job evidence")
-
-    runtime = value.get("runtime")
-    if not isinstance(runtime, Mapping):
-        raise ValueError("Controller provenance has invalid runtime evidence")
-    runtime_id = runtime.get("runtime_id")
-    license_name = runtime.get("foundationpose_license")
-    if (
-        not isinstance(runtime_id, str)
-        or RUNTIME_ID_RE.fullmatch(runtime_id) is None
-        or not isinstance(license_name, str)
-        or not 1 <= len(license_name) <= 120
-        or any(character in license_name for character in "/\\\r\n\0")
-        or runtime.get("qualified") is not True
-        or runtime.get("ready") is not True
-    ):
-        raise ValueError("Controller provenance has invalid runtime identity")
-    normalized_runtime = {
-        "runtime_id": runtime_id,
-        "foundationpose_revision": str(runtime.get("foundationpose_revision")),
-        "bop_toolkit_revision": str(runtime.get("bop_toolkit_revision")),
-        "sif_sha256": _required_sha256(
-            runtime.get("sif_sha256"), label="runtime.sif_sha256"
-        ),
-        "weights_sha256": _required_sha256(
-            runtime.get("weights_sha256"), label="runtime.weights_sha256"
-        ),
-        "weights_files_sha256": _required_sha256(
-            runtime.get("weights_files_sha256"),
-            label="runtime.weights_files_sha256",
-        ),
-        "qualification_manifest_sha256": _required_sha256(
-            runtime.get("qualification_manifest_sha256"),
-            label="runtime.qualification_manifest_sha256",
-        ),
-        "foundationpose_license": license_name,
-        "foundationpose_license_sha256": _required_sha256(
-            runtime.get("foundationpose_license_sha256"),
-            label="runtime.foundationpose_license_sha256",
-        ),
-        "qualified": True,
-        "ready": True,
-    }
-    for field in ("foundationpose_revision", "bop_toolkit_revision"):
-        if GIT_REVISION_RE.fullmatch(normalized_runtime[field]) is None:
-            raise ValueError(f"runtime.{field} must be a full Git revision")
-
-    input_hashes = _provenance_hashes(value.get("input_hashes"), label="input_hashes")
-    output_hashes = _provenance_hashes(
-        value.get("output_hashes"), label="output_hashes"
+    if not isinstance(value.get("estimator"), Mapping):
+        raise ValueError("Controller provenance lacks current estimator evidence")
+    return _generic_external_result_provenance(
+        value,
+        external_job_id=external_job_id,
+        expected_dataset_sha256=expected_dataset_sha256,
+        source_provenance_sha256=source_provenance_sha256,
+        source_path=source_path,
+        validation=validation,
     )
-    result_provenance = value.get("result")
-    if (
-        not isinstance(result_provenance, Mapping)
-        or result_provenance.get("filename") != source_path.name
-        or result_provenance.get("sha256") != validation["sha256"]
-        or result_provenance.get("size_bytes") != validation["size_bytes"]
-        or output_hashes.get(source_path.name) != validation["sha256"]
-    ):
-        raise ValueError("Controller result bytes do not match its provenance")
-    project_copy = value.get("project_copy")
-    if (
-        not isinstance(project_copy, Mapping)
-        or set(project_copy) != {"state", "artifact_sha256"}
-        or project_copy.get("state") != "verified"
-        or project_copy.get("artifact_sha256") != output_hashes
-    ):
-        raise ValueError("Controller provenance has invalid verified-copy evidence")
-
-    estimate_count = value.get("estimate_count")
-    failure_count = value.get("failure_count")
-    if (
-        type(estimate_count) is not int
-        or estimate_count != validation["estimate_count"]
-        or type(failure_count) is not int
-        or failure_count < 0
-    ):
-        raise ValueError("Controller provenance has invalid result counts")
-    collected_at = value.get("collected_at")
-    if not isinstance(collected_at, str) or len(collected_at) > 64:
-        raise ValueError("Controller provenance has invalid collection time")
-    try:
-        datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError("Controller provenance has invalid collection time") from exc
-
-    return {
-        "schema_version": "posetestbot_external_result_provenance.v1",
-        "source_schema_version": value["schema_version"],
-        "source_provenance_sha256": _required_sha256(
-            source_provenance_sha256,
-            label="source_provenance_sha256",
-        ),
-        "external_job": {
-            "provider": "posetestbot-cluster",
-            "job_id": external_job_id,
-            "slurm_job_id": external_job["slurm_job_id"],
-        },
-        "method": contracts["method"],
-        "oracle_mask_contract": contracts["oracle_mask_contract"],
-        "score_contract": contracts["score_contract"],
-        "execution_contract": contracts["execution_contract"],
-        "units": units,
-        "runtime": normalized_runtime,
-        "dataset_sha256": expected_dataset_sha256,
-        "bop_content_sha256": _required_sha256(
-            value.get("bop_content_sha256"), label="bop_content_sha256"
-        ),
-        "input_manifest_sha256": _required_sha256(
-            value.get("input_manifest_sha256"),
-            label="input_manifest_sha256",
-        ),
-        "input_hashes": input_hashes,
-        "estimate_count": estimate_count,
-        "failure_count": failure_count,
-        "result": {
-            "filename": source_path.name,
-            "sha256": validation["sha256"],
-            "size_bytes": validation["size_bytes"],
-        },
-        "collected_at": collected_at,
-    }
 
 
 def _store_result(

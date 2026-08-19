@@ -16,6 +16,11 @@ from posetestbot.calibration.rectification import (
     validate_rectification_provenance,
 )
 from posetestbot.io.artifacts import CAMERA_RECTIFICATION_REPORT, MATCH_ROBOT_EE_POSES
+from posetestbot.pipeline.run_config import (
+    SensorRunConfig,
+    create_run_config,
+    write_run_config,
+)
 
 
 def digest_tree(path: Path) -> dict[str, str]:
@@ -27,6 +32,17 @@ def digest_tree(path: Path) -> dict[str, str]:
 
 
 def rectification_fixture(run_root: Path) -> tuple[Path, dict]:
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            capture_intent="dataset",
+            bop_annotation_mode="none",
+            sensors=(
+                SensorRunConfig("realsense_d435", "SERIAL-1", "Rectification fixture"),
+            ),
+        ),
+    )
     sensor = run_root / "processed" / "synchronized" / "realsense_SERIAL-1"
     (sensor / "rgb").mkdir(parents=True)
     (sensor / "depth").mkdir()
@@ -42,22 +58,36 @@ def rectification_fixture(run_root: Path) -> tuple[Path, dict]:
     )
     (sensor / "depthscale.txt").write_text("1.0\n")
     (sensor / "camera_data.json").write_text(
-        json.dumps({"K": [[25, 0, 10], [0, 25, 8], [0, 0, 1]], "resolution": [height, width]})
+        json.dumps(
+            {"K": [[25, 0, 10], [0, 25, 8], [0, 0, 1]], "resolution": [height, width]}
+        )
     )
     (sensor / "frame_metadata.jsonl").write_text(
         json.dumps(
             {
+                "schema_version": "frame_metadata.v1",
+                "sensor_type": "realsense_d435",
                 "sensor_id": "SERIAL-1",
                 "orientation": "normal",
+                "frame_index": 0,
                 "frame_id": "000000.png",
+                "rgb_path": "rgb/000000.png",
+                "depth_path": "depth/000000.png",
                 "host_received_timestamp_ns": 123,
+                "host_wall_timestamp_ns": 123,
                 "sensor_timestamp_ns": 100,
             }
         )
         + "\n"
     )
     (sensor / MATCH_ROBOT_EE_POSES).write_text(
-        json.dumps({"000000.png": {"robot_ee_pose": {"X": 1, "Y": 2, "Z": 3, "A": 0, "B": 0, "C": 0}}})
+        json.dumps(
+            {
+                "000000.png": {
+                    "robot_ee_pose": {"X": 1, "Y": 2, "Z": 3, "A": 0, "B": 0, "C": 0}
+                }
+            }
+        )
     )
     return sensor, factory_intrinsic_profile(sensor)
 
@@ -68,7 +98,9 @@ def test_rectification_is_transactional_non_destructive_and_depth_nearest(
     run_root = tmp_path / "run"
     sensor, profile = rectification_fixture(run_root)
     before = digest_tree(sensor)
-    source_depth = cv2.imread((sensor / "depth" / "000000.png").as_posix(), cv2.IMREAD_UNCHANGED)
+    source_depth = cv2.imread(
+        (sensor / "depth" / "000000.png").as_posix(), cv2.IMREAD_UNCHANGED
+    )
 
     report_path, report = rectify_run(run_root, [profile])
 
@@ -76,7 +108,9 @@ def test_rectification_is_transactional_non_destructive_and_depth_nearest(
     assert report["sensor_count"] == 1
     assert digest_tree(sensor) == before
     output = run_root / "processed" / "rectified" / sensor.name
-    output_depth = cv2.imread((output / "depth" / "000000.png").as_posix(), cv2.IMREAD_UNCHANGED)
+    output_depth = cv2.imread(
+        (output / "depth" / "000000.png").as_posix(), cv2.IMREAD_UNCHANGED
+    )
     assert set(np.unique(output_depth)).issubset({*np.unique(source_depth), 0})
     assert json.loads((output / MATCH_ROBOT_EE_POSES).read_text()) == json.loads(
         (sensor / MATCH_ROBOT_EE_POSES).read_text()
@@ -93,12 +127,12 @@ def test_rectification_is_transactional_non_destructive_and_depth_nearest(
     assert camera_data["distortion"] == [0.0] * 5
     provenance = validate_rectification_provenance(sensor, output)
     assert provenance["schema_version"] == PROVENANCE_SCHEMA_VERSION
-    assert provenance["source_fingerprint"] == report["sensors"][0][
-        "source_fingerprint"
-    ]
-    assert provenance["output_fingerprint"] == report["sensors"][0][
-        "output_fingerprint"
-    ]
+    assert (
+        provenance["source_fingerprint"] == report["sensors"][0]["source_fingerprint"]
+    )
+    assert (
+        provenance["output_fingerprint"] == report["sensors"][0]["output_fingerprint"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -118,8 +152,8 @@ def test_rectification_provenance_detects_stale_source_or_mutated_output(
     rectify_run(run_root, [profile])
     output = run_root / "processed" / "rectified" / sensor.name
     target = (
-        sensor if mutated_tree == "synchronized" else output
-    ) / "rgb" / "000000.png"
+        (sensor if mutated_tree == "synchronized" else output) / "rgb" / "000000.png"
+    )
     target.write_bytes(target.read_bytes() + b"mutated")
 
     with pytest.raises(ValueError, match=message):

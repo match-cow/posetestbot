@@ -68,40 +68,33 @@ def _camera_matrix(path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 def _sensor_metadata(sensor_folder: Path) -> tuple[str, str, tuple[int, int]]:
     camera_data_path = sensor_folder / CAMERA_DATA_JSON
-    camera_data = _read_json(camera_data_path) if camera_data_path.is_file() else {}
+    if not camera_data_path.is_file():
+        raise FileNotFoundError(f"Missing current camera sidecar: {camera_data_path}")
+    camera_data = _read_json(camera_data_path)
     if not isinstance(camera_data, Mapping):
         raise ValueError("camera_data.json must be an object")
     resolution = camera_data.get("resolution")
-    if isinstance(resolution, list) and len(resolution) == 2:
-        height, width = int(resolution[0]), int(resolution[1])
-    else:
-        image_paths = sorted((sensor_folder / "rgb").glob("*.png"))
-        image = (
-            cv2.imread(image_paths[0].as_posix(), cv2.IMREAD_UNCHANGED)
-            if image_paths
-            else None
-        )
-        if image is None:
-            raise ValueError(
-                "Cannot infer camera resolution without camera_data.json or RGB frames"
-            )
-        height, width = image.shape[:2]
-    sensor_id = (
-        sensor_folder.name.split("_", 1)[1]
-        if "_" in sensor_folder.name
-        else sensor_folder.name
-    )
-    orientation = str(camera_data.get("orientation") or "normal")
+    if not isinstance(resolution, list) or len(resolution) != 2:
+        raise ValueError("camera_data.json requires a two-value resolution")
+    height, width = int(resolution[0]), int(resolution[1])
+    if height <= 0 or width <= 0:
+        raise ValueError("camera_data.json resolution must be positive")
     metadata_path = sensor_folder / FRAME_METADATA_JSONL
-    if metadata_path.is_file():
-        for line in metadata_path.read_text().splitlines():
-            if not line.strip():
-                continue
-            record = json.loads(line)
-            if isinstance(record, Mapping):
-                sensor_id = str(record.get("sensor_id") or sensor_id)
-                orientation = str(record.get("orientation") or orientation)
-            break
+    if not metadata_path.is_file():
+        raise FileNotFoundError(f"Missing current frame metadata: {metadata_path}")
+    records = [line for line in metadata_path.read_text().splitlines() if line.strip()]
+    if not records:
+        raise ValueError("frame_metadata.jsonl must contain at least one record")
+    record = json.loads(records[0])
+    if (
+        not isinstance(record, Mapping)
+        or record.get("schema_version") != "frame_metadata.v1"
+    ):
+        raise ValueError("frame_metadata.jsonl does not contain current frame metadata")
+    sensor_id = str(record.get("sensor_id") or "")
+    orientation = str(record.get("orientation") or "normal")
+    if not sensor_id:
+        raise ValueError("frame metadata requires sensor_id")
     if orientation not in {"normal", "inverted"}:
         raise ValueError(f"Unsupported sensor orientation: {orientation!r}")
     return sensor_id, orientation, (width, height)
@@ -180,7 +173,9 @@ def _captured_distortion(
     cam_k_distortion: np.ndarray,
 ) -> tuple[np.ndarray, str, str | None]:
     camera_data_path = folder / CAMERA_DATA_JSON
-    camera_data = _read_json(camera_data_path) if camera_data_path.is_file() else {}
+    if not camera_data_path.is_file():
+        raise FileNotFoundError(f"Missing current camera sidecar: {camera_data_path}")
+    camera_data = _read_json(camera_data_path)
     if not isinstance(camera_data, Mapping):
         raise ValueError("camera_data.json must be an object")
     raw = camera_data.get("distortion")
@@ -220,11 +215,11 @@ def factory_intrinsic_profile(sensor_folder: str | Path) -> dict[str, Any]:
     )
     sensor_id, orientation, image_size = _sensor_metadata(folder)
     depth_scale_path = folder / DEPTH_SCALE
-    depth_scale = (
-        float(depth_scale_path.read_text().strip())
-        if depth_scale_path.is_file()
-        else 1.0
-    )
+    if not depth_scale_path.is_file():
+        raise FileNotFoundError(
+            f"Missing current depth-scale sidecar: {depth_scale_path}"
+        )
+    depth_scale = float(depth_scale_path.read_text().strip())
     if not math.isfinite(depth_scale) or depth_scale <= 0:
         raise ValueError("Factory depth scale must be finite and positive")
     forward_model_compatible = distortion_model in OPENCV_FORWARD_DISTORTION_MODELS
@@ -262,7 +257,7 @@ def factory_intrinsic_profile(sensor_folder: str | Path) -> dict[str, Any]:
         "source": {
             "mode": "factory",
             "camera_projection": "captured_sdk_color_intrinsics",
-            "legacy_sidecar_fallback": not (folder / CAMERA_DATA_JSON).is_file(),
+            "sidecars_complete": True,
             "sdk_distortion_model": distortion_model,
             "sdk_projection_source": projection_source,
             "opencv_projection_compatible": opencv_compatible,
@@ -284,9 +279,7 @@ def factory_intrinsic_profile(sensor_folder: str | Path) -> dict[str, Any]:
         },
         "depth": {
             "scale_to_mm": depth_scale,
-            "scale_source": "factory_sdk"
-            if depth_scale_path.is_file()
-            else "legacy_default_1mm",
+            "scale_source": "factory_sdk",
             "alignment": {
                 "projection": "depth_aligned_to_color",
                 "source": "capture_adapter_sdk",

@@ -33,7 +33,7 @@ curated browser-safe controller view.
 
 | Area | Primary modules | Persistence |
 | --- | --- | --- |
-| Run configuration and planning | `posetestbot.pipeline.*` | Run root |
+| Run configuration and fixed orchestration | `posetestbot.pipeline.run_config`, `.orchestration`, `.capture_*` | Run root |
 | Sensor acquisition | `posetestbot.sensors.*` | Raw sensor directories and sidecars |
 | Robot integration | `posetestbot.robot.*`, `iiwa/` applications | Raw robot pose stream |
 | Synchronization | `posetestbot.sync.non_destructive`, `.quality` | Derived synchronized frames and reports |
@@ -72,13 +72,13 @@ escape these roots.
 
 ## Acquisition boundary
 
-The pipeline ends at a validated BOP dataset. The following do not belong in
+The acquisition boundary ends at a validated BOP dataset. The following do not belong in
 this repository:
 
 - FoundationPose, MegaPose, SAM6D, or another estimator runtime;
 - estimator-specific input or result conversion;
 - direct SSH or SLURM wrappers;
-- a general evaluation pipeline stage; or
+- a general evaluation stage; or
 - cluster secrets and remote filesystem configuration.
 
 The narrow exception is Inspect-only official BOP19 evaluation of an already

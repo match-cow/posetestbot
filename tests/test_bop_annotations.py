@@ -72,11 +72,16 @@ def _patch_valid_run(
     *,
     calibration: Path,
     toolkit_available: bool,
+    configured_mode: str = "pose",
 ) -> None:
     monkeypatch.setattr(
         annotations,
         "load_run_config_for_run_root",
-        lambda _root: {"dataset_mode": "pose_template"},
+        lambda _root: {
+            "dataset_mode": "pose_template",
+            "capture": {"intent": "dataset"},
+            "bop": {"annotation_mode": configured_mode},
+        },
     )
     monkeypatch.setattr(
         annotations,
@@ -281,7 +286,7 @@ def test_setup_keeps_pose_gt_available_without_mask_toolkit(
     setup = annotations.inspect_annotation_setup(run, app_root=tmp_path)
 
     assert setup["counts"] == {"sensors": 1, "frames": 1, "instances": 1}
-    assert setup["readiness"]["ready"] is True
+    assert setup["configured_mode"] == "pose"
     assert setup["readiness_by_mode"]["pose"]["ready"] is True
     assert setup["readiness_by_mode"]["pose_and_masks"]["ready"] is False
     assert {
@@ -290,7 +295,7 @@ def test_setup_keeps_pose_gt_available_without_mask_toolkit(
     assert {
         item["code"]
         for item in setup["readiness_by_mode"]["pose_and_masks"]["blockers"]
-    } == {"bop_toolkit_unavailable"}
+    } == {"annotation_mode_not_configured", "bop_toolkit_unavailable"}
 
 
 def test_setup_reports_current_pose_and_mask_product(
@@ -303,6 +308,7 @@ def test_setup_reports_current_pose_and_mask_product(
         monkeypatch,
         calibration=calibration,
         toolkit_available=True,
+        configured_mode="pose_and_masks",
     )
     scene = run / "bop" / "test" / "000001"
     (scene / "mask").mkdir(parents=True)
@@ -391,6 +397,7 @@ def test_setup_rejects_internally_consistent_rewritten_mask_bundle(
         monkeypatch,
         calibration=calibration,
         toolkit_available=True,
+        configured_mode="pose_and_masks",
     )
     scene = run / "bop" / "test" / "000001"
     (scene / "mask").mkdir(parents=True)

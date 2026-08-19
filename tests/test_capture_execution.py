@@ -38,6 +38,8 @@ from posetestbot.pipeline.run_config import (
     sensor_config_from_token,
     write_run_config,
 )
+from posetestbot.sensors.contracts import CameraIntrinsics
+from posetestbot.sensors.frame_writer import write_camera_sidecars
 
 
 class FakeBackgroundProcess:
@@ -138,8 +140,10 @@ def filesystem_snapshot(root: Path) -> dict[str, tuple[str, bytes | None]]:
 def configured_run(tmp_path: Path, name: str = "run") -> tuple[Path, dict]:
     run_root = tmp_path / name
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
     )
     write_run_config(run_root, config)
     return run_root, config.to_dict()
@@ -153,6 +157,22 @@ def mark_sensor_ready(
 ) -> None:
     sensor_folder = run_root / f"realsense_{device_id}"
     sensor_folder.mkdir(parents=True, exist_ok=True)
+    (sensor_folder / "rgb").mkdir(exist_ok=True)
+    (sensor_folder / "depth").mkdir(exist_ok=True)
+    if not (sensor_folder / "camera_data.json").exists():
+        write_camera_sidecars(
+            sensor_folder,
+            CameraIntrinsics(
+                cam_k=(100.0, 0.0, 4.0, 0.0, 100.0, 4.0, 0.0, 0.0, 1.0),
+                width=8,
+                height=8,
+                distortion=(0.0, 0.0, 0.0, 0.0, 0.0),
+                depth_scale_to_mm=1.0,
+            ),
+        )
+    for index in range(record_count):
+        (sensor_folder / "rgb" / f"{index}.png").write_bytes(b"rgb")
+        (sensor_folder / "depth" / f"{index}.png").write_bytes(b"depth")
     records = [
         {
             "schema_version": "frame_metadata.v1",
@@ -176,8 +196,10 @@ def mark_sensor_ready(
 def test_capture_execution_plan_selects_full_capture_roles(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
     )
     write_run_config(run_root, config)
 
@@ -210,8 +232,10 @@ def test_capture_execution_plan_blocks_until_both_permissions_are_allowed(
 ) -> None:
     run_root = tmp_path / "run"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
     )
     write_run_config(run_root, config)
 
@@ -247,8 +271,12 @@ def test_capture_execution_plan_blocks_when_either_permission_is_absent(
     write_run_config(
         run_root,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
             run_root=run_root,
-            sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+            sensors=(
+                sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),
+            ),
         ),
     )
 
@@ -387,10 +415,12 @@ def test_capture_execution_rejects_stale_plan_after_camera_is_disabled(
 ) -> None:
     run_root = tmp_path / "disabled-after-plan"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
         sensors=(
-            sensor_config_from_token("realsense:working:eye_in_hand:Working"),
-            sensor_config_from_token("realsense:offline:eye_in_hand:Offline"),
+            sensor_config_from_token("realsense_d435:working:eye_in_hand:Working"),
+            sensor_config_from_token("realsense_d435:offline:eye_in_hand:Offline"),
         ),
     )
     write_run_config(run_root, config)
@@ -434,8 +464,10 @@ def test_capture_execution_full_mode_stops_sensor_process_after_receiver(
 ) -> None:
     run_root = tmp_path / "run-full-execute"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
     )
     write_run_config(run_root, config)
     background_commands: list[list[str]] = []
@@ -446,7 +478,38 @@ def test_capture_execution_full_mode_stops_sensor_process_after_receiver(
         if any(item.endswith("pose_receiver_udp_json.py") for item in command):
             receiver_commands.append(list(command))
             (run_root / RAW_ROBOT_EE_POSES).write_text(
-                json.dumps({"0": {"motion": "circ_far", "pose": {"X": 1}}})
+                json.dumps(
+                    {
+                        "0": {
+                            "host_received_timestamp_ns": 1,
+                            "host_wall_timestamp_ns": 2,
+                            "motion": "circ_far",
+                            "source_packet": {
+                                "schema_version": "robot_pose.v1",
+                                "packet_kind": "pose",
+                                "sequence": 0,
+                                "sender_monotonic_ns": 1,
+                                "sender_wall_timestamp_ms": 1,
+                                "run_id": config.run_id,
+                                "from_frame": "robot_flange",
+                                "to_frame": "template_base",
+                                "sunrise_reference_frame_path": (
+                                    "/PoseTestBot/PoseTemplateBase"
+                                ),
+                                "sequence_delta": 0,
+                                "estimated_packets_lost": 0,
+                            },
+                            "pose": {
+                                "X": 1,
+                                "Y": 2,
+                                "Z": 3,
+                                "A": 0,
+                                "B": 0,
+                                "C": 0,
+                            },
+                        }
+                    }
+                )
             )
             return FakeBackgroundProcess(list(command), kwargs["stdout"])
         background_commands.append(list(command))
@@ -483,6 +546,15 @@ def test_capture_execution_full_mode_stops_sensor_process_after_receiver(
 
     assert report_path == run_root / CAPTURE_EXECUTION_REPORT
     assert report["status"] == "succeeded"
+    assert report["completion"]["schema_version"] == "capture_completion.v1"
+    assert report["completion"]["status"] == "ok"
+    assert report["completion"]["enabled_sensor_count"] == 1
+    assert report["completion"]["error_count"] == 0
+    assert {check["name"] for check in report["completion"]["checks"]} == {
+        "sensor:realsense_123",
+        "robot_pose_stream",
+        "child_processes_and_resources",
+    }
     assert report["mode"] == "full"
     assert report["capture_execution_plan"]["selected_roles"] == [
         "sensor_capture",
@@ -702,8 +774,12 @@ def test_capture_execution_sigterm_cancels_every_spawned_process(
     write_run_config(
         run_root,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
             run_root=run_root,
-            sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+            sensors=(
+                sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),
+            ),
         ),
     )
     spawned: list[FakePersistentProcess] = []

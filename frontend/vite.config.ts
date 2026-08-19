@@ -24,14 +24,15 @@ export default defineConfig({
       "/bop": "http://127.0.0.1:5000",
       "/jobs": "http://127.0.0.1:5000",
       "/capture": "http://127.0.0.1:5000",
+      "/preflight": "http://127.0.0.1:5000",
+      "/dataset-processing": "http://127.0.0.1:5000",
       "/sensors": "http://127.0.0.1:5000",
       "/monitoring": "http://127.0.0.1:5000",
-      "/pipeline": "http://127.0.0.1:5000",
       "/run-config": "http://127.0.0.1:5000",
       "/robot": "http://127.0.0.1:5000",
+      "/cluster": "http://127.0.0.1:5000",
       "/runtime": "http://127.0.0.1:5000",
       "/hardware": "http://127.0.0.1:5000",
-      "/run-command": "http://127.0.0.1:5000",
       "/system": "http://127.0.0.1:5000"
     }
   }

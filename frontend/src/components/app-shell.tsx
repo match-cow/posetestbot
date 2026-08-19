@@ -1,8 +1,7 @@
-import { useEffect, useState } from "react"
+import { useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
-import { ArrowRight, BookOpen, Bot, Boxes, ChartNoAxesCombined, Check, Circle, CircleDot, Cpu, FlaskConical, FolderOpen, Folders, Gauge, Github, Grid3X3, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Route, Sun, Workflow } from "lucide-react"
-import { ConsoleGuide } from "@/components/console-guide"
+import { ArrowRight, BookOpen, Bot, Boxes, ChartNoAxesCombined, Check, Circle, CircleDot, Cpu, FolderOpen, Folders, Gauge, Grid3X3, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Route, Sun, Workflow } from "lucide-react"
 import { RestartControl } from "@/components/restart-control"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -93,7 +92,6 @@ export function AppShell() {
   const { bootstrap, runs, selectedRun, currentWorkflow } = useOperator()
   const { theme, setTheme } = useTheme()
   const location = useLocation()
-  const [guideOpen, setGuideOpen] = useState(false)
   const workflowHref = currentWorkflow ? activeWorkflowHref(currentWorkflow) : "/workflow/setup"
   const activeRun = runs.find((run) => run.path === selectedRun)
   const activeFolderName = selectedRun.split("/").filter(Boolean).at(-1) ?? selectedRun
@@ -117,8 +115,7 @@ export function AppShell() {
     ? [...(processingJobs.data?.jobs ?? [])]
         .filter((job) => job.scope_kind === "run"
           && job.run_root === selectedRun
-          && (job.parameters.pipeline_sequence === "calibrated_capture_to_bop_dataset_dry_run"
-            || job.name === "pipeline-run-config:calibrated_capture_to_bop_dataset_dry_run"))
+          && job.parameters.purpose === "dataset_processing")
         .sort((left, right) => right.created_at.localeCompare(left.created_at))[0]
     : undefined
   const workflowRuntimeStatus: WorkflowRuntimeStatus | null = activeCapture
@@ -177,9 +174,6 @@ export function AppShell() {
               <div className="flex items-center gap-2 text-xs font-semibold"><Route className="size-4 text-primary-strong" />Guided acquisition</div>
               <div className="mt-1 text-[10px] leading-relaxed text-sidebar-foreground/55">Start or resume the required operator path.</div>
             </Link>}
-            <div className="rounded-[10px] border border-sidebar-border bg-secondary p-3">
-              <div className="flex items-center gap-2 text-xs font-semibold"><FlaskConical className="size-4 text-primary" />Trusted lab network</div>
-            </div>
           </div>
         </aside>
 
@@ -216,8 +210,7 @@ export function AppShell() {
                 </section>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                <Tooltip><TooltipTrigger asChild><Button asChild variant="outline" size="icon" className="hidden size-[34px] sm:inline-flex"><a href="https://github.com/match-cow/PoseTestBot" target="_blank" rel="noreferrer" aria-label="Open PoseTestBot on GitHub"><Github /></a></Button></TooltipTrigger><TooltipContent>GitHub repository</TooltipContent></Tooltip>
-                <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" className="size-[34px]" onClick={() => setGuideOpen(true)} aria-label="Open operator console guide"><BookOpen /></Button></TooltipTrigger><TooltipContent>Console guide</TooltipContent></Tooltip>
+                <Button asChild variant="outline" className="h-[34px]"><a href="https://match-cow.github.io/posetestbot/" target="_blank" rel="noreferrer" data-testid="documentation-link"><BookOpen />Documentation</a></Button>
                 <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" className="size-[34px]" onClick={() => setTheme(theme === "light" ? "dark" : "light")} aria-label={`Switch to ${theme === "light" ? "dark" : "light"} theme`}>{theme === "light" ? <Moon /> : <Sun />}</Button></TooltipTrigger><TooltipContent>{theme === "light" ? "Use dark theme" : "Use light theme"}</TooltipContent></Tooltip>
                 <RestartControl />
               </div>
@@ -233,8 +226,6 @@ export function AppShell() {
           <main className="mx-auto max-w-[1600px] p-4 sm:p-5 xl:p-7"><Outlet /></main>
         </div>
       </div>
-
-      <ConsoleGuide open={guideOpen} onOpenChange={setGuideOpen} />
     </TooltipProvider>
   )
 }

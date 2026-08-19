@@ -27,10 +27,10 @@ const ACTIVE = new Set(["queued", "running", "canceling"])
 const CLUSTER_ACTIVE = new Set(["preparing", "transferring", "submitted", "pending", "running", "collecting", "canceling"])
 const PAGE_SIZE = 20
 type StatusFilter = "all" | "active" | "failed" | "finished"
-type ScopeFilter = "all" | "active_run" | "run" | "library" | "global" | "unknown"
+type ScopeFilter = "all" | "active_run" | "run" | "library" | "global"
 
 function isCaptureJob(job: Job) {
-  return job.parameters.pipeline_stage === "capture_execution" || job.resources.includes("camera")
+  return job.parameters.purpose === "capture"
 }
 
 function isCancelableJob(job: Job) {
@@ -56,53 +56,19 @@ function jobScopeLabel(job: Job, selectedRun: string) {
       return "Reusable library"
     case "global":
       return "Lab-wide"
-    case "unknown":
-      return "Legacy unknown scope"
     default:
-      return "Legacy unknown scope"
+      return "Unknown scope"
   }
 }
 
-function legacyClipboardCopy(text: string, source: HTMLElement) {
-  const textarea = document.createElement("textarea")
-  textarea.value = text
-  textarea.readOnly = true
-  textarea.style.position = "fixed"
-  textarea.style.left = "-9999px"
-  textarea.style.top = "0"
-  textarea.style.opacity = "0"
-  const container = source.closest<HTMLElement>('[role="dialog"]') ?? document.body
-  container.appendChild(textarea)
-  let copied = false
-  try {
-    textarea.focus({ preventScroll: true })
-    textarea.select()
-    textarea.setSelectionRange(0, text.length)
-    copied = document.execCommand("copy")
-  } finally {
-    textarea.remove()
-    if (source.isConnected) source.focus({ preventScroll: true })
-  }
-  if (!copied) throw new Error("The browser denied clipboard access")
+async function writeClipboard(text: string) {
+  if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable in this browser context")
+  await navigator.clipboard.writeText(text)
 }
 
-async function writeClipboard(text: string, source: HTMLElement) {
+async function copyDebugText(label: string, text: string) {
   try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text)
-      return
-    }
-  } catch {
-    // The async Clipboard API can be exposed but denied, especially when the
-    // console is opened from a non-secure lab-network address. Use the
-    // selection-based fallback while the click still authorizes copying.
-  }
-  legacyClipboardCopy(text, source)
-}
-
-async function copyDebugText(label: string, text: string, source: HTMLElement) {
-  try {
-    await writeClipboard(text, source)
+    await writeClipboard(text)
     toast.success(`${label} copied`)
   } catch (error) {
     toast.error(`${label} could not be copied`, { description: errorMessage(error) })
@@ -117,7 +83,7 @@ function clusterTone(status: string) {
 }
 
 function estimatorLabel(job: ClusterJob) {
-  const estimatorId = typeof job.payload.estimator_id === "string" ? job.payload.estimator_id : "foundationpose"
+  const estimatorId = typeof job.payload.estimator_id === "string" ? job.payload.estimator_id : "unreported_estimator"
   if (estimatorId === "foundationpose") return "FoundationPose"
   return estimatorId.split(/[-_]/).filter(Boolean).map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" ")
 }
@@ -289,7 +255,7 @@ export function JobsPage() {
       <CardContent className="grid items-end gap-3 py-4 xl:grid-cols-[minmax(260px,1fr)_190px_190px_auto]">
         <div className="space-y-1.5"><Label htmlFor="job-search">Search jobs</Label><div className="relative"><Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input id="job-search" className="pl-9" value={search} onChange={(event) => setSearchValue(event.target.value)} placeholder="Name, ID, resource, run…" /></div></div>
         <div className="space-y-1.5"><Label htmlFor="job-status-filter">Status</Label><Select value={statusFilter} onValueChange={(value: StatusFilter) => setFilter(value)}><SelectTrigger id="job-status-filter" aria-label="Filter jobs by status"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All jobs</SelectItem><SelectItem value="active">Active ({activeCount})</SelectItem><SelectItem value="failed">Failed ({failedCount})</SelectItem><SelectItem value="finished">Finished</SelectItem></SelectContent></Select></div>
-        <div className="space-y-1.5"><Label htmlFor="job-scope-filter">Scope</Label><Select value={scopeFilter} onValueChange={(value: ScopeFilter) => setScopeFilter(value)}><SelectTrigger id="job-scope-filter" aria-label="Filter jobs by scope"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All scopes</SelectItem><SelectItem value="active_run">Active run</SelectItem><SelectItem value="run">All run-owned</SelectItem><SelectItem value="library">Reusable library</SelectItem><SelectItem value="global">Lab-wide</SelectItem><SelectItem value="unknown">Legacy unknown</SelectItem></SelectContent></Select></div>
+        <div className="space-y-1.5"><Label htmlFor="job-scope-filter">Scope</Label><Select value={scopeFilter} onValueChange={(value: ScopeFilter) => setScopeFilter(value)}><SelectTrigger id="job-scope-filter" aria-label="Filter jobs by scope"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All scopes</SelectItem><SelectItem value="active_run">Active run</SelectItem><SelectItem value="run">All run-owned</SelectItem><SelectItem value="library">Reusable library</SelectItem><SelectItem value="global">Lab-wide</SelectItem></SelectContent></Select></div>
         <div className="flex items-center justify-between gap-3 xl:justify-end"><span className="text-xs tabular-nums text-muted-foreground">Loaded {ordered.length} of {total}</span><Button variant="ghost" onClick={clearFilters} disabled={!filtersActive}><X />Clear</Button></div>
       </CardContent>
     </Card>}
@@ -299,7 +265,7 @@ export function JobsPage() {
       : jobs.isError
         ? <Card className="border-destructive/40"><CardHeader><CardTitle>Jobs unavailable</CardTitle><CardDescription>{errorMessage(jobs.error)}</CardDescription></CardHeader><CardContent><Button variant="outline" onClick={() => jobs.refetch()}><RefreshCw />Try again</Button></CardContent></Card>
           : ordered.length === 0 && !filtersActive
-          ? <EmptyState icon={Terminal} title="No jobs yet" description="Queue a readiness check, workflow action, snapshot, or plan-only sequence to see it here." />
+          ? <EmptyState icon={Terminal} title="No jobs yet" description="Queue a readiness check, fixed workflow action, camera snapshot, or capture plan to see it here." />
           : ordered.length === 0
             ? <EmptyState icon={Search} title="No matching jobs" description="Change or clear the search and status filter." action={<Button variant="outline" onClick={clearFilters}><X />Clear filters</Button>} />
             : <div className="space-y-2">
@@ -330,8 +296,8 @@ export function JobsPage() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3"><StatusBadge status={currentDetail?.status} tone={jobStatusTone(currentDetail?.status)} /><span className="text-xs text-muted-foreground">Return code {currentDetail?.returncode ?? "—"}</span></div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" disabled={!outputText || log.isPending} onClick={(event) => void copyDebugText("Job output", outputText, event.currentTarget)} title="Copy the complete process output"><Copy />Copy output</Button>
-            <Button variant="outline" size="sm" disabled={!currentDetail} onClick={(event) => currentDetail && void copyDebugText("Job context", jobContext(currentDetail), event.currentTarget)} title="Copy job context and metadata"><Copy />Copy context</Button>
+            <Button variant="outline" size="sm" disabled={!outputText || log.isPending} onClick={() => void copyDebugText("Job output", outputText)} title="Copy the complete process output"><Copy />Copy output</Button>
+            <Button variant="outline" size="sm" disabled={!currentDetail} onClick={() => currentDetail && void copyDebugText("Job context", jobContext(currentDetail))} title="Copy job context and metadata"><Copy />Copy context</Button>
           </div>
         </div>
         <pre data-testid="job-log" className="min-h-0 flex-1 overflow-auto rounded-lg bg-[#11130d] p-4 text-xs leading-relaxed text-[#dce4c4]">{log.isError ? `Log unavailable: ${errorMessage(log.error)}` : outputText || "Waiting for log output…"}</pre>

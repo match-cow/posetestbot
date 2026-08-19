@@ -47,7 +47,7 @@ def static_profile() -> CalibrationProfile:
         ),
         extrinsics=RigidTransform(
             from_frame=TransformFrame.CAMERA,
-            to_frame=TransformFrame.ROBOT_BASE,
+            to_frame=TransformFrame.TEMPLATE_BASE,
             rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
             translation_mm=(100.0, 200.0, 300.0),
         ),

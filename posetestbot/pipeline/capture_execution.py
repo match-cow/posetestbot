@@ -36,6 +36,7 @@ from posetestbot.pipeline.capture_plan import (
     load_capture_plan,
 )
 from posetestbot.pipeline.capture_plan_preflight import build_capture_plan_preflight
+from posetestbot.pipeline.capture_completion import build_capture_completion
 from posetestbot.pipeline.run_config import (
     load_run_config_for_run_root,
     run_config_lock,
@@ -1685,6 +1686,32 @@ def run_capture_execution(
         )
 
     elapsed_s = time.monotonic() - started_monotonic
+    if status == "succeeded":
+        completion = build_capture_completion(
+            run_root_path,
+            load_run_config_for_run_root(run_root_path),
+            process_records,
+        )
+        if completion["status"] != "ok":
+            status = "failed"
+            failed_checks = [
+                str(check["name"])
+                for check in completion["checks"]
+                if check["status"] == "error"
+            ]
+            message = (
+                "Capture children exited, but completion validation failed: "
+                + ", ".join(failed_checks)
+                + ". Raw evidence was preserved."
+            )
+    else:
+        completion = {
+            "schema_version": "capture_completion.v1",
+            "status": "not_run",
+            "enabled_sensor_count": 0,
+            "checks": [],
+            "error_count": 0,
+        }
     report = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "generated_at": _now(),
@@ -1730,6 +1757,7 @@ def run_capture_execution(
         "capture_execution_plan_artifact": CAPTURE_EXECUTION_PLAN,
         "capture_execution_plan": plan,
         "processes": process_records,
+        "completion": completion,
     }
     report_path = write_capture_execution_report(run_root_path, report)
     status_path = record_status(status, message)

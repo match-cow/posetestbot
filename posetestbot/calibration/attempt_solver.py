@@ -1,6 +1,6 @@
 """Deterministic multi-method solving for intent-level calibration attempts.
 
-This module is deliberately independent from the legacy stage writers.  It
+This module owns the current intent-level calculation path. It
 operates on explicit observations and returns JSON-ready evidence so an attempt
 can be kept immutable until an operator promotes a selected result.
 """
@@ -16,9 +16,15 @@ import cv2
 import numpy as np
 from pytransform3d import transformations as pt
 
-from posetestbot.calibration.candidates import (
-    _average_transform,
-    _robot_ee_to_reference,
+from posetestbot.calibration.transforms import (
+    average_transform,
+    invert_transform,
+    is_finite_transform,
+    residual_summary,
+    robot_ee_to_reference,
+    transform_from_record,
+    transform_record,
+    transform_residual,
 )
 
 
@@ -75,98 +81,14 @@ DEFAULT_STATIC_MIN_IMAGE_CENTROID_Y_SPAN_RATIO = 0.20
 DEFAULT_STATIC_MIN_IMAGE_CENTROID_HULL_AREA_RATIO = 0.03
 
 
-def _finite_transform(value: np.ndarray) -> bool:
-    return value.shape == (4, 4) and bool(np.all(np.isfinite(value)))
-
-
 def _transform(rotation: Any, translation: Any) -> np.ndarray:
     result = pt.transform_from(
         np.asarray(rotation, dtype=float).reshape(3, 3),
         np.asarray(translation, dtype=float).reshape(3),
     )
-    if not _finite_transform(result):
+    if not is_finite_transform(result):
         raise ValueError("solver produced a non-finite transform")
     return result
-
-
-def invert_transform(value: np.ndarray) -> np.ndarray:
-    if not _finite_transform(value):
-        raise ValueError("cannot invert a non-finite transform")
-    return pt.invert_transform(value)
-
-
-def transform_record(
-    value: np.ndarray,
-    *,
-    from_frame: str,
-    to_frame: str,
-) -> dict[str, Any]:
-    if not _finite_transform(value):
-        raise ValueError("transform must be finite")
-    x, y, z, qw, qx, qy, qz = pt.pq_from_transform(value)
-    return {
-        "from": from_frame,
-        "to": to_frame,
-        "matrix": np.asarray(value, dtype=float).tolist(),
-        "rotation_quaternion_wxyz": [
-            float(qw),
-            float(qx),
-            float(qy),
-            float(qz),
-        ],
-        "translation_mm": [float(x), float(y), float(z)],
-    }
-
-
-def transform_from_record(value: Mapping[str, Any]) -> np.ndarray:
-    matrix = value.get("matrix")
-    if matrix is not None:
-        result = np.asarray(matrix, dtype=float)
-        if not _finite_transform(result):
-            raise ValueError("recorded transform matrix is invalid")
-        return result
-    quaternion = np.asarray(value.get("rotation_quaternion_wxyz"), dtype=float)
-    translation = np.asarray(value.get("translation_mm"), dtype=float)
-    if quaternion.shape != (4,) or translation.shape != (3,):
-        raise ValueError("recorded transform requires quaternion and translation")
-    result = pt.transform_from_pq(
-        np.asarray([*translation.tolist(), *quaternion.tolist()], dtype=float)
-    )
-    if not _finite_transform(result):
-        raise ValueError("recorded transform is non-finite")
-    return result
-
-
-def transform_residual(left: np.ndarray, right: np.ndarray) -> dict[str, float]:
-    translation_mm = float(np.linalg.norm(left[:3, 3] - right[:3, 3]))
-    delta = left[:3, :3].T @ right[:3, :3]
-    cosine = max(-1.0, min(1.0, (float(np.trace(delta)) - 1.0) / 2.0))
-    return {
-        "translation_mm": translation_mm,
-        "rotation_deg": math.degrees(math.acos(cosine)),
-    }
-
-
-def residual_summary(records: Sequence[Mapping[str, float]]) -> dict[str, float]:
-    if not records:
-        return {
-            "mean_translation_mm": 0.0,
-            "median_translation_mm": 0.0,
-            "max_translation_mm": 0.0,
-            "mean_rotation_deg": 0.0,
-            "median_rotation_deg": 0.0,
-            "max_rotation_deg": 0.0,
-        }
-    translations = [float(item["translation_mm"]) for item in records]
-    rotations = [float(item["rotation_deg"]) for item in records]
-    return {
-        "mean_translation_mm": float(mean(translations)),
-        "median_translation_mm": float(median(translations)),
-        "max_translation_mm": float(max(translations)),
-        "mean_rotation_deg": float(mean(rotations)),
-        "median_rotation_deg": float(median(rotations)),
-        "max_rotation_deg": float(max(rotations)),
-    }
 
 
 def _motion_balanced_validation(
@@ -294,9 +216,7 @@ def solve_planar_pnp_candidates(
     ),
     min_grid_rows: int = DEFAULT_MIN_PNP_GRID_ROWS,
     min_grid_columns: int = DEFAULT_MIN_PNP_GRID_COLUMNS,
-    min_clutter_supported_markers: int = (
-        DEFAULT_MIN_PNP_CLUTTER_SUPPORTED_MARKERS
-    ),
+    min_clutter_supported_markers: int = (DEFAULT_MIN_PNP_CLUTTER_SUPPORTED_MARKERS),
     min_clutter_grid_rows: int = DEFAULT_MIN_PNP_CLUTTER_GRID_ROWS,
     min_clutter_grid_columns: int = DEFAULT_MIN_PNP_CLUTTER_GRID_COLUMNS,
 ) -> dict[str, Any]:
@@ -363,7 +283,9 @@ def solve_planar_pnp_candidates(
             for marker_id in sorted({int(value) for value in marker_ids})
         }
         if any(count % 4 != 0 for count in marker_point_counts.values()):
-            raise ValueError("PnP marker metadata does not contain four-corner detections")
+            raise ValueError(
+                "PnP marker metadata does not contain four-corner detections"
+            )
         marker_detection_counts = {
             str(marker_id): count // 4
             for marker_id, count in marker_point_counts.items()
@@ -403,15 +325,14 @@ def solve_planar_pnp_candidates(
     common_inlier_ratio = float(
         min(
             1.0,
-            len(common_indices)
-            / max(1, unique_marker_correspondence_capacity),
+            len(common_indices) / max(1, unique_marker_correspondence_capacity),
         )
         if duplicate_marker_clutter
         else raw_common_inlier_ratio
     )
-    consensus_image_centroid_px = np.mean(
-        image_array[common_indices], axis=0
-    ).astype(float).tolist()
+    consensus_image_centroid_px = (
+        np.mean(image_array[common_indices], axis=0).astype(float).tolist()
+    )
     support_evidence = {
         "correspondence_count": int(len(object_array)),
         "common_inlier_count": int(len(common_indices)),
@@ -566,9 +487,7 @@ def solve_planar_pnp_candidates(
                     "quality_mean_reprojection_error_px": (
                         quality_mean_reprojection_error_px
                     ),
-                    "duplicate_marker_clutter_filtered": (
-                        duplicate_marker_clutter
-                    ),
+                    "duplicate_marker_clutter_filtered": (duplicate_marker_clutter),
                     "ignored_clutter_correspondence_count": support_evidence[
                         "ignored_clutter_correspondence_count"
                     ],
@@ -580,8 +499,7 @@ def solve_planar_pnp_candidates(
                 }
                 item["quality_status"] = (
                     "accepted"
-                    if quality_mean_reprojection_error_px
-                    <= max_all_point_mean_error_px
+                    if quality_mean_reprojection_error_px <= max_all_point_mean_error_px
                     else "rejected"
                 )
                 method_candidates.append(item)
@@ -650,7 +568,7 @@ def _observation_transforms(
         target_pose = observation.get("target_to_camera")
         if not isinstance(robot_pose, Mapping) or not isinstance(target_pose, Mapping):
             raise ValueError("observation requires robot and target-camera transforms")
-        robot.append(_robot_ee_to_reference(robot_pose))
+        robot.append(robot_ee_to_reference(robot_pose))
         target_camera.append(transform_from_record(target_pose))
     return robot, target_camera
 
@@ -690,7 +608,7 @@ def _calibrate_hand_eye(
                 robot, target_camera, strict=True
             )
         ]
-    return primary, _average_transform(companions)
+    return primary, average_transform(companions)
 
 
 def _calibrate_robot_world_hand_eye(
@@ -817,7 +735,7 @@ def _consensus_companion(
             and residual["rotation_deg"] <= max_rotation_deg
         )
     ]
-    return _average_transform(retained or [medoid_transform])
+    return average_transform(retained or [medoid_transform])
 
 
 def _closure_residuals(

@@ -70,10 +70,6 @@ function pageDimensions(size: string, orientation: string) {
     : { width_mm: dimensions[1], height_mm: dimensions[0] }
 }
 
-function unwrapAnalysis(value: PoseTemplateOrientationAnalysis | { analysis: PoseTemplateOrientationAnalysis }) {
-  return "analysis" in value ? value.analysis : value
-}
-
 function orientationAnalysisRequired(error: unknown) {
   return error instanceof ApiError
     && (error.status === 404 || error.status === 409)
@@ -271,20 +267,15 @@ export function PoseTemplatesPage() {
       const cached = client.getQueryData<PoseTemplateOrientationAnalysis>(key)
       if (cached) return { object, analysis: cached }
       try {
-        const analysis = unwrapAnalysis(await api<PoseTemplateOrientationAnalysis | { analysis: PoseTemplateOrientationAnalysis }>(`/pose-templates/workpieces/${object.catalog_uuid}/orientations`))
+        const analysis = await api<PoseTemplateOrientationAnalysis>(`/pose-templates/workpieces/${object.catalog_uuid}/orientations`)
         cacheOrientationAnalysis(object, analysis)
         return { object, analysis }
       } catch (error) {
         if (!orientationAnalysisRequired(error)) throw error
       }
-      const queued = await api<PoseTemplateOrientationAnalysis | { analysis: PoseTemplateOrientationAnalysis } | { job_id: string }>(`/pose-templates/workpieces/${object.catalog_uuid}/orientations`, { method: "POST", body: "{}" })
-      if ("schema_version" in queued || "analysis" in queued) {
-        const analysis = unwrapAnalysis(queued as PoseTemplateOrientationAnalysis | { analysis: PoseTemplateOrientationAnalysis })
-        cacheOrientationAnalysis(object, analysis)
-        return { object, analysis }
-      }
+      const queued = await api<{ job_id: string }>(`/pose-templates/workpieces/${object.catalog_uuid}/orientations`, { method: "POST", body: "{}" })
       await waitForJob(queued.job_id)
-      const analysis = unwrapAnalysis(await api<PoseTemplateOrientationAnalysis | { analysis: PoseTemplateOrientationAnalysis }>(`/pose-templates/workpieces/${object.catalog_uuid}/orientations`))
+      const analysis = await api<PoseTemplateOrientationAnalysis>(`/pose-templates/workpieces/${object.catalog_uuid}/orientations`)
       cacheOrientationAnalysis(object, analysis)
       return { object, analysis }
     },

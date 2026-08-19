@@ -53,11 +53,11 @@ def default_web_run_root() -> Path:
     configured = os.environ.get("POSETESTBOT_WEB_DEFAULT_RUN_ROOT")
     if configured:
         return resolve_web_run_root(configured)
-    candidate = DEFAULT_RUN_ROOT / "web_run"
+    candidate = DEFAULT_RUN_ROOT / "test_run"
     try:
         return resolve_web_run_root(candidate)
     except ValueError:
-        return resolve_web_run_root(web_run_roots()[0] / "web_run")
+        return resolve_web_run_root(web_run_roots()[0] / "test_run")
 
 
 def _modified_at(path: Path) -> tuple[float, str]:
@@ -72,8 +72,9 @@ def _modified_at(path: Path) -> tuple[float, str]:
 
 def _run_record(path: Path) -> dict[str, Any]:
     run_name = None
-    sequence = None
-    plan_only = None
+    run_id = None
+    intent = None
+    annotation_mode = None
     config_valid = False
     config_error = None
     try:
@@ -81,12 +82,9 @@ def _run_record(path: Path) -> dict[str, Any]:
         raw_run_name = config.get("run_name")
         if isinstance(raw_run_name, str) and raw_run_name.strip():
             run_name = raw_run_name.strip()
-        pipeline = config.get("pipeline", {})
-        if isinstance(pipeline, dict):
-            raw_sequence = pipeline.get("sequence_id")
-            sequence = str(raw_sequence) if raw_sequence is not None else None
-            raw_plan_only = pipeline.get("plan_only")
-            plan_only = raw_plan_only if isinstance(raw_plan_only, bool) else None
+        run_id = str(config["run_id"])
+        intent = str(config["capture"]["intent"])
+        annotation_mode = str(config["bop"]["annotation_mode"])
         config_valid = True
     except (FileNotFoundError, OSError, ValueError) as exc:
         config_error = str(exc)
@@ -96,8 +94,9 @@ def _run_record(path: Path) -> dict[str, Any]:
         "path": path.as_posix(),
         "name": path.name,
         "run_name": run_name,
-        "sequence": sequence,
-        "plan_only": plan_only,
+        "run_id": run_id,
+        "intent": intent,
+        "annotation_mode": annotation_mode,
         "config_valid": config_valid,
         "config_error": config_error,
         "modified_at": modified_at,
@@ -114,9 +113,8 @@ def discover_web_runs() -> list[dict[str, Any]]:
             continue
         for candidate in allowed_root.iterdir():
             try:
-                if (
-                    candidate.name == "calibration_targets"
-                    or candidate.name.startswith(MOVE_STAGING_PREFIX)
+                if candidate.name == "calibration_targets" or candidate.name.startswith(
+                    MOVE_STAGING_PREFIX
                 ):
                     continue
                 if candidate.is_symlink() or not candidate.is_dir():

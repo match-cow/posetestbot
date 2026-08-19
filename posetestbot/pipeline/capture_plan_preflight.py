@@ -29,7 +29,11 @@ from posetestbot.pipeline.run_config import (
     capture_synchronization_from_mapping,
     load_run_config_for_run_root,
 )
-from posetestbot.sensors.registry import get_sensor_adapter, sensor_folder_name
+from posetestbot.sensors.registry import (
+    get_sensor_adapter,
+    is_auto_device_id,
+    sensor_folder_name,
+)
 from posetestbot.sensors.status import (
     REALSENSE_MIN_USB_MAJOR,
     collect_sensor_status,
@@ -152,7 +156,7 @@ def _sensor_check_details(
 
 
 def _is_auto_device(device_id: str) -> bool:
-    return device_id.strip().lower() in {"", "auto", "default"}
+    return is_auto_device_id(device_id)
 
 
 def _enabled_config_sensors(config: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -435,7 +439,7 @@ def _validate_capture_synchronization_plan(
                 "Capture uses the exact timestamp-aligned contract; no simultaneous "
                 "camera exposure is claimed."
                 if matches
-                else "Capture plan synchronization does not match run_config.v3."
+                else "Capture plan synchronization does not match run_config.v4."
             ),
             details={
                 **policy,

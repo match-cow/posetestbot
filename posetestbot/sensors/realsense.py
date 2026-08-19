@@ -11,10 +11,10 @@ import numpy as np
 
 from posetestbot.sensors.contracts import CameraIntrinsics, SensorType
 from posetestbot.sensors.frame_writer import (
-    ensure_legacy_rgbd_folders,
+    ensure_rgbd_folders,
     sync_frame_metadata,
-    write_legacy_camera_sidecars,
-    write_legacy_rgbd_frame,
+    write_camera_sidecars,
+    write_rgbd_frame,
 )
 
 
@@ -276,7 +276,7 @@ def capture_realsense_rgbd(
     rs_module: Any | None = None,
     cv2_module: Any | None = None,
 ) -> dict[str, Any]:
-    """Capture aligned RealSense RGB-D frames into the legacy folder contract."""
+    """Capture aligned RealSense RGB-D frames into the current folder contract."""
 
     if fps <= 0:
         raise ValueError("fps must be positive")
@@ -339,7 +339,7 @@ def capture_realsense_rgbd(
     align = rs.align(rs.stream.color)
 
     if record and output is not None:
-        ensure_legacy_rgbd_folders(output)
+        ensure_rgbd_folders(output)
 
     try:
         while (max_frames <= 0 or captured_frames < max_frames) and not (
@@ -415,7 +415,7 @@ def capture_realsense_rgbd(
                 inverted=inverted,
             )
             if record and output is not None and not sidecars_written:
-                written = write_legacy_camera_sidecars(
+                written = write_camera_sidecars(
                     output,
                     camera_intrinsics,
                     include_distortion_in_cam_k=(
@@ -450,7 +450,7 @@ def capture_realsense_rgbd(
                     aligned_depth_frame,
                     rs,
                 )
-                metadata = write_legacy_rgbd_frame(
+                metadata = write_rgbd_frame(
                     output,
                     rgb_image=color_image,
                     depth_image=depth_image,

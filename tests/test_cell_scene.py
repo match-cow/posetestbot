@@ -176,15 +176,17 @@ def make_scene_run(tmp_path: Path) -> Path:
     )
     run_root = tmp_path / "run"
     wrist = replace(
-        sensor_config_from_token("realsense:111:eye_in_hand:Wrist camera"),
+        sensor_config_from_token("realsense_d435:111:eye_in_hand:Wrist camera"),
         calibration_profile_id="promoted_wrist_111",
     )
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
         calibration_profiles=profiles_path.as_posix(),
         sensors=(
             wrist,
-            sensor_config_from_token("realsense:222:static:Static camera"),
+            sensor_config_from_token("realsense_d435:222:static:Static camera"),
         ),
         fixed_transforms=(
             FixedFrameTransform(
@@ -192,19 +194,46 @@ def make_scene_run(tmp_path: Path) -> Path:
             ),
             FixedFrameTransform("tcp", "robot_flange", (1, 0, 0, 0), (0, 0, 120)),
         ),
-        robot_pose_sunrise_reference_frame_path=(POSE_TEMPLATE_BASE_SUNRISE_PATH),
     )
     write_run_config(run_root, config)
     for sensor in ("realsense_111", "realsense_222"):
         folder = run_root / "processed" / "synchronized" / sensor
         folder.mkdir(parents=True)
+        sensor_id = sensor.removeprefix("realsense_")
+        (folder / "frame_metadata.jsonl").write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "schema_version": "frame_metadata.v1",
+                        "sensor_type": "realsense_d435",
+                        "sensor_id": sensor_id,
+                        "frame_index": index,
+                        "frame_id": f"{index:06d}.png",
+                        "rgb_path": f"rgb/{index:06d}.png",
+                        "depth_path": f"depth/{index:06d}.png",
+                        "sensor_timestamp_ns": 1_000_000_000 + index,
+                        "host_received_timestamp_ns": 2_000_000_000 + index,
+                        "host_wall_timestamp_ns": 3_000_000_000 + index,
+                        "sync_timestamp_ns": 2_000_000_000 + index,
+                        "image_rotation_degrees": 0,
+                        "orientation": "normal",
+                    }
+                )
+                + "\n"
+                for index in range(3)
+            )
+        )
         (folder / "match_robot_ee_poses.json").write_text(
             json.dumps(
                 {
                     f"{index:06d}.png": {
                         "motion": "arc",
+                        "image_timestamp_ns": 2_000_000_000 + index,
+                        "timestamp_source": "host_received",
                         "source_packet": {
                             "schema_version": "robot_pose.v1",
+                            "packet_kind": "pose",
+                            "run_id": config.run_id,
                             "from_frame": "robot_flange",
                             "to_frame": "template_base",
                             "sunrise_reference_frame_path": (
@@ -249,12 +278,14 @@ def write_wrist_run_config(
     profile_id: str = "wrist_111",
 ) -> None:
     wrist = replace(
-        sensor_config_from_token("realsense:111:eye_in_hand:Wrist camera"),
+        sensor_config_from_token("realsense_d435:111:eye_in_hand:Wrist camera"),
         calibration_profile_id=profile_id,
     )
     write_run_config(
         run_root,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
             run_root=run_root,
             calibration_profiles=calibration_profiles,
             sensors=(wrist,),
@@ -367,6 +398,25 @@ def test_scene_composes_frames_sensors_and_exact_timelines(tmp_path: Path) -> No
     assert timeline["poses"][0]["transform"]["translation_mm"] == [1.0, 2.0, 3.0]
 
 
+def test_cell_timeline_rejects_missing_current_timestamp_evidence(
+    tmp_path: Path,
+) -> None:
+    run_root = make_scene_run(tmp_path)
+    matched_path = (
+        run_root
+        / "processed"
+        / "synchronized"
+        / "realsense_111"
+        / "match_robot_ee_poses.json"
+    )
+    matched = json.loads(matched_path.read_text())
+    matched["000000.png"].pop("image_timestamp_ns")
+    matched_path.write_text(json.dumps(matched))
+
+    with pytest.raises(ValueError, match="lacks image_timestamp_ns"):
+        build_cell_scene(run_root)
+
+
 def test_static_camera_scene_stays_in_pose_template_base_and_tracks_target(
     tmp_path: Path,
 ) -> None:
@@ -477,7 +527,7 @@ def test_scene_marks_mismatched_bop_export_provenance_stale(tmp_path: Path) -> N
     )
 
 
-def test_scene_marks_missing_calibration_and_supports_raw_fallback(
+def test_scene_marks_missing_calibration_and_uses_current_raw_timeline(
     tmp_path: Path,
 ) -> None:
     run_root = make_scene_run(tmp_path)
@@ -488,6 +538,19 @@ def test_scene_marks_missing_calibration_and_supports_raw_fallback(
             {
                 "0": {
                     "motion": "raw",
+                    "framename": 1_000,
+                    "host_received_timestamp_ns": 1_000_000_000,
+                    "host_wall_timestamp_ns": 2_000_000_000,
+                    "source_packet": {
+                        "schema_version": "robot_pose.v1",
+                        "packet_kind": "pose",
+                        "run_id": json.loads(
+                            (run_root / "run_config.json").read_text()
+                        )["run_id"],
+                        "from_frame": "robot_flange",
+                        "to_frame": "template_base",
+                        "sunrise_reference_frame_path": POSE_TEMPLATE_BASE_SUNRISE_PATH,
+                    },
                     "pose": {"X": 9, "Y": 8, "Z": 7, "A": 0, "B": 0, "C": 0},
                 }
             }
@@ -623,15 +686,28 @@ def test_cell_camera_frames_follow_exact_timeline_indices(
     (sensor_folder / "depthscale.txt").write_text("1.0\n")
     metadata_path = sensor_folder / "frame_metadata.jsonl"
     metadata_path.write_text(
-        json.dumps(
-            {
-                "frame_id": "000001.png",
-                "inverted": True,
-                "image_rotation_degrees": 180,
-                "orientation": "inverted",
-            }
+        "".join(
+            json.dumps(
+                {
+                    "schema_version": "frame_metadata.v1",
+                    "sensor_type": "realsense_d435",
+                    "sensor_id": "111",
+                    "frame_index": index,
+                    "frame_id": f"{index:06d}.png",
+                    "rgb_path": f"rgb/{index:06d}.png",
+                    "depth_path": f"depth/{index:06d}.png",
+                    "sensor_timestamp_ns": 1_000_000_000 + index,
+                    "host_received_timestamp_ns": 2_000_000_000 + index,
+                    "host_wall_timestamp_ns": 3_000_000_000 + index,
+                    "sync_timestamp_ns": 2_000_000_000 + index,
+                    "inverted": True,
+                    "image_rotation_degrees": 180,
+                    "orientation": "inverted",
+                }
+            )
+            + "\n"
+            for index in range(3)
         )
-        + "\n"
     )
     config_path = run_root / "run_config.json"
     config = json.loads(config_path.read_text())
@@ -747,18 +823,8 @@ def test_cell_camera_frames_follow_exact_timeline_indices(
     assert decoded_depth[0, 1].tolist() != decoded_depth[1, 1].tolist()
 
     metadata_path.unlink()
-    fallback_scene = build_cell_scene(run_root)
-    fallback_timeline = next(
-        item
-        for item in fallback_scene["timelines"]
-        if item["id"] == "sensor:realsense_111"
-    )
-    assert fallback_timeline["camera"]["image_presentation"] == {
-        "configured_inverted": True,
-        "stored_rotation_degrees": None,
-        "display_rotation_degrees": 180,
-        "correction": "viewer",
-    }
+    with pytest.raises(FileNotFoundError, match="Current frame metadata is required"):
+        build_cell_scene(run_root)
 
 
 def test_retired_cell_registry_asset_route_is_absent(

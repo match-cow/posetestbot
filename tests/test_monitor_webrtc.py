@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
+import pytest
 from aiortc import VideoStreamTrack
 from aiortc.codecs import vpx as aiortc_vpx
 
@@ -192,6 +194,15 @@ def test_worker_releases_camera_and_stops_signaling(
     assert status["status"] == "stopped"
     assert status["signaling_ready"] is False
     assert status["signaling_port"] is None
+
+
+def test_monitor_status_rejects_pre_v2_schema(tmp_path: Path) -> None:
+    (tmp_path / webrtc.MONITOR_STATUS_NAME).write_text(
+        json.dumps({"schema_version": "monitor_webrtc.v1"})
+    )
+
+    with pytest.raises(ValueError, match="monitor_webrtc.v2"):
+        webrtc.load_monitor_status(tmp_path)
 
 
 def test_monitor_smoke_requires_operator_and_both_execution_gates() -> None:

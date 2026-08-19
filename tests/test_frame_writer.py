@@ -24,8 +24,8 @@ from posetestbot.sensors.frame_writer import (
     frame_stem_from_host_wall_ns,
     sync_frame_metadata,
     write_aligned_rgbd_frame,
-    write_legacy_camera_sidecars,
-    write_legacy_rgbd_frame,
+    write_camera_sidecars,
+    write_rgbd_frame,
 )
 
 
@@ -36,14 +36,14 @@ def read_metadata(path: Path) -> list[dict]:
     ]
 
 
-def test_write_legacy_rgbd_frame_creates_images_and_metadata(
+def test_write_rgbd_frame_creates_images_and_metadata(
     tmp_path: Path,
 ) -> None:
     rgb = np.zeros((2, 3, 3), dtype=np.uint8)
     rgb[:, :, 1] = 128
     depth = np.ones((2, 3), dtype=np.uint16) * 42
 
-    metadata = write_legacy_rgbd_frame(
+    metadata = write_rgbd_frame(
         tmp_path,
         rgb_image=rgb,
         depth_image=depth,
@@ -65,10 +65,13 @@ def test_write_legacy_rgbd_frame_creates_images_and_metadata(
         3,
         3,
     )
-    assert cv2.imread(
-        (tmp_path / DEPTH_DIR / metadata["frame_id"]).as_posix(),
-        cv2.IMREAD_UNCHANGED,
-    ).dtype == np.uint16
+    assert (
+        cv2.imread(
+            (tmp_path / DEPTH_DIR / metadata["frame_id"]).as_posix(),
+            cv2.IMREAD_UNCHANGED,
+        ).dtype
+        == np.uint16
+    )
 
     records = read_metadata(tmp_path)
     assert records == [metadata]
@@ -112,7 +115,7 @@ def test_write_aligned_rgbd_frame_uses_contract_fields(tmp_path: Path) -> None:
     assert read_metadata(tmp_path) == [metadata]
 
 
-def test_frame_stem_from_host_wall_ns_uses_legacy_milliseconds() -> None:
+def test_frame_stem_from_host_wall_ns_uses_milliseconds() -> None:
     assert frame_stem_from_host_wall_ns(1_234_567_890) == "1235"
 
 
@@ -141,7 +144,7 @@ def test_sync_frame_metadata_is_a_noop_before_the_first_frame(
     assert sync_frame_metadata(tmp_path) is None
 
 
-def test_write_legacy_camera_sidecars_writes_numeric_calibration_formats(
+def test_write_camera_sidecars_writes_numeric_calibration_formats(
     tmp_path: Path,
 ) -> None:
     intrinsics = CameraIntrinsics(
@@ -151,7 +154,7 @@ def test_write_legacy_camera_sidecars_writes_numeric_calibration_formats(
         depth_scale_to_mm=0.25,
     )
 
-    paths = write_legacy_camera_sidecars(tmp_path, intrinsics)
+    paths = write_camera_sidecars(tmp_path, intrinsics)
 
     assert paths[CAM_K] == tmp_path / CAM_K
     assert (tmp_path / CAM_K).read_text().splitlines() == [
@@ -182,16 +185,16 @@ def test_frame_writer_refuses_collision_and_invalid_rgbd(tmp_path: Path) -> None
         "host_wall_timestamp_ns": 3_000_000,
         "frame_stem": "000000",
     }
-    write_legacy_rgbd_frame(tmp_path, **kwargs)
+    write_rgbd_frame(tmp_path, **kwargs)
 
     with pytest.raises(FileExistsError, match="Refusing to overwrite"):
-        write_legacy_rgbd_frame(tmp_path, **kwargs)
+        write_rgbd_frame(tmp_path, **kwargs)
 
     invalid = dict(kwargs)
     invalid["frame_stem"] = "000001"
     invalid["depth_image"] = np.zeros((3, 2), dtype=np.uint16)
     with pytest.raises(ValueError, match="dimensions must match"):
-        write_legacy_rgbd_frame(tmp_path, **invalid)
+        write_rgbd_frame(tmp_path, **invalid)
 
 
 def test_frame_writer_rolls_back_committed_files_on_control_flow_exception(
@@ -204,7 +207,7 @@ def test_frame_writer_rolls_back_committed_files_on_control_flow_exception(
     monkeypatch.setattr(frame_writer, "append_frame_metadata", interrupt_metadata)
 
     with pytest.raises(KeyboardInterrupt):
-        write_legacy_rgbd_frame(
+        write_rgbd_frame(
             tmp_path,
             rgb_image=np.zeros((2, 3, 3), dtype=np.uint8),
             depth_image=np.zeros((2, 3), dtype=np.uint16),
@@ -228,7 +231,7 @@ def test_camera_sidecars_refuse_overwrite(tmp_path: Path) -> None:
         height=720,
         depth_scale_to_mm=1.0,
     )
-    write_legacy_camera_sidecars(tmp_path, intrinsics)
+    write_camera_sidecars(tmp_path, intrinsics)
 
     with pytest.raises(FileExistsError, match="camera sidecar"):
-        write_legacy_camera_sidecars(tmp_path, intrinsics)
+        write_camera_sidecars(tmp_path, intrinsics)

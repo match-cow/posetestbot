@@ -224,14 +224,13 @@ def discover_render_jobs(
     render_script: str | Path,
     subdir: str,
     blenderproc_executable: str,
+    annotation_mode: str,
     sensor_names: Sequence[str] | None = None,
-    annotation_mode: str | None = "pose_and_masks",
 ) -> list[RenderJob]:
     input_path = Path(input_folder)
     script_path = Path(render_script)
     validate_subdir(subdir)
-    if annotation_mode is not None:
-        validate_annotation_mode(annotation_mode)
+    validate_annotation_mode(annotation_mode)
     if not input_path.is_dir():
         raise FileNotFoundError(f"Input folder not found: {input_path}")
     if not script_path.is_file():

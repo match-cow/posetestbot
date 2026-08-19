@@ -742,6 +742,7 @@ def inspect_annotation_setup(
     warnings: list[dict[str, str]] = []
     counts = {"sensors": 0, "frames": 0, "instances": 0}
     provenance: dict[str, Any] = {}
+    configured_mode: str | None = None
 
     try:
         config = load_run_config_for_run_root(root)
@@ -752,6 +753,17 @@ def inspect_annotation_setup(
                     "Ground truth requires a run configured in pose_template dataset mode.",
                 )
             )
+        if config.get("capture", {}).get("intent") != "dataset":
+            blockers.append(
+                _issue(
+                    "dataset_capture_intent_required",
+                    "Ground truth requires a run configured for dataset capture.",
+                )
+            )
+        raw_mode = config.get("bop", {}).get("annotation_mode")
+        if raw_mode not in {"none", *ANNOTATION_MODES}:
+            raise ValueError("Run config BOP annotation mode is invalid")
+        configured_mode = str(raw_mode)
     except (FileNotFoundError, OSError, ValueError) as exc:
         config = {}
         blockers.append(_issue("invalid_run_config", str(exc)))
@@ -870,22 +882,32 @@ def inspect_annotation_setup(
             )
         )
 
+    pose_blockers = list(common_blockers)
+    if configured_mode != "pose":
+        pose_blockers.append(
+            _issue(
+                "annotation_mode_not_configured",
+                "Run setup does not request pose-only ground truth.",
+            )
+        )
+    if configured_mode != "pose_and_masks":
+        full_blockers.append(
+            _issue(
+                "annotation_mode_not_configured",
+                "Run setup does not request pose-and-mask ground truth.",
+            )
+        )
+
     return {
         "schema_version": "bop_annotation_setup.v1",
         "run_root": root.as_posix(),
+        "configured_mode": configured_mode,
         "runtime": runtime,
         "toolkit": toolkit,
-        # Common readiness is retained for older clients.  New clients should
-        # use readiness_by_mode because only the mask product needs the toolkit.
-        "readiness": {
-            "ready": not common_blockers,
-            "blockers": common_blockers,
-            "warnings": warnings,
-        },
         "readiness_by_mode": {
             "pose": {
-                "ready": not common_blockers,
-                "blockers": common_blockers,
+                "ready": not pose_blockers,
+                "blockers": pose_blockers,
                 "warnings": pose_warnings,
             },
             "pose_and_masks": {

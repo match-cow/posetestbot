@@ -63,12 +63,9 @@ from posetestbot.sensors.registry import get_sensor_adapter, sensor_folder_name
 
 
 LIBRARY_SCHEMA_VERSION = "calibration_library.v1"
-SELECTION_SCHEMA_VERSION = "calibration_profile_selection.v1"
-COMPOSITE_SELECTION_SCHEMA_VERSION = "calibration_profile_selection.v2"
-SUPPORTED_SELECTION_SCHEMA_VERSIONS = {
-    SELECTION_SCHEMA_VERSION,
-    COMPOSITE_SELECTION_SCHEMA_VERSION,
-}
+SELECTION_SCHEMA_VERSION = "calibration_profile_selection.v2"
+COMPOSITE_SELECTION_SCHEMA_VERSION = SELECTION_SCHEMA_VERSION
+SUPPORTED_SELECTION_SCHEMA_VERSIONS = {SELECTION_SCHEMA_VERSION}
 SNAPSHOT_PARENT = Path("processed") / "calibration_inputs"
 MAX_PROFILE_ARTIFACT_BYTES = 16 * 1024 * 1024
 RESOLUTION_IMAGE_SIZES = {
@@ -558,7 +555,7 @@ def _select_profile(
                     "static_calibration_reference_unverified",
                     f"Static calibration profile {profile.profile_id} does not "
                     "contain verified robot_pose.v1 Sunrise reference-frame "
-                    "provenance. Recalibrate with v1 pose packets; legacy static "
+                    "provenance. Recalibrate with v1 pose packets; retired static "
                     "profiles are not reusable in dataset runs.",
                     sensor_key=sensor_key,
                 )
@@ -694,7 +691,6 @@ def _normalize_setup(
     *,
     sensors: Any = None,
     resolution: Any = None,
-    robot_pose_sunrise_reference_frame_path: Any = None,
     require_available: bool,
 ) -> dict[str, Any] | None:
     current: Mapping[str, Any] | None = None
@@ -745,19 +741,18 @@ def _normalize_setup(
             raise ValueError(
                 f"{adapter.display_name} supports {supported}, not {resolution!r}"
             )
-    normalized = {"resolution": resolution, "sensors": normalized_sensors}
-    reference_path = (
-        normalize_sunrise_reference_frame_path(robot_pose_sunrise_reference_frame_path)
-        if robot_pose_sunrise_reference_frame_path is not None
-        else (
-            configured_sunrise_reference_frame_path(current)
-            if current is not None
-            else None
-        )
-    )
-    if reference_path is not None:
-        normalized["robot_pose_sunrise_reference_frame_path"] = reference_path
-    return normalized
+    if current is not None:
+        configured_path = configured_sunrise_reference_frame_path(current)
+        if configured_path != POSE_TEMPLATE_BASE_SUNRISE_PATH:
+            raise ValueError(
+                "The destination run must use the canonical PoseTemplateBase "
+                "Sunrise reference frame"
+            )
+    return {
+        "resolution": resolution,
+        "sensors": normalized_sensors,
+        "robot_pose_sunrise_reference_frame_path": (POSE_TEMPLATE_BASE_SUNRISE_PATH),
+    }
 
 
 def _setup_identity(
@@ -797,12 +792,10 @@ def _setup_identity(
         identity.append((sensor_type, device_id, mounting_mode, inverted))
     raw_reference_path = setup.get("robot_pose_sunrise_reference_frame_path")
     try:
-        reference_path = (
-            normalize_sunrise_reference_frame_path(raw_reference_path)
-            if raw_reference_path is not None
-            else None
-        )
+        reference_path = normalize_sunrise_reference_frame_path(raw_reference_path)
     except ValueError:
+        return None
+    if reference_path != POSE_TEMPLATE_BASE_SUNRISE_PATH:
         return None
     return resolution, tuple(sorted(identity)), reference_path
 
@@ -1490,10 +1483,13 @@ def selected_calibration_profile_ids_by_sensor_folder(
     current_setup = {
         "resolution": capture.get("resolution"),
         "sensors": capture["sensors"],
+        "robot_pose_sunrise_reference_frame_path": (POSE_TEMPLATE_BASE_SUNRISE_PATH),
     }
     reference_path = configured_sunrise_reference_frame_path(config)
-    if reference_path is not None:
-        current_setup["robot_pose_sunrise_reference_frame_path"] = reference_path
+    if reference_path != POSE_TEMPLATE_BASE_SUNRISE_PATH:
+        raise ValueError(
+            "Run config does not use the canonical PoseTemplateBase Sunrise frame"
+        )
     if _setup_identity(selection.get("intended_setup")) != _setup_identity(
         current_setup
     ):
@@ -1741,11 +1737,9 @@ def _selection_response(
         "intrinsic_calibration_profiles": intrinsic_relative,
         "sensor_profile_mapping": mapping,
         "sensor_profiles": sensor_profiles,
-        "stage_options": {
-            "calibration_preflight": {"require_valid": True},
-            "camera_rectification": {"intrinsic_profiles": intrinsic_relative},
-            "blenderproc_prepare": {"calibration_profiles": calibration_relative},
-            "bop_export": {"calibration_profiles": calibration_relative},
+        "processing_inputs": {
+            "calibration_profiles": calibration_relative,
+            "intrinsic_calibration_profiles": intrinsic_relative,
         },
         "idempotent": idempotent,
     }
@@ -1758,7 +1752,6 @@ def select_calibration_profile_snapshot(
     expected_bundle_sha256: str,
     sensors: Any = None,
     resolution: Any = None,
-    robot_pose_sunrise_reference_frame_path: Any = None,
     operator: Any = None,
     expected_current_bundle_sha256: Any = None,
     confirm_replace: Any = False,
@@ -1766,203 +1759,33 @@ def select_calibration_profile_snapshot(
     """Validate a promoted source and snapshot both profile collections."""
 
     destination = _resolve_direct_run(run_root, must_exist=False)
-    source = _resolve_direct_run(source_run_root, must_exist=True)
-    if source == destination:
-        raise ValueError("source_run_root must be different from run_root")
-    if (
-        not isinstance(expected_bundle_sha256, str)
-        or len(expected_bundle_sha256) != 64
-        or any(
-            character not in "0123456789abcdef" for character in expected_bundle_sha256
-        )
-    ):
-        raise ValueError("expected_bundle_sha256 must be a lowercase SHA-256 digest")
-    if operator is None:
-        operator = "web_operator"
-    if (
-        not isinstance(operator, str)
-        or not operator.strip()
-        or len(operator.strip()) > 200
-    ):
-        raise ValueError(
-            "operator must be a non-empty string of at most 200 characters"
-        )
-    if expected_current_bundle_sha256 is not None and (
-        not isinstance(expected_current_bundle_sha256, str)
-        or len(expected_current_bundle_sha256) != 64
-        or any(
-            character not in "0123456789abcdef"
-            for character in expected_current_bundle_sha256
-        )
-    ):
-        raise ValueError(
-            "expected_current_bundle_sha256 must be a lowercase SHA-256 digest or null"
-        )
-    if not isinstance(confirm_replace, bool):
-        raise ValueError("confirm_replace must be a literal JSON boolean")
     setup = _normalize_setup(
         destination,
         sensors=sensors,
         resolution=resolution,
-        robot_pose_sunrise_reference_frame_path=(
-            robot_pose_sunrise_reference_frame_path
-        ),
         require_available=True,
     )
     assert setup is not None
-
-    with run_config_lock(source):
-        record, bundle = _inspect_source(source, setup)
-    if bundle is None or not record["valid"] or not record["compatible"]:
-        raise CalibrationSelectionConflict(
-            "Calibration is invalid or incompatible with the intended camera setup",
-            record["issues"],
-        )
-    if bundle.bundle_sha256 != expected_bundle_sha256:
-        raise CalibrationSelectionConflict(
-            "Calibration changed after it was listed; refresh and select it again",
-            [
-                _issue(
-                    "stale_calibration_bundle",
-                    "The source calibration hashes changed after the library was loaded.",
-                )
-            ],
-        )
-
-    with run_config_lock(destination) as locked_destination:
-        locked_setup = _normalize_setup(
-            locked_destination,
-            sensors=sensors,
-            resolution=resolution,
-            robot_pose_sunrise_reference_frame_path=(
-                robot_pose_sunrise_reference_frame_path
-            ),
-            require_available=True,
-        )
-        assert locked_setup is not None
-        locked_mapping, locked_issues = _compatibility(bundle, locked_setup)
-        if locked_issues:
-            raise CalibrationSelectionConflict(
-                "Calibration became incompatible with the destination camera setup",
-                locked_issues,
-            )
-        setup = locked_setup
-        record["sensor_profile_mapping"] = locked_mapping
-        record["sensor_profiles"] = {
-            item["sensor_key"]: item["profile_id"] for item in locked_mapping
-        }
-        selection_source = {
-            "run_root": source.as_posix(),
-            "run_name": record["source_run_name"],
-            "bundle_sha256": bundle.bundle_sha256,
-            **_bundle_source_artifacts(bundle),
-        }
-        try:
-            current = verify_calibration_profile_selection(
-                locked_destination,
-                verify_run_config=False,
-            )
-        except FileNotFoundError:
-            current = None
-        except (OSError, ValueError) as exc:
-            raise CalibrationSelectionConflict(
-                "The current calibration selection is invalid and cannot be replaced safely",
-                [
-                    _issue(
-                        "invalid_current_selection",
-                        _safe_error("Current calibration selection is invalid", exc),
-                    )
-                ],
-            ) from exc
-        current_bundle = (
-            str(current["source"]["bundle_sha256"]) if current is not None else None
-        )
-        if current is not None and _selection_matches_intent(
-            current,
-            schema_version=SELECTION_SCHEMA_VERSION,
-            setup=setup,
-            mapping=locked_mapping,
-            source=selection_source,
-        ):
-            return _selection_response(current, idempotent=True)
-        if current is None and expected_current_bundle_sha256 is not None:
-            raise CalibrationSelectionConflict(
-                "The expected current calibration no longer exists",
-                [
-                    _issue(
-                        "current_selection_missing",
-                        "No current calibration selection exists for the supplied compare-and-swap hash.",
-                    )
-                ],
-            )
-        if current is not None:
-            if expected_current_bundle_sha256 != current_bundle:
-                raise CalibrationSelectionConflict(
-                    "The current calibration changed; refresh before replacing it",
-                    [
-                        _issue(
-                            "stale_current_calibration_bundle",
-                            "expected_current_bundle_sha256 does not match the active selection.",
-                        )
-                    ],
-                )
-            if confirm_replace is not True:
-                raise CalibrationSelectionConflict(
-                    "Replacing the active calibration requires explicit confirmation",
-                    [
-                        _issue(
-                            "calibration_replacement_confirmation_required",
-                            "Set confirm_replace to literal true after reviewing the replacement.",
-                        )
-                    ],
-                )
-            blockers = calibration_selection_replacement_blockers(locked_destination)
-            if blockers:
-                raise CalibrationSelectionConflict(
-                    "Calibration cannot be replaced after capture or derived dataset material exists",
-                    [
-                        {
-                            "code": "calibration_replacement_blocked",
-                            "message": (
-                                "Create a new run to use another calibration; this run already "
-                                "contains capture or derived dataset material."
-                            ),
-                            "blockers": blockers,
-                        }
-                    ],
-                )
-        calibration_path, intrinsic_path = _write_snapshot(locked_destination, bundle)
-        calibration_relative = _relative(calibration_path, locked_destination)
-        intrinsic_relative = _relative(intrinsic_path, locked_destination)
-        selected_at = datetime.now(UTC).replace(microsecond=0).isoformat()
-        mapping = list(record["sensor_profile_mapping"])
-        sensor_profiles = dict(record["sensor_profiles"])
-        selection = {
-            "schema_version": SELECTION_SCHEMA_VERSION,
-            "selected_at": selected_at,
-            "operator": operator.strip(),
-            "source": selection_source,
-            "snapshot": {
-                "directory": _relative(calibration_path.parent, locked_destination),
-                "calibration_profiles": {
-                    "relative_path": calibration_relative,
-                    "sha256": bundle.calibration_sha256,
-                    "size_bytes": len(bundle.calibration_bytes),
-                    "schema_version": bundle.calibration_schema_version,
-                },
-                "intrinsic_calibration_profiles": {
-                    "relative_path": intrinsic_relative,
-                    "sha256": bundle.intrinsic_sha256,
-                    "size_bytes": len(bundle.intrinsic_bytes),
-                    "schema_version": bundle.intrinsic_schema_version,
-                },
-            },
-            "intended_setup": setup,
-            "sensor_profile_mapping": mapping,
-            "sensor_profiles": sensor_profiles,
-        }
-        atomic_write_json(_selection_path(locked_destination), selection)
-    return _selection_response(selection, idempotent=False)
+    sensor_keys = sorted(
+        f"{sensor['sensor_type']}:{sensor['device_id']}"
+        for sensor in setup["sensors"]
+        if sensor.get("enabled", True) is True
+    )
+    return select_calibration_profile_composite_snapshot(
+        run_root,
+        source_selections=[
+            {
+                "source_run_root": str(source_run_root),
+                "expected_bundle_sha256": expected_bundle_sha256,
+                "sensor_keys": sensor_keys,
+            }
+        ],
+        sensors=sensors,
+        resolution=resolution,
+        operator=operator,
+        expected_current_bundle_sha256=expected_current_bundle_sha256,
+        confirm_replace=confirm_replace,
+    )
 
 
 def select_calibration_profile_composite_snapshot(
@@ -1971,7 +1794,6 @@ def select_calibration_profile_composite_snapshot(
     source_selections: Any,
     sensors: Any = None,
     resolution: Any = None,
-    robot_pose_sunrise_reference_frame_path: Any = None,
     operator: Any = None,
     expected_current_bundle_sha256: Any = None,
     confirm_replace: Any = False,
@@ -2009,9 +1831,6 @@ def select_calibration_profile_composite_snapshot(
         destination,
         sensors=sensors,
         resolution=resolution,
-        robot_pose_sunrise_reference_frame_path=(
-            robot_pose_sunrise_reference_frame_path
-        ),
         require_available=True,
     )
     assert setup is not None
@@ -2227,9 +2046,6 @@ def select_calibration_profile_composite_snapshot(
             locked_destination,
             sensors=sensors,
             resolution=resolution,
-            robot_pose_sunrise_reference_frame_path=(
-                robot_pose_sunrise_reference_frame_path
-            ),
             require_available=True,
         )
         assert locked_setup is not None
@@ -2385,7 +2201,6 @@ def selected_calibration_run_config_defaults(
     requested_calibration_profiles: str | None,
     infer_when_omitted: bool,
     expected_bundle_sha256: str | None = None,
-    robot_pose_sunrise_reference_frame_path: str | None = None,
 ) -> dict[str, Any] | None:
     """Resolve a verified selection when saving the destination run config."""
 
@@ -2472,22 +2287,8 @@ def selected_calibration_run_config_defaults(
     setup = {
         "resolution": resolution,
         "sensors": [sensor.to_dict() for sensor in sensors],
+        "robot_pose_sunrise_reference_frame_path": (POSE_TEMPLATE_BASE_SUNRISE_PATH),
     }
-    if robot_pose_sunrise_reference_frame_path is not None:
-        setup["robot_pose_sunrise_reference_frame_path"] = (
-            normalize_sunrise_reference_frame_path(
-                robot_pose_sunrise_reference_frame_path
-            )
-        )
-    else:
-        try:
-            current_config = load_run_config_for_run_root(root)
-        except FileNotFoundError:
-            current_config = None
-        if current_config is not None:
-            reference_path = configured_sunrise_reference_frame_path(current_config)
-            if reference_path is not None:
-                setup["robot_pose_sunrise_reference_frame_path"] = reference_path
     if _setup_identity(selection.get("intended_setup")) != _setup_identity(setup):
         raise CalibrationSelectionConflict(
             "The saved camera setup no longer matches the selected calibration",

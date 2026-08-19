@@ -30,7 +30,6 @@ from posetestbot.io.artifacts import (
     CALIBRATION_PROFILE_SELECTION,
     DEPTH_DIR,
     DEPTH_SCALE,
-    FRAME_METADATA_JSONL,
     MATCH_ROBOT_EE_POSES,
     PROCESSED_DIR,
     RAW_ROBOT_EE_POSES,
@@ -39,8 +38,10 @@ from posetestbot.io.artifacts import (
 )
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
 from posetestbot.pose_templates.selection import load_pose_template_selection
+from posetestbot.robot.reference_frames import configured_sunrise_reference_frame_path
 from posetestbot.sensors.contracts import MountingMode, SensorType
 from posetestbot.sensors.registry import sensor_folder_name
+from posetestbot.sync.non_destructive import load_frame_metadata
 
 SCENE_SCHEMA_VERSION = "cell_scene.v1"
 TIMELINE_SCHEMA_VERSION = "cell_timeline.v1"
@@ -84,13 +85,13 @@ def _identity(parent: str | None = None) -> dict[str, Any]:
 
 
 def _canonical_grid_frame(target: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return the supported grid frame, including the legacy v1 default."""
+    """Return the explicitly recorded current grid frame."""
 
     if target.get("target_type") != "aruco_grid":
         return None
-    raw = target.get("frame", DEFAULT_TARGET_SPEC["frame"])
+    raw = target.get("frame")
     if not isinstance(raw, Mapping):
-        return None
+        raise ValueError("ArUco-grid target is missing its explicit frame contract")
     axes = raw.get("axes")
     if not isinstance(axes, Mapping):
         return None
@@ -104,7 +105,9 @@ def _canonical_grid_frame(target: Mapping[str, Any]) -> dict[str, Any] | None:
         },
     }
     expected = DEFAULT_TARGET_SPEC["frame"]
-    return frame if frame == expected else None
+    if frame != expected:
+        raise ValueError("ArUco-grid target uses an unsupported frame contract")
+    return frame
 
 
 def _reference_presentation(reference_frame: str) -> dict[str, Any]:
@@ -190,26 +193,75 @@ def _read_mapping(path: Path) -> Mapping[str, Any]:
     return value
 
 
-def _matched_timeline(sensor_folder: Path) -> list[dict[str, Any]]:
+def _matched_timeline(
+    sensor_folder: Path,
+    frame_metadata: list[Mapping[str, Any]],
+    *,
+    expected_run_id: str,
+    expected_reference_frame_path: str,
+) -> list[dict[str, Any]]:
     values = _read_mapping(sensor_folder / MATCH_ROBOT_EE_POSES)
+    metadata_by_id: dict[str, Mapping[str, Any]] = {}
+    for line_number, record in enumerate(frame_metadata, start=1):
+        frame_id = record.get("frame_id")
+        frame_index = record.get("frame_index")
+        if not isinstance(frame_id, str) or not frame_id:
+            raise ValueError(
+                f"Frame metadata line {line_number} requires a nonempty frame_id"
+            )
+        if (
+            isinstance(frame_index, bool)
+            or not isinstance(frame_index, int)
+            or frame_index < 0
+        ):
+            raise ValueError(
+                f"Frame metadata line {line_number} requires a non-negative frame_index"
+            )
+        metadata_by_id[frame_id] = record
+    if set(values) != set(metadata_by_id):
+        raise ValueError(
+            "Current frame metadata and matched robot poses must cover identical "
+            f"frame IDs in {sensor_folder}"
+        )
     poses: list[dict[str, Any]] = []
     for filename, record in values.items():
         if not isinstance(record, Mapping) or not isinstance(
             record.get("robot_ee_pose"), Mapping
         ):
             raise ValueError(f"Invalid matched robot pose record {filename!r}")
-        try:
-            frame_index = int(Path(str(filename)).stem)
-        except ValueError as exc:
+        source_packet = record.get("source_packet")
+        if (
+            not isinstance(source_packet, Mapping)
+            or source_packet.get("schema_version") != "robot_pose.v1"
+            or source_packet.get("packet_kind") != "pose"
+            or source_packet.get("run_id") != expected_run_id
+            or source_packet.get("from_frame") != "robot_flange"
+            or source_packet.get("to_frame") != "template_base"
+            or source_packet.get("sunrise_reference_frame_path")
+            != expected_reference_frame_path
+        ):
             raise ValueError(
-                f"Matched pose frame must have a numeric stem: {filename!r}"
-            ) from exc
+                f"Matched pose record {filename!r} lacks current robot_pose.v1 provenance"
+            )
+        metadata = metadata_by_id[str(filename)]
+        timestamp_ns = record.get("image_timestamp_ns")
+        if (
+            isinstance(timestamp_ns, bool)
+            or not isinstance(timestamp_ns, int)
+            or timestamp_ns <= 0
+        ):
+            raise ValueError(
+                f"Matched pose record {filename!r} lacks image_timestamp_ns"
+            )
+        if metadata.get("sync_timestamp_ns") != timestamp_ns:
+            raise ValueError(
+                f"Matched pose record {filename!r} does not match current frame metadata"
+            )
         poses.append(
             {
-                "frame_index": frame_index,
+                "frame_index": int(metadata["frame_index"]),
                 "frame_id": str(filename),
-                "timestamp_ns": record.get("frame_timestamp_ns")
-                or record.get("timestamp_ns"),
+                "timestamp_ns": timestamp_ns,
                 "motion": record.get("motion"),
                 "matrix": _kuka_pose(record["robot_ee_pose"]),
             }
@@ -217,25 +269,51 @@ def _matched_timeline(sensor_folder: Path) -> list[dict[str, Any]]:
     return sorted(poses, key=lambda item: (item["frame_index"], item["frame_id"]))
 
 
-def _raw_timeline(path: Path) -> list[dict[str, Any]]:
+def _raw_timeline(
+    path: Path,
+    *,
+    expected_run_id: str,
+    expected_reference_frame_path: str,
+) -> list[dict[str, Any]]:
     values = _read_mapping(path)
     poses: list[dict[str, Any]] = []
     for key, record in values.items():
         if not isinstance(record, Mapping):
             raise ValueError(f"Invalid raw robot pose record {key!r}")
-        pose = record.get("pose") or record.get("robot_ee_pose")
+        source_packet = record.get("source_packet")
+        if (
+            not isinstance(source_packet, Mapping)
+            or source_packet.get("schema_version") != "robot_pose.v1"
+            or source_packet.get("packet_kind") != "pose"
+            or source_packet.get("run_id") != expected_run_id
+            or source_packet.get("from_frame") != "robot_flange"
+            or source_packet.get("to_frame") != "template_base"
+            or source_packet.get("sunrise_reference_frame_path")
+            != expected_reference_frame_path
+        ):
+            raise ValueError(f"Raw robot pose {key!r} lacks current packet provenance")
+        pose = record.get("pose")
         if not isinstance(pose, Mapping):
             raise ValueError(f"Raw robot pose {key!r} lacks pose coordinates")
         try:
             frame_index = int(key)
-        except ValueError:
-            frame_index = len(poses)
+        except ValueError as exc:
+            raise ValueError(f"Raw robot pose key must be numeric: {key!r}") from exc
+        timestamp_ns = record.get("host_received_timestamp_ns")
+        if (
+            isinstance(timestamp_ns, bool)
+            or not isinstance(timestamp_ns, int)
+            or timestamp_ns <= 0
+        ):
+            raise ValueError(f"Raw robot pose {key!r} lacks host_received_timestamp_ns")
+        frame_id = record.get("framename")
+        if not isinstance(frame_id, str | int) or isinstance(frame_id, bool):
+            raise ValueError(f"Raw robot pose {key!r} lacks framename")
         poses.append(
             {
                 "frame_index": frame_index,
-                "frame_id": str(record.get("framename") or key),
-                "timestamp_ns": record.get("host_received_timestamp_ns")
-                or record.get("host_wall_timestamp_ns"),
+                "frame_id": str(frame_id),
+                "timestamp_ns": timestamp_ns,
                 "motion": record.get("motion"),
                 "matrix": _kuka_pose(pose),
             }
@@ -243,47 +321,39 @@ def _raw_timeline(path: Path) -> list[dict[str, Any]]:
     return sorted(poses, key=lambda item: item["frame_index"])
 
 
-def _stored_image_rotation_degrees(sensor_folder: Path) -> int | None:
-    metadata_path = sensor_folder / FRAME_METADATA_JSONL
-    if not metadata_path.is_file():
+def _stored_image_rotation_degrees(
+    frame_metadata: list[Mapping[str, Any]],
+) -> int | None:
+    rotations = {
+        record.get("image_rotation_degrees")
+        for record in frame_metadata
+        if record.get("image_rotation_degrees") is not None
+    }
+    if not rotations:
         return None
-    try:
-        with metadata_path.open(encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                record = json.loads(line)
-                if not isinstance(record, Mapping):
-                    continue
-                raw = record.get("image_rotation_degrees")
-                if raw is None:
-                    continue
-                rotation = int(raw)
-                if rotation in {0, 180}:
-                    return rotation
-                return None
-    except (OSError, ValueError, json.JSONDecodeError):
-        return None
-    return None
+    if rotations not in ({0}, {180}):
+        raise ValueError("Frame metadata contains inconsistent image rotation")
+    return int(next(iter(rotations)))
 
 
 def _image_presentation(
-    sensor: Mapping[str, Any], sensor_folder: Path
+    sensor: Mapping[str, Any], frame_metadata: list[Mapping[str, Any]]
 ) -> dict[str, Any]:
     inverted = sensor.get("inverted") is True
-    stored_rotation = _stored_image_rotation_degrees(sensor_folder)
-    display_rotation = 180 if inverted and stored_rotation != 180 else 0
-    if not inverted:
-        correction = "not_required"
-    elif stored_rotation == 180:
-        correction = "capture"
-    else:
-        correction = "viewer"
+    stored_rotation = _stored_image_rotation_degrees(frame_metadata)
+    if inverted and stored_rotation != 180:
+        raise ValueError(
+            "An inverted RealSense timeline requires current 180-degree frame metadata"
+        )
+    if not inverted and stored_rotation not in {None, 0}:
+        raise ValueError(
+            "Frame rotation metadata does not match the configured sensor orientation"
+        )
     return {
         "configured_inverted": inverted,
         "stored_rotation_degrees": stored_rotation,
-        "display_rotation_degrees": display_rotation,
-        "correction": correction,
+        "display_rotation_degrees": 0,
+        "correction": "capture" if inverted else "not_required",
     }
 
 
@@ -340,6 +410,7 @@ def _synchronized_source_contexts(
             continue
         path = folder / MATCH_ROBOT_EE_POSES
         if path.is_file():
+            frame_metadata = load_frame_metadata(folder)
             sources.append(
                 {
                     "id": source_id,
@@ -352,6 +423,7 @@ def _synchronized_source_contexts(
                         "depth": folder / DEPTH_DIR,
                     },
                     "depth_scale_to_mm": _depth_scale_to_mm(folder),
+                    "frame_metadata": frame_metadata,
                     "camera": {
                         "sensor_folder": name,
                         "sensor_type": str(sensor.get("sensor_type", "")),
@@ -359,7 +431,9 @@ def _synchronized_source_contexts(
                         "display_name": str(sensor.get("display_name") or name),
                         "mounting_mode": str(sensor.get("mounting_mode", "")),
                         "inverted": sensor.get("inverted") is True,
-                        "image_presentation": _image_presentation(sensor, folder),
+                        "image_presentation": _image_presentation(
+                            sensor, frame_metadata
+                        ),
                     },
                 }
             )
@@ -370,38 +444,37 @@ def _timeline_sources(
     run_root: Path, config: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
     sources = _synchronized_source_contexts(run_root, config)
+    expected_run_id = str(config["run_id"])
+    expected_reference_path = configured_sunrise_reference_frame_path(config)
     if sources:
         for source in sources:
-            source["poses"] = _matched_timeline(Path(source["source"]).parent)
+            source["poses"] = _matched_timeline(
+                Path(source["source"]).parent,
+                source["frame_metadata"],
+                expected_run_id=expected_run_id,
+                expected_reference_frame_path=expected_reference_path,
+            )
         return sources
-    enabled_names = [
-        sensor_folder_name(
-            str(sensor.get("sensor_type", "")),
-            str(sensor.get("device_id", "")),
-        )
-        for sensor in config.get("capture", {}).get("sensors", [])
-        if isinstance(sensor, Mapping) and sensor.get("enabled", True) is True
+    raw = run_root / RAW_ROBOT_EE_POSES
+    if raw.is_symlink() or not raw.is_file():
+        return []
+    return [
+        {
+            "id": "raw:robot",
+            "label": "Raw robot poses",
+            "source": raw,
+            "kind": "raw",
+            "poses": _raw_timeline(
+                raw,
+                expected_run_id=expected_run_id,
+                expected_reference_frame_path=expected_reference_path,
+            ),
+            "run_root": run_root,
+            "frame_directories": {},
+            "depth_scale_to_mm": None,
+            "camera": None,
+        }
     ]
-    raw_candidates = [run_root / RAW_ROBOT_EE_POSES]
-    raw_candidates.extend(
-        run_root / name / RAW_ROBOT_EE_POSES for name in enabled_names
-    )
-    raw = next((path for path in raw_candidates if path.is_file()), None)
-    if raw is not None:
-        return [
-            {
-                "id": "raw:robot",
-                "label": "Raw robot poses",
-                "source": raw,
-                "kind": "raw",
-                "poses": _raw_timeline(raw),
-                "run_root": run_root,
-                "frame_directories": {},
-                "depth_scale_to_mm": None,
-                "camera": None,
-            }
-        ]
-    return []
 
 
 def _camera_frame_path(
@@ -1597,23 +1670,18 @@ def _resolve_camera_frame(
     config = load_run_config_for_run_root(root)
 
     if frame_id is not None:
-        sources = {
-            source["id"]: source
-            for source in _synchronized_source_contexts(
-                root,
-                config,
-                timeline_id=timeline_id,
-            )
-        }
+        sources = {source["id"]: source for source in _timeline_sources(root, config)}
         if timeline_id not in sources:
             raise KeyError(f"Unknown timeline_id: {timeline_id}")
         source = sources[timeline_id]
+        pose = next(
+            (item for item in source["poses"] if item.get("frame_id") == frame_id),
+            None,
+        )
+        if pose is None:
+            raise KeyError(f"Unknown frame_id: {frame_id}")
         try:
-            return source, _camera_frame_path(
-                source,
-                frame_id,
-                modality=modality,
-            )
+            return source, _timeline_camera_frame_path(source, pose, modality=modality)
         except FileNotFoundError as exc:
             raise FileNotFoundError(
                 f"{modality.upper()} frame is unavailable: {frame_id}"

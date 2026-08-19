@@ -19,7 +19,7 @@ from posetestbot.calibration.intrinsics import (
     factory_intrinsic_profile,
     projection_is_opencv_compatible,
 )
-from posetestbot.sensors.frame_writer import write_legacy_camera_sidecars
+from posetestbot.sensors.frame_writer import write_camera_sidecars
 from posetestbot.sensors.contracts import SensorType
 from posetestbot.sensors.discovery import (
     _parse_realsense_lsusb_devices,
@@ -503,7 +503,17 @@ def test_inverse_sdk_distortion_is_preserved_but_not_misapplied_to_opencv(
 
     assert inverted.distortion_model == "inverse_brown_conrady"
     assert inverted.distortion == (0.1, -0.02, -0.003, 0.004, 0.005)
-    write_legacy_camera_sidecars(tmp_path, inverted)
+    write_camera_sidecars(tmp_path, inverted)
+    (tmp_path / FRAME_METADATA_JSONL).write_text(
+        json.dumps(
+            {
+                "schema_version": "frame_metadata.v1",
+                "sensor_id": "D435-TEST",
+                "orientation": "inverted",
+            }
+        )
+        + "\n"
+    )
 
     assert len((tmp_path / CAM_K).read_text().splitlines()) == 3
     profile = factory_intrinsic_profile(tmp_path)
@@ -535,7 +545,17 @@ def test_exact_zero_inverse_distortion_is_model_invariant_for_opencv(
         model="distortion.inverse_brown_conrady",
     )
     native = camera_intrinsics_from_realsense(sdk_intrinsics, 1.0)
-    write_legacy_camera_sidecars(tmp_path, native)
+    write_camera_sidecars(tmp_path, native)
+    (tmp_path / FRAME_METADATA_JSONL).write_text(
+        json.dumps(
+            {
+                "schema_version": "frame_metadata.v1",
+                "sensor_id": "D435-TEST",
+                "orientation": "normal",
+            }
+        )
+        + "\n"
+    )
 
     profile = factory_intrinsic_profile(tmp_path)
 

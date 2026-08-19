@@ -10,15 +10,12 @@ import {
   type WorkflowProgressStatus,
 } from "@/lib/workflow-session"
 
-interface RobotTarget { ip: string; port: number }
 interface OperatorContextValue {
   bootstrap: Bootstrap
   runs: RunIndexItem[]
   selectedRun: string
   selectedRunEpoch: number
   selectRun: (path: string) => boolean
-  robotTarget: RobotTarget
-  setRobotTarget: (target: RobotTarget) => void
   currentWorkflow: ActiveWorkflow | null
   rememberWorkflowStep: (journey: WorkflowJourneyId, stepId: string, status: WorkflowProgressStatus) => void
 }
@@ -26,6 +23,22 @@ interface OperatorContextValue {
 const OperatorContext = createContext<OperatorContextValue | null>(null)
 const WORKFLOW_SESSION_STORAGE_KEY = "posetestbot.workflowSessions.v1"
 const CUSTOM_RUN_STORAGE_KEY = "posetestbot.customRunFolders.v1"
+const CONTRACT_RESET_STORAGE_KEY = "posetestbot.currentContracts.v4"
+
+function resetRetiredBrowserState() {
+  try {
+    if (localStorage.getItem(CONTRACT_RESET_STORAGE_KEY) === "reset") return
+    for (const key of [
+      "posetestbot.selectedRun",
+      CUSTOM_RUN_STORAGE_KEY,
+      WORKFLOW_SESSION_STORAGE_KEY,
+      "posetestbot.robotTarget",
+    ]) localStorage.removeItem(key)
+    localStorage.setItem(CONTRACT_RESET_STORAGE_KEY, "reset")
+  } catch {
+    // Denied browser storage must not prevent the console from starting.
+  }
+}
 
 function loadCustomRunFolders() {
   try {
@@ -76,6 +89,7 @@ function isContained(path: string, roots: string[]) {
 }
 
 export function OperatorProvider({ children }: { children: React.ReactNode }) {
+  resetRetiredBrowserState()
   const bootstrapQuery = useQuery({ queryKey: ["bootstrap"], queryFn: () => api<Bootstrap>("/ui/bootstrap"), staleTime: Infinity })
   const runsQuery = useQuery({
     queryKey: ["runs"],
@@ -88,14 +102,6 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
     epoch: 0,
   }))
   const [customRunFolders, setCustomRunFolders] = useState(loadCustomRunFolders)
-  const [robotOverride, setRobotOverride] = useState<RobotTarget | null>(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem("posetestbot.robotTarget") ?? "null") as Partial<RobotTarget> | null
-      return saved && typeof saved.ip === "string" && Number.isInteger(saved.port)
-        ? { ip: saved.ip, port: Number(saved.port) }
-        : null
-    } catch { return null }
-  })
   const [workflowSessions, setWorkflowSessions] = useState<Record<string, ActiveWorkflow>>(loadWorkflowSessions)
 
   const bootstrap = bootstrapQuery.data
@@ -116,7 +122,6 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
       ? selectedOverride.path
       : runs.find((run) => run.config_valid)?.path ?? bootstrap.default_run_root
     : ""
-  const robotTarget = robotOverride ?? bootstrap?.robot ?? null
   const currentWorkflow = workflowSessions[selectedRun] ?? null
   const rememberWorkflowStep = useCallback((journey: WorkflowJourneyId, stepId: string, status: WorkflowProgressStatus) => {
     const workflow = activeWorkflow(journey, stepId, status)
@@ -137,7 +142,7 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
     const error = bootstrapQuery.error ?? runsQuery.error
     return <div className="grid min-h-screen place-items-center bg-background p-8 text-destructive">{error instanceof Error ? error.message : "Unable to load console bootstrap"}</div>
   }
-  if (bootstrapQuery.isPending || runsQuery.isPending || !bootstrap || !selectedRun || !robotTarget) {
+  if (bootstrapQuery.isPending || runsQuery.isPending || !bootstrap || !selectedRun) {
     return <div className="grid min-h-screen place-items-center bg-background text-sm text-muted-foreground">Loading operator console…</div>
   }
 
@@ -158,12 +163,7 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem("posetestbot.selectedRun", path)
     return true
   }
-  const setRobotTarget = (target: RobotTarget) => {
-    setRobotOverride(target)
-    localStorage.setItem("posetestbot.robotTarget", JSON.stringify(target))
-  }
-
-  return <OperatorContext.Provider value={{ bootstrap, runs, selectedRun, selectedRunEpoch: selectedOverride.epoch, selectRun, robotTarget, setRobotTarget, currentWorkflow, rememberWorkflowStep }}>{children}</OperatorContext.Provider>
+  return <OperatorContext.Provider value={{ bootstrap, runs, selectedRun, selectedRunEpoch: selectedOverride.epoch, selectRun, currentWorkflow, rememberWorkflowStep }}>{children}</OperatorContext.Provider>
 }
 
 export function useOperator() {

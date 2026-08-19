@@ -1,99 +1,85 @@
 # CLI and scripts
 
-Run repository scripts through `uv` from the repository root:
+Run repository Python through `uv run python`. The operator console queues the
+same fixed recipes through `LocalJobRunner`; the scripts are useful for
+software checks and supervised terminal operation.
+
+## Console and read-only status
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python scripts/<script>.py --help
-```
-
-## Installed service entry point
-
-```bash
-POSETESTBOT_WEB_HOST=127.0.0.1 \
-POSETESTBOT_WEB_PORT=5000 \
 uv run posetestbot-web
+uv run python scripts/robot_status.py --json
+uv run python scripts/sensor_status.py --json
+uv run python scripts/sensor_adapters.py --json
+uv run python scripts/runtime_status.py --json
 ```
 
-The web server owns a `LocalJobRunner` and releases its jobs during process
-shutdown. It is unauthenticated; bind only to localhost or a trusted lab
-network.
+Status commands do not authorize capture or robot motion.
 
-## Read-only status
+## Run creation and fixed orchestration
 
-| Command | Contract |
+| Command | Purpose |
 | --- | --- |
-| `scripts/robot_status.py --json` | Read-only iiwa status; never authorizes motion |
-| `scripts/sensor_status.py --json` | Current supported camera visibility |
-| `scripts/sensor_adapters.py --json` | Static adapter registry; no hardware open |
-| `scripts/runtime_status.py --json` | Acquisition-side optional runtime visibility |
+| `scripts/create_run_config.py <run> --intent … --annotation-mode …` | Create strict `run_config.v4` and update the run manifest |
+| `scripts/plan_capture.py <run> [--json]` | Write the canonical non-executing capture plan |
+| `scripts/run_preflight.py <run> --check --write` | Write run readiness evidence without authorizing execution |
+| `scripts/run_capture.py <run> --intent … --allow-cameras --allow-real-robot` | Internal/supervised worker for the one physical capture recipe |
+| `scripts/process_dataset.py <run>` | Run sync → quality → rectification → calibrated base BOP export |
 
-## Run planning and orchestration
-
-| Command | Contract |
-| --- | --- |
-| `scripts/create_run_config.py <run>` | Create validated `run_config.v3` |
-| `scripts/run_preflight.py <run>` | Build/write run preflight evidence |
-| `scripts/run_pipeline_sequence.py <run> --sequence <id> [--plan-only]` | Execute or plan a registered sequence |
-| `scripts/run_capture_plan_stage.py <run>` | Write capture plan |
-| `scripts/run_capture_plan_preflight.py <run>` | Write capture-plan preflight under its gate contract |
-| `scripts/run_capture_execution_plan.py <run>` | Write gated execution plan; physical authorization rules apply |
-| `scripts/run_capture_execution_stage.py <run>` | Execute supervised physical capture; do not run without authorization |
-
-Plan-only example:
+Example safe setup:
 
 ```bash
-uv run python scripts/create_run_config.py working_data/test_run
-uv run python scripts/run_pipeline_sequence.py working_data/test_run \
-  --sequence real_full_capture_validation --plan-only
+uv run python scripts/create_run_config.py working_data/test_run \
+  --intent dataset --annotation-mode none
+uv run python scripts/plan_capture.py working_data/test_run --json
 ```
 
-## Synchronization and quality
+There is no stage or sequence registry and no caller-supplied stage list.
+`run_capture.py` touches cameras and the robot and must only be used with
+explicit operator authorization. Its two flags are fresh acknowledgements,
+not saved configuration.
 
-| Command | Contract |
+The lower-level capture-plan, preflight, execution-plan, execution, sync,
+quality, rectification, and BOP scripts remain implementation workers for the
+fixed recipes. They are not alternative operator workflows.
+
+## Calibration and reusable inputs
+
+| Command | Purpose |
 | --- | --- |
-| `scripts/sync_run_non_destructive.py <run>` | Create synchronized derived output without moving/deleting raw frames |
-| `scripts/run_sync_quality.py <run>` | Compute/write in-motion timing quality |
-| `scripts/report_robot_pose_cadence.py <run>` | Write optional pose cadence evidence |
+| `run_calibration_target_generate.py` | Generate a reusable target bundle |
+| `run_calibration_target_import.py` | Import a pinned target bundle |
+| `run_calibration_target_select.py` | Snapshot a target into a run |
+| `run_calibration_attempt.py` | Execute one intent-level calibration attempt |
+| `validate_calibration_profiles.py` | Validate current calibration profiles |
+| `run_pose_template_orientation_analysis.py` | Analyze stable orientations for one canonical workpiece revision |
+| `run_pose_template_preview.py` | Produce an exact bounded template preview |
+| `run_pose_template_generate.py` | Publish an immutable pose-template bundle |
+| `run_pose_template_select.py` | Snapshot a bundle into a dataset run |
 
-Keep `sync_quality` immediately after `sync_run` in reusable pipeline
-sequences unless an operator-facing contract explicitly bypasses it.
+Calibration review and promotion are explicit workflow/API operations. The
+removed observations/candidates/solver/validation stage chain has no CLI
+entry points.
 
-## Calibration
+## Optional annotations and Inspect evaluation
 
-| Command family | Contract |
+| Command | Purpose |
 | --- | --- |
-| `run_calibration_target_{generate,import,select}.py` | Manage reusable and run-selected target bundles |
-| `run_aruco_{coverage,detection,pose,stage}.py` | Target detection/coverage support |
-| `run_intrinsic_calibration_stage.py` | Estimate intrinsic profiles |
-| `run_camera_rectification.py` | Derive rectification evidence |
-| `run_calibration_{preflight,observations,candidates,solver,validation}.py` | Compatibility stage/report writers |
-| `run_calibration_attempt.py` | Execute an intent-level attempt or explicit promotion |
-| `validate_calibration_profiles.py` | Validate profile schema/frame contracts |
+| `run_blenderproc_prepare_stage.py` | Prepare the explicit optional render inputs |
+| `run_blenderproc_render_stage.py` | Render requested GT/masks through BlenderProc |
+| `run_bop_annotations.py` | Generate the run-configured optional annotation product |
+| `run_bop_evaluation.py` | Run the narrow official BOP19 evaluation adapter |
 
-## Workpieces, templates, and BOP
-
-| Command family | Contract |
-| --- | --- |
-| `run_object_catalog_import.py` | Import catalogue metadata/assets under catalogue rules |
-| `run_workpiece_unit_correction.py` | Create a confirmed canonical geometry revision |
-| `run_pose_template_{preview,generate,select}.py` | Validate, publish, and snapshot immutable templates |
-| `run_pose_template_orientation_analysis.py` | Build reproducible orientation cache |
-| `run_blenderproc_{prepare,render}_stage.py` | Prepare/render optional GT/mask inputs |
-| `run_bop_export_stage.py` | Export the run as a BOP dataset |
-| `run_bop_annotations.py` | Generate optional run-scoped pose/mask evidence |
-| `run_bop_evaluation.py --request <path>` | Execute one immutable Inspect-only official-toolkit request |
-
-No script in this repository should run an external pose estimator or convert
-estimator-specific output.
+The base export is produced by `process_dataset.py`. Optional annotation is a
+separate, deliberate step. Evaluation consumes an existing annotation-bearing
+BOP dataset and immutable standard BOP19 CSV; it is not acquisition or
+estimation.
 
 ## Documentation and validation
 
 ```bash
+uv run python scripts/generate_http_api_reference.py --write
 uv run python scripts/generate_http_api_reference.py --check
-uv run --frozen --only-group docs mkdocs build --strict
-UV_CACHE_DIR=/tmp/uv-cache uv run pytest
-git diff --check
+uv run python -m mkdocs build --strict
+uv run pytest tests/test_github_pages.py
 ```
-
-The generated route reference must be refreshed with `--write` whenever the
-Flask route map changes.

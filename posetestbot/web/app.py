@@ -13,8 +13,7 @@ from posetestbot.web.routes.jobs_commands import jobs_commands_bp
 from posetestbot.web.routes.lifecycle import lifecycle_bp
 from posetestbot.web.routes.system_status import system_status_bp
 from posetestbot.web.routes.capture import capture_bp
-from posetestbot.web.routes.pipeline import pipeline_bp
-from posetestbot.web.routes.calibration_stages import calibration_stages_bp
+from posetestbot.web.routes.orchestration import orchestration_bp
 from posetestbot.web.routes.sync_quality import sync_quality_bp
 from posetestbot.web.routes.calibration import calibration_bp
 from posetestbot.web.routes.calibration_library import calibration_library_bp
@@ -114,8 +113,7 @@ def create_app(
     app.register_blueprint(lifecycle_bp)
     app.register_blueprint(system_status_bp)
     app.register_blueprint(capture_bp)
-    app.register_blueprint(pipeline_bp)
-    app.register_blueprint(calibration_stages_bp)
+    app.register_blueprint(orchestration_bp)
     app.register_blueprint(sync_quality_bp)
     app.register_blueprint(calibration_bp)
     app.register_blueprint(calibration_library_bp)

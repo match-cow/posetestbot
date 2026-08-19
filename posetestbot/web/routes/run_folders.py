@@ -434,7 +434,6 @@ def move_run_folder():
             job,
             source_run_root=source.as_posix(),
             destination_run_root=destination.as_posix(),
-            compatibility_alias=source.as_posix(),
         )
     except Exception as exc:
         return _error(exc)

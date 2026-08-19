@@ -77,6 +77,8 @@ def target_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     write_run_config_with_manifest(
         run,
         create_run_config(
+            capture_intent="calibration",
+            bop_annotation_mode="none",
             run_root=run,
             sensors=sensor_configs_from_values(
                 [
@@ -238,7 +240,7 @@ def test_generate_and_select_use_exact_queued_resources(target_client) -> None:
         },
     )
     assert missing_pose.status_code == 400
-    assert "requires source board_to_base" in missing_pose.get_json()["output"]
+    assert "mounting_frame is required" in missing_pose.get_json()["output"]
 
 
 def test_bundle_listing_downloads_and_traversal_rejection(target_client) -> None:
@@ -348,6 +350,7 @@ def test_bundle_delete_rejects_target_active_for_selected_run(target_client) -> 
         run_root=run,
         target_id=bundle["target_id"],
         placement_mode="unknown",
+        mounting_frame="robot_flange",
         library_root=Path(bundle["bundle_path"]).parent,
     )
 
@@ -368,6 +371,7 @@ def test_selection_conflict_returns_concrete_blocker_paths(target_client) -> Non
         run_root=run,
         target_id=bundle["target_id"],
         placement_mode="unknown",
+        mounting_frame="robot_flange",
         library_root=Path(bundle["bundle_path"]).parent,
     )
     sensor = run / "processed" / "synchronized" / "realsense_1"
@@ -379,6 +383,7 @@ def test_selection_conflict_returns_concrete_blocker_paths(target_client) -> Non
         json={
             "run_root": run.as_posix(),
             "placement": "unknown",
+            "mounting_frame": "robot_flange",
         },
     )
 
@@ -394,11 +399,17 @@ def test_selection_conflict_returns_concrete_blocker_paths(target_client) -> Non
         f"processed/synchronized/realsense_1/{ARUCO_DETECTIONS}"
     ]
 
+    replacement = generate_target_bundle(
+        display_name="Replacement target",
+        configuration=configuration(),
+        library_root=Path(bundle["bundle_path"]).parent,
+    )
     response = client.post(
-        f"/calibration-targets/bundles/{bundle['target_id']}/select",
+        f"/calibration-targets/bundles/{replacement['target_id']}/select",
         json={
             "run_root": run.as_posix(),
-            "placement": "template_base_identity",
+            "placement": "unknown",
+            "mounting_frame": "robot_flange",
         },
     )
 

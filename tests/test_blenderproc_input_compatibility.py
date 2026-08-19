@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from posetestbot.blenderproc.preparation import (
     camera_transform_for_sensor,
@@ -24,19 +25,17 @@ def test_blenderproc_read_camera_parameters_allows_missing_distortion(
     np.testing.assert_allclose(dist_coefficients, np.zeros((5, 1)))
 
 
-def test_blenderproc_camera_transform_lookup_falls_back_to_sensor_type() -> None:
+def test_blenderproc_camera_transform_lookup_requires_exact_sensor_key() -> None:
     transforms = {
         "realsense": {"position": [1, 2, 3]},
         "luxonis": {"position": [4, 5, 6]},
         "zed_2i": {"position": [7, 8, 9]},
     }
 
+    with pytest.raises(KeyError, match="No exact camera transform"):
+        camera_transform_for_sensor(transforms, "realsense_123")
+
+    transforms["realsense_123"] = {"position": [10, 20, 30]}
     assert camera_transform_for_sensor(transforms, "realsense_123") == {
-        "position": [1, 2, 3]
-    }
-    assert camera_transform_for_sensor(transforms, "luxonis_abc") == {
-        "position": [4, 5, 6]
-    }
-    assert camera_transform_for_sensor(transforms, "zed_2i_42") == {
-        "position": [7, 8, 9]
+        "position": [10, 20, 30]
     }

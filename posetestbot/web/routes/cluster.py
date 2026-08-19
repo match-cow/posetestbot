@@ -39,16 +39,6 @@ CONTROLLER_ID_RE = re.compile(
     r"[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 SUCCESS_STATES = {"succeeded", "succeeded-with-warning"}
-PUBLIC_RUNTIME_FIELDS = {
-    "runtime_id",
-    "foundationpose_revision",
-    "bop_toolkit_revision",
-    "sif_sha256",
-    "weights_sha256",
-    "foundationpose_license",
-    "foundationpose_license_sha256",
-    "qualified",
-}
 PUBLIC_PROFILE_FIELDS = {
     "profile_id",
     "enabled",
@@ -235,7 +225,9 @@ def _public_estimator_runtime(value: Any) -> dict[str, Any]:
 def _public_estimator(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise RuntimeError("The controller returned an invalid estimator")
-    estimator_id = _safe_public_string(value.get("estimator_id"), PUBLIC_ESTIMATOR_ID_RE)
+    estimator_id = _safe_public_string(
+        value.get("estimator_id"), PUBLIC_ESTIMATOR_ID_RE
+    )
     if estimator_id is None:
         raise RuntimeError("The controller returned an invalid estimator identifier")
     public = _selected_mapping(value, PUBLIC_ESTIMATOR_FIELDS)
@@ -408,6 +400,29 @@ def _controller_status() -> dict[str, Any]:
             "integration": integration,
             "blockers": [{"code": "controller_unavailable", "message": str(exc)}],
         }
+    if (
+        status.get("schema_version") != "posetestbot_cluster_status.v1"
+        or not isinstance(status.get("domains"), Mapping)
+        or not isinstance(status.get("estimators"), list)
+        or not isinstance(status.get("domains", {}).get("storage"), Mapping)
+        or not isinstance(status.get("domains", {}).get("scheduler"), Mapping)
+        or any(not isinstance(item, Mapping) for item in status.get("estimators", []))
+    ):
+        return {
+            "schema_version": "posetestbot_cluster_status_proxy.v1",
+            "ready": False,
+            "available": False,
+            "integration": integration,
+            "blockers": [
+                {
+                    "code": "controller_contract_invalid",
+                    "message": (
+                        "The cluster controller did not return the current status "
+                        "contract with domains and advertised estimators."
+                    ),
+                }
+            ],
+        }
     blockers = []
     for index, item in enumerate(status.get("blockers") or []):
         if isinstance(item, Mapping):
@@ -431,7 +446,7 @@ def _controller_status() -> dict[str, Any]:
         for item in status.get("profiles", [])
         if isinstance(item, Mapping)
     ]
-    runtime = _selected_mapping(status.get("runtime"), PUBLIC_RUNTIME_FIELDS)
+    runtime = _public_estimator_runtime(status.get("runtime"))
     features = _selected_mapping(
         status.get("features"),
         {
@@ -474,40 +489,9 @@ def _controller_status() -> dict[str, Any]:
         for item in status.get("configuration_blockers", [])
     ]
     if not estimators:
-        legacy_estimation_blockers = feature_blockers.get("estimation", [])
-        estimators = [
-            {
-                "estimator_id": "foundationpose",
-                "driver_id": "foundationpose.v1",
-                "display_name": "FoundationPose",
-                "installed": True,
-                "configured": runtime.get("qualified") is True,
-                "enabled": features.get("pose_estimation") is True,
-                "ready": (
-                    status.get("ready") is True
-                    and features.get("pose_estimation") is True
-                ),
-                "blockers": legacy_estimation_blockers,
-                "readiness_blockers": legacy_estimation_blockers,
-                "input_contracts": ["posetestbot.bop.v5.pose_and_masks"],
-                "output_contract": "bop19.csv.v1",
-                "runtime": runtime,
-                "profiles": profiles,
-            }
-        ]
-    if not domains:
-        domains = {
-            "storage": {
-                "ready": status.get("ready") is True,
-                "read": features.get("archive_read") is True,
-                "mutation": features.get("archive_mutation") is True,
-                "blockers": feature_blockers.get("archive", []),
-            },
-            "scheduler": {
-                "ready": status.get("ready") is True,
-                "blockers": [item["message"] for item in blockers],
-            },
-        }
+        configuration_blockers.append(
+            "The controller did not advertise any estimators."
+        )
     return {
         "schema_version": "posetestbot_cluster_status_proxy.v1",
         "ready": status.get("ready") is True,
@@ -601,9 +585,7 @@ def _build_pose_setup(
     manifest = _load_bop_manifest(run_root)
     status = _controller_status()
     estimators = (
-        status.get("estimators")
-        if isinstance(status.get("estimators"), list)
-        else []
+        status.get("estimators") if isinstance(status.get("estimators"), list) else []
     )
     available_ids = {
         item.get("estimator_id")
@@ -612,17 +594,12 @@ def _build_pose_setup(
     }
     selected_id = estimator_id
     if selected_id is None:
-        selected_id = (
-            "foundationpose"
-            if "foundationpose" in available_ids
-            else next(iter(sorted(available_ids)), None)
-        )
+        selected_id = next(iter(sorted(available_ids)), None)
     selected = next(
         (
             item
             for item in estimators
-            if isinstance(item, Mapping)
-            and item.get("estimator_id") == selected_id
+            if isinstance(item, Mapping) and item.get("estimator_id") == selected_id
         ),
         None,
     )
@@ -647,9 +624,7 @@ def _build_pose_setup(
             for message in status.get("configuration_blockers", [])
         )
     input_contracts = (
-        selected.get("input_contracts", [])
-        if isinstance(selected, Mapping)
-        else []
+        selected.get("input_contracts", []) if isinstance(selected, Mapping) else []
     )
     oracle_masks_required = "posetestbot.bop.v5.pose_and_masks" in input_contracts
     if oracle_masks_required and manifest.get("annotation_mode") != "pose_and_masks":
@@ -670,12 +645,9 @@ def _build_pose_setup(
             }
         )
     capabilities = manifest.get("capabilities")
-    if (
-        oracle_masks_required
-        and (
-            not isinstance(capabilities, Mapping)
-            or capabilities.get("gt_masks_visible") is not True
-        )
+    if oracle_masks_required and (
+        not isinstance(capabilities, Mapping)
+        or capabilities.get("gt_masks_visible") is not True
     ):
         blockers.append(
             {
@@ -702,8 +674,7 @@ def _build_pose_setup(
         )
     profiles = (
         selected.get("profiles", [])
-        if isinstance(selected, Mapping)
-        and isinstance(selected.get("profiles"), list)
+        if isinstance(selected, Mapping) and isinstance(selected.get("profiles"), list)
         else []
     )
     enabled_profiles = [
@@ -826,10 +797,16 @@ def control_cluster_controller_service(action: str):
             raise ValueError("Controller service action requires explicit confirmation")
         service = _controller_service_status()
         if not service.get("managed"):
-            raise RuntimeError("Cluster controller service management is not configured")
+            raise RuntimeError(
+                "Cluster controller service management is not configured"
+            )
         if not service.get("unit_installed"):
-            raise RuntimeError("The configured cluster controller service is not installed")
-        allowed = service.get("can_start") if action == "start" else service.get("can_stop")
+            raise RuntimeError(
+                "The configured cluster controller service is not installed"
+            )
+        allowed = (
+            service.get("can_start") if action == "start" else service.get("can_stop")
+        )
         if not allowed:
             desired_state = "running" if action == "start" else "stopped"
             if service.get("state") == desired_state:
@@ -871,9 +848,10 @@ def cluster_pose_setup():
     try:
         run_root = resolve_web_run_root(request.args.get("run_root"))
         estimator_id = request.args.get("estimator_id")
-        if estimator_id is not None and re.fullmatch(
-            r"[a-z][a-z0-9_-]{2,63}", estimator_id
-        ) is None:
+        if (
+            estimator_id is not None
+            and re.fullmatch(r"[a-z][a-z0-9_-]{2,63}", estimator_id) is None
+        ):
             raise ValueError("estimator_id is invalid")
         return jsonify(_build_pose_setup(run_root, estimator_id=estimator_id))
     except Exception as exc:
@@ -886,10 +864,11 @@ def submit_cluster_pose_job():
         _require_cluster_enabled()
         value = _json_object()
         run_root = resolve_web_run_root(value.get("run_root"))
-        estimator_id = value.get("estimator_id", "foundationpose")
-        if not isinstance(estimator_id, str) or re.fullmatch(
-            r"[a-z][a-z0-9_-]{2,63}", estimator_id
-        ) is None:
+        estimator_id = value.get("estimator_id")
+        if (
+            not isinstance(estimator_id, str)
+            or re.fullmatch(r"[a-z][a-z0-9_-]{2,63}", estimator_id) is None
+        ):
             raise ValueError("estimator_id is required")
         setup = _build_pose_setup(run_root, estimator_id=estimator_id)
         if not setup["ready"]:
@@ -917,25 +896,10 @@ def submit_cluster_pose_job():
             "profile_id": profile_id,
             "operator": operator.strip(),
         }
-        controller = get_cluster_client()
-        if hasattr(controller, "create_estimation_job"):
-            response = controller.create_estimation_job(
-                submission,
-                idempotency_key=new_idempotency_key("estimation-submit"),
-            )
-        elif estimator_id == "foundationpose":
-            response = controller.create_pose_job(
-                {
-                    key: item
-                    for key, item in submission.items()
-                    if key != "estimator_id"
-                },
-                idempotency_key=new_idempotency_key("pose-submit"),
-            )
-        else:
-            raise RuntimeError(
-                "The cluster controller does not support generic estimators."
-            )
+        response = get_cluster_client().create_estimation_job(
+            submission,
+            idempotency_key=new_idempotency_key("estimation-submit"),
+        )
         return jsonify(_public_job_response(response)), 202
     except Exception as exc:
         return _error(exc)
@@ -948,19 +912,10 @@ def list_cluster_jobs():
         limit = request.args.get("limit", default=50, type=int)
         if limit is None or not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
-        try:
-            response = get_cluster_client().estimation_jobs(
-                limit=limit,
-                state=request.args.get("state"),
-            )
-        except ClusterClientError as exc:
-            if exc.status != 404:
-                raise
-            response = get_cluster_client().pose_jobs(
-                limit=limit,
-                before=request.args.get("before"),
-                state=request.args.get("state"),
-            )
+        response = get_cluster_client().estimation_jobs(
+            limit=limit,
+            state=request.args.get("state"),
+        )
         jobs = response.get("jobs") if isinstance(response, Mapping) else None
         if not isinstance(jobs, list):
             raise RuntimeError("The controller returned an invalid job list")
@@ -1077,13 +1032,12 @@ def import_cluster_result(job_id: str):
         ):
             raise RuntimeError("The cluster result estimator identity changed")
         estimator_id = result_estimator_id or payload_estimator_id
-        if estimator_id is None:
-            method_name = "FoundationPose (oracle GT masks)"
-        elif not isinstance(estimator_id, str) or re.fullmatch(
-            r"[a-z][a-z0-9_-]{2,63}", estimator_id
-        ) is None:
+        if (
+            not isinstance(estimator_id, str)
+            or re.fullmatch(r"[a-z][a-z0-9_-]{2,63}", estimator_id) is None
+        ):
             raise RuntimeError("The cluster result has an invalid estimator identity")
-        elif estimator_id == "foundationpose":
+        if estimator_id == "foundationpose":
             method_name = "FoundationPose (oracle GT masks)"
         else:
             method_name = f"{estimator_id.replace('_', ' ').title()} (cluster)"

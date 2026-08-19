@@ -13,10 +13,10 @@ import numpy as np
 
 from posetestbot.sensors.contracts import CameraIntrinsics, SensorType
 from posetestbot.sensors.frame_writer import (
-    ensure_legacy_rgbd_folders,
+    ensure_rgbd_folders,
     sync_frame_metadata,
-    write_legacy_camera_sidecars,
-    write_legacy_rgbd_frame,
+    write_camera_sidecars,
+    write_rgbd_frame,
 )
 
 
@@ -89,8 +89,7 @@ class OAKDProPreviewStream:
             if isinstance(exc, OAKDProCaptureError):
                 raise
             raise OAKDProCaptureError(
-                f"Unable to start OAK-D Pro RGB preview: "
-                f"{type(exc).__name__}: {exc}"
+                f"Unable to start OAK-D Pro RGB preview: {type(exc).__name__}: {exc}"
             ) from exc
 
     @property
@@ -204,7 +203,9 @@ def dai_timestamp_ns(packet: Any, *, device_clock: bool = False) -> int | None:
     if packet is None:
         return None
     try:
-        timestamp = packet.getTimestampDevice() if device_clock else packet.getTimestamp()
+        timestamp = (
+            packet.getTimestampDevice() if device_clock else packet.getTimestamp()
+        )
     except Exception:
         return None
     return depthai_timedelta_ns(timestamp)
@@ -282,7 +283,9 @@ def _camera_intrinsics_from_depthai(
 ) -> CameraIntrinsics:
     try:
         calibration = device.readCalibration()
-        matrix = calibration.getCameraIntrinsics(dai.CameraBoardSocket.CAM_A, width, height)
+        matrix = calibration.getCameraIntrinsics(
+            dai.CameraBoardSocket.CAM_A, width, height
+        )
         try:
             distortion = tuple(
                 float(value)
@@ -328,7 +331,7 @@ def write_oak_d_pro_rgbd_frame(
     depthai_now_ns: int | None,
     extra_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Write one DepthAI RGB/depth pair through the legacy folder contract."""
+    """Write one DepthAI RGB/depth pair through the current folder contract."""
 
     rgb_timestamp_ns = dai_timestamp_ns(rgb_packet, device_clock=False)
     depth_timestamp_ns = dai_timestamp_ns(depth_packet, device_clock=False)
@@ -358,7 +361,7 @@ def write_oak_d_pro_rgbd_frame(
     if extra_metadata:
         metadata.update(dict(extra_metadata))
 
-    return write_legacy_rgbd_frame(
+    return write_rgbd_frame(
         output_path,
         rgb_image=rgb_packet.getCvFrame(),
         depth_image=depth_packet.getFrame(),
@@ -503,7 +506,7 @@ def capture_oak_d_pro_rgbd(
     dai_module: Any | None = None,
     cv2_module: Any | None = None,
 ) -> dict[str, Any]:
-    """Capture aligned OAK-D Pro RGB-D frames into the legacy folder contract."""
+    """Capture aligned OAK-D Pro RGB-D frames into the current folder contract."""
 
     if fps <= 0:
         raise ValueError("fps must be positive")
@@ -537,7 +540,7 @@ def capture_oak_d_pro_rgbd(
 
     try:
         if record and output is not None:
-            ensure_legacy_rgbd_folders(output)
+            ensure_rgbd_folders(output)
 
         with dai.Pipeline(device) as pipeline:
             output_queue = _build_pipeline_outputs(
@@ -550,7 +553,7 @@ def capture_oak_d_pro_rgbd(
                 max_rgb_depth_delta_ns=max_rgb_depth_delta_ns,
             )
             if record and output is not None:
-                written = write_legacy_camera_sidecars(
+                written = write_camera_sidecars(
                     output,
                     _camera_intrinsics_from_depthai(
                         device,
@@ -562,7 +565,9 @@ def capture_oak_d_pro_rgbd(
                 sidecar_paths = {key: path.name for key, path in written.items()}
 
             pipeline.start()
-            while pipeline.isRunning() and (max_frames <= 0 or captured_frames < max_frames):
+            while pipeline.isRunning() and (
+                max_frames <= 0 or captured_frames < max_frames
+            ):
                 message_group = output_queue.get()
                 host_wall_received_timestamp_ns = time.time_ns()
                 host_received_timestamp_ns = time.monotonic_ns()

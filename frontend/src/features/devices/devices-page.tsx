@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { AlertTriangle, Bot, Camera, Eye, EyeOff, Info, Power, RefreshCw, Save, Square, Webcam } from "lucide-react"
+import { AlertTriangle, Camera, Eye, EyeOff, Info, RefreshCw, Save, Webcam } from "lucide-react"
 import { toast } from "sonner"
 import { HelpTip } from "@/components/help-tip"
 import { PageHeader } from "@/components/page-header"
@@ -9,7 +9,6 @@ import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -67,16 +66,11 @@ function Preview({ preview }: { preview?: PreviewJob }) {
 
 export function DevicesPage() {
   const queryClient = useQueryClient()
-  const { currentWorkflow, robotTarget, setRobotTarget } = useOperator()
+  const { currentWorkflow } = useOperator()
   const [aliasDraft, setAliasDraft] = useState<Record<string, AliasDraft>>({})
   const [selected, setSelected] = useState<Set<string>>(loadSelectedSensorKeys)
   const [detail, setDetail] = useState<SensorDevice | null>(null)
   const [snapshotJobs, setSnapshotJobs] = useState<Record<string, string>>({})
-  const [startDialog, setStartDialog] = useState(false)
-  const [robotDialogCommand, setRobotDialogCommand] = useState<"start_iiwa" | "stop_iiwa">("start_iiwa")
-  const [confirmedRobotTarget, setConfirmedRobotTarget] = useState(robotTarget)
-  const [commandConfirmed, setCommandConfirmed] = useState(false)
-  const [targetDraft, setTargetDraft] = useState(robotTarget)
 
   const status = useQuery({ queryKey: ["sensors", "status"], queryFn: () => api<SensorStatus>("/sensors/status"), refetchInterval: 10_000 })
   const aliases = useQuery({ queryKey: ["sensors", "aliases"], queryFn: () => api<AliasState>("/sensors/aliases") })
@@ -163,11 +157,6 @@ export function DevicesPage() {
       toast.error("Device default could not be saved", { description: errorMessage(error) })
     },
   })
-  const robotCommand = useMutation({
-    mutationFn: ({ command, target }: { command: "start_iiwa" | "stop_iiwa"; target: { ip: string; port: number } }) => api<{ job_id: string }>("/run-command", { method: "POST", body: JSON.stringify({ command, robot_ip: target.ip, robot_port: target.port, ...(command === "start_iiwa" ? { allow_real_robot: true, allow_cameras: true } : {}) }) }),
-    onSuccess: (data, variables) => { toast.success(variables.command === "start_iiwa" ? "IIWA start queued" : "IIWA stop queued", { description: `Job ${data.job_id}` }); setStartDialog(false); setCommandConfirmed(false); queryClient.invalidateQueries({ queryKey: ["jobs"] }) },
-    onError: (error) => toast.error("Robot command was not queued", { description: errorMessage(error) }),
-  })
 
   const defaultAliasRecord = (device: SensorDevice): AliasRecord => {
     const mountingMode = device.mounting_mode === "eye_in_hand" || device.mounting_mode === "static"
@@ -239,29 +228,6 @@ export function DevicesPage() {
       return next
     })
   }
-  const validatedTarget = () => {
-    const target = { ip: targetDraft.ip.trim(), port: targetDraft.port }
-    if (!target.ip || !Number.isInteger(target.port) || target.port < 1 || target.port > 65535) { toast.error("Enter a valid robot IP and port"); return null }
-    return target
-  }
-  const applyTarget = () => {
-    const target = validatedTarget()
-    if (!target) return
-    setRobotTarget(target)
-    setTargetDraft(target)
-    toast.success("Robot target saved locally")
-  }
-  const openRobotDialog = (command: "start_iiwa" | "stop_iiwa") => {
-    const target = validatedTarget()
-    if (!target) return
-    setRobotTarget(target)
-    setTargetDraft(target)
-    setConfirmedRobotTarget(target)
-    setRobotDialogCommand(command)
-    setCommandConfirmed(false)
-    setStartDialog(true)
-  }
-
   const previewTransitionPending = startPreview.isPending || stopPreview.isPending
   const anyPreviewBusy = [...previewByKey.values()].some((item) => PREVIEW_BUSY.has(item.job.status))
   const workflowHref = currentWorkflow ? `/workflow/${currentWorkflow.journey}?step=configure` : "/workflow/setup"
@@ -282,15 +248,6 @@ export function DevicesPage() {
       />
 
       {(aliases.isError || aliases.data?.error) && <div className="flex items-start justify-between gap-4 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs" role="alert"><div><div className="font-semibold text-destructive">Reusable device defaults could not be loaded</div><p className="mt-1 text-muted-foreground">{aliases.data?.error ?? errorMessage(aliases.error)} Editing is disabled so retained defaults are not overwritten.</p></div><Button variant="outline" size="sm" onClick={() => void aliases.refetch()} disabled={aliases.isFetching}><RefreshCw className={aliases.isFetching ? "animate-spin" : ""} />Retry defaults</Button></div>}
-
-      <Card className="border-primary/25">
-        <CardHeader className="flex-row items-start justify-between gap-6"><div><CardTitle className="flex items-center gap-2"><Bot className="size-5 text-primary-strong" />KUKA LBR iiwa <HelpTip label="robot profile status">Configured means the fixed lab profile loaded successfully. This read-only status does not contact the robot or prove that Sunrise is running.</HelpTip></CardTitle><CardDescription>The manual command target is saved in this browser only. It does not change the active run configuration; every command still requires explicit target confirmation.</CardDescription></div><StatusBadge status="configured" tone="informational">real lab profile</StatusBadge></CardHeader>
-        <CardContent className="grid grid-cols-1 items-end gap-4 lg:grid-cols-[1fr_1fr_auto]">
-          <div className="space-y-2"><Label htmlFor="robot-ip">Robot IP</Label><Input id="robot-ip" value={targetDraft.ip} onChange={(event) => setTargetDraft((value) => ({ ...value, ip: event.target.value }))} /></div>
-          <div className="space-y-2"><Label htmlFor="robot-port">Command port</Label><Input id="robot-port" type="number" min={1} max={65535} value={targetDraft.port} onChange={(event) => setTargetDraft((value) => ({ ...value, port: Number(event.target.value) }))} /></div>
-          <div className="flex flex-wrap gap-2"><Button variant="outline" onClick={applyTarget}>Save target</Button><Button onClick={() => openRobotDialog("start_iiwa")} disabled={robotCommand.isPending}><Power />Start IIWA</Button><Button variant="destructive" onClick={() => openRobotDialog("stop_iiwa")} disabled={robotCommand.isPending}><Square />Stop IIWA</Button></div>
-        </CardContent>
-      </Card>
 
       <div className="flex items-center justify-between"><div><h2 className="font-display text-xl font-semibold">RGB-D sensor lab defaults</h2><p className="text-sm text-muted-foreground">{captureReadyCount} capture-ready · {status.data?.total_connected ?? 0} connected · {selected.size} in the next-run browser draft</p></div><Button variant="outline" size="sm" onClick={() => stopAllPreviews.mutate()} disabled={!anyPreviewBusy || stopAllPreviews.isPending}><EyeOff />{stopAllPreviews.isPending ? "Stopping previews…" : "Stop all previews"}</Button></div>
       {status.isPending ? <div className="grid items-start gap-4 md:grid-cols-2 xl:grid-cols-3">{Array.from({ length: 3 }).map((_, index) => <Skeleton className="h-[430px]" key={index} />)}</div> : devices.length === 0 ? <div className="rounded-xl border border-dashed p-10 text-center text-sm text-muted-foreground">No RGB-D sensors were detected. Check SDKs, USB connections, and permissions, then refresh.</div> : <div data-testid="sensor-grid" className="grid items-start gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -334,7 +291,6 @@ export function DevicesPage() {
 
       <Sheet open={Boolean(detail)} onOpenChange={(open) => !open && setDetail(null)}><SheetContent><SheetHeader><SheetTitle className="font-display text-xl font-semibold">Raw sensor metadata</SheetTitle><SheetDescription>Discovery detail for troubleshooting. Routine controls stay on the device card.</SheetDescription></SheetHeader><pre className="mt-4 flex-1 overflow-auto rounded-lg bg-muted p-4 text-xs leading-relaxed">{JSON.stringify(detail, null, 2)}</pre></SheetContent></Sheet>
 
-      <Dialog open={startDialog} onOpenChange={(open) => { setStartDialog(open); if (!open) setCommandConfirmed(false) }}><DialogContent><DialogHeader><DialogTitle>Confirm IIWA {robotDialogCommand === "start_iiwa" ? "start" : "stop"}</DialogTitle><DialogDescription>{robotDialogCommand === "start_iiwa" ? "Starting" : "Stopping"} sends a command to the lab robot target. Verify the address before continuing.</DialogDescription></DialogHeader>{robotDialogCommand === "stop_iiwa" && <div data-testid="iiwa-stop-warning" className="flex items-start gap-3 rounded-lg border border-destructive/45 bg-destructive/10 p-4 text-sm"><AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" /><div><div className="font-semibold text-destructive">IIWA STOP is not a safety stop</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">It cannot interrupt active motion. In the current calibration application it exits the waiting program, so Sunrise must be restarted manually before another START.</p></div></div>}<div className="rounded-lg border border-warning/40 bg-warning/10 p-4"><div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Target</div><div className="mt-1 font-mono text-lg font-semibold">{confirmedRobotTarget.ip}:{confirmedRobotTarget.port}</div>{robotDialogCommand === "start_iiwa" && <div className="mt-3 text-xs"><span className="font-semibold">Manual test request:</span> 0.1 m/s (100 mm/s)</div>}</div><Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox data-testid="iiwa-command-confirmation" checked={commandConfirmed} onCheckedChange={(value) => setCommandConfirmed(value === true)} /><span className="space-y-1"><span className="block">I confirm this is the intended lab IIWA target.</span>{robotDialogCommand === "start_iiwa" && <><span className="block">I authorize motion of the real lab IIWA for this start.</span><span className="block">I confirm the capture cameras and pose receiver are ready.</span></>}</span></Label><DialogFooter><Button variant="outline" onClick={() => setStartDialog(false)}>Cancel</Button><Button variant={robotDialogCommand === "stop_iiwa" ? "destructive" : "default"} disabled={!commandConfirmed || robotCommand.isPending} onClick={() => robotCommand.mutate({ command: robotDialogCommand, target: confirmedRobotTarget })}>{robotDialogCommand === "start_iiwa" ? <Power /> : <Square />}{robotCommand.isPending ? "Queueing…" : robotDialogCommand === "start_iiwa" ? "Queue start" : "Queue stop"}</Button></DialogFooter></DialogContent></Dialog>
     </div>
   )
 }

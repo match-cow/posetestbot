@@ -246,7 +246,7 @@ function jobScopeLabel(job: Job, selectedRun: string) {
   if (job.scope_kind === "run") return job.run_root === selectedRun ? "Active run" : "Other run"
   if (job.scope_kind === "library") return "Reusable library"
   if (job.scope_kind === "global") return "Lab-wide"
-  return "Legacy unknown scope"
+  return "Unknown scope"
 }
 
 function DashboardJobRow({ job, selectedRun }: { job: Job; selectedRun: string }) {
@@ -308,52 +308,65 @@ function DashboardJobActivity({ jobs, pending, failed, selectedRun }: { jobs?: J
   </Card>
 }
 
-type IiwaCommand = "start_iiwa" | "stop_iiwa"
+type IiwaCommand = "start" | "stop"
+const LAB_IIWA_TARGET = "172.31.1.147:30300"
 
 function IiwaQuickControls({ profileStatus }: { profileStatus: "checking" | "configured" | "error" }) {
-  const { robotTarget } = useOperator()
+  const { selectedRun } = useOperator()
   const queryClient = useQueryClient()
   const [command, setCommand] = useState<IiwaCommand | null>(null)
-  const [commandConfirmed, setCommandConfirmed] = useState(false)
+  const [robotAcknowledged, setRobotAcknowledged] = useState(false)
+  const [camerasAcknowledged, setCamerasAcknowledged] = useState(false)
+  const [idleExitConfirmed, setIdleExitConfirmed] = useState(false)
   const robotCommand = useMutation({
-    mutationFn: (nextCommand: IiwaCommand) => api<{ job_id: string }>("/run-command", {
+    mutationFn: (nextCommand: IiwaCommand) => api<{ job_id: string }>("/robot/commands", {
       method: "POST",
-      body: JSON.stringify({ command: nextCommand, robot_ip: robotTarget.ip, robot_port: robotTarget.port, ...(nextCommand === "start_iiwa" ? { allow_real_robot: true, allow_cameras: true } : {}) }),
+      body: JSON.stringify(nextCommand === "start"
+        ? { command: "start", run_root: selectedRun, allow_real_robot: true, allow_cameras: true }
+        : { command: "stop", confirm_idle_program_exit: true }),
     }),
     onSuccess: (data, nextCommand) => {
-      toast.success(nextCommand === "start_iiwa" ? "IIWA start queued" : "IIWA stop queued", { description: `Job ${data.job_id}` })
+      toast.success(nextCommand === "start" ? "IIWA start queued" : "IIWA idle-program exit queued", { description: `Job ${data.job_id} continues after navigation; monitor it in Jobs.` })
       setCommand(null)
-      setCommandConfirmed(false)
+      setRobotAcknowledged(false)
+      setCamerasAcknowledged(false)
+      setIdleExitConfirmed(false)
       queryClient.invalidateQueries({ queryKey: ["jobs"] })
     },
     onError: (error) => toast.error("Robot command was not queued", { description: errorMessage(error) }),
   })
   const openCommand = (nextCommand: IiwaCommand) => {
-    setCommandConfirmed(false)
+    setRobotAcknowledged(false)
+    setCamerasAcknowledged(false)
+    setIdleExitConfirmed(false)
     setCommand(nextCommand)
   }
   const setDialogOpen = (open: boolean) => {
     if (open) return
     setCommand(null)
-    setCommandConfirmed(false)
+    setRobotAcknowledged(false)
+    setCamerasAcknowledged(false)
+    setIdleExitConfirmed(false)
   }
+  const confirmed = command === "start"
+    ? robotAcknowledged && camerasAcknowledged
+    : idleExitConfirmed
 
   return (
     <Card data-testid="iiwa-quick-controls">
       <CardContent className="pt-5">
         <div className="flex items-start justify-between"><div className="grid size-9 place-items-center rounded-lg bg-muted"><Bot className="size-4 text-primary-strong" /></div><StatusBadge status={profileStatus} tone={profileStatus === "configured" ? "informational" : profileStatus === "error" ? "destructive" : "neutral"}>{profileStatus}</StatusBadge></div>
-        <div className="mt-5 flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Manual robot control <HelpTip label="robot control status">Configured means the fixed lab profile loaded. The command target is the browser-local manual target shown in Devices; this status does not contact the robot or prove that Sunrise is running.</HelpTip></div>
+        <div className="mt-5 flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Manual robot control <HelpTip label="robot control status">Configured means the sole lab profile loaded. It does not contact the robot or prove that Sunrise is running.</HelpTip></div>
         <div className="mt-1 font-display text-lg font-semibold">Lab IIWA</div>
-        <p className="mt-1 text-xs text-muted-foreground">Quick commands use this browser's manual target and require confirmation.</p>
-        <div className="mt-4 grid grid-cols-2 gap-2"><Button size="sm" onClick={() => openCommand("start_iiwa")} disabled={robotCommand.isPending}><Power />Start IIWA</Button><Button size="sm" variant="destructive" onClick={() => openCommand("stop_iiwa")} disabled={robotCommand.isPending}><Square />Stop IIWA</Button></div>
+        <p className="mt-1 font-mono text-xs text-muted-foreground">{LAB_IIWA_TARGET}</p>
+        <div data-testid="iiwa-stop-warning" className="mt-3 rounded border border-destructive/40 bg-destructive/10 p-2 text-[10px] leading-relaxed"><span className="font-semibold text-destructive">Stop cannot interrupt active motion and is not an emergency stop.</span> It only exits an idle waiting Sunrise program, which then requires a manual restart.</div>
+        <div className="mt-4 grid grid-cols-2 gap-2"><Button size="sm" onClick={() => openCommand("start")} disabled={robotCommand.isPending}><Power />Start IIWA</Button><Button size="sm" variant="destructive" onClick={() => openCommand("stop")} disabled={robotCommand.isPending}><Square />Stop / exit idle IIWA program</Button></div>
       </CardContent>
       <Dialog open={command !== null} onOpenChange={setDialogOpen}>
         <DialogContent>
-          <DialogHeader><DialogTitle>Confirm IIWA {command === "stop_iiwa" ? "stop" : "start"}</DialogTitle><DialogDescription>{command === "stop_iiwa" ? "Stopping" : "Starting"} sends a command to the configured lab robot target.</DialogDescription></DialogHeader>
-          {command === "stop_iiwa" && <div data-testid="iiwa-stop-warning" className="flex items-start gap-3 rounded-lg border border-destructive/45 bg-destructive/10 p-4 text-sm"><AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" /><div><div className="font-semibold text-destructive">IIWA STOP is not a safety stop</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">It cannot interrupt active motion. In the current calibration application it exits the waiting program, so Sunrise must be restarted manually before another START.</p></div></div>}
-          <div className="rounded-lg border border-warning/40 bg-warning/10 p-4"><div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Target</div><div className="mt-1 font-mono text-lg font-semibold">{robotTarget.ip}:{robotTarget.port}</div>{command === "start_iiwa" && <div className="mt-3 text-xs"><span className="font-semibold">Manual test request:</span> 0.1 m/s (100 mm/s)</div>}</div>
-          <Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox data-testid="iiwa-command-confirmation" checked={commandConfirmed} onCheckedChange={(value) => setCommandConfirmed(value === true)} /><span className="space-y-1"><span className="block">I confirm this is the intended lab IIWA target.</span>{command === "start_iiwa" && <><span className="block">I authorize motion of the real lab IIWA for this start.</span><span className="block">I confirm the capture cameras and pose receiver are ready.</span></>}</span></Label>
-          <DialogFooter><Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button><Button variant={command === "stop_iiwa" ? "destructive" : "default"} disabled={!commandConfirmed || robotCommand.isPending || command === null} onClick={() => command && robotCommand.mutate(command)}>{command === "stop_iiwa" ? <Square /> : <Power />}{robotCommand.isPending ? "Queueing…" : command === "stop_iiwa" ? "Queue stop" : "Queue start"}</Button></DialogFooter>
+          <DialogHeader><DialogTitle>Confirm IIWA {command === "stop" ? "idle-program exit" : "start"}</DialogTitle><DialogDescription>The command is sent only to the fixed lab target <span className="font-mono">{LAB_IIWA_TARGET}</span>.</DialogDescription></DialogHeader>
+          {command === "stop" ? <><div className="flex items-start gap-3 rounded-lg border border-destructive/45 bg-destructive/10 p-4 text-sm"><AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" /><div><div className="font-semibold text-destructive">This is not a motion stop</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">It cannot interrupt active motion. It exits only an idle waiting program and requires a manual Sunrise restart.</p></div></div><Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox data-testid="iiwa-idle-exit-confirmation" checked={idleExitConfirmed} onCheckedChange={(value) => setIdleExitConfirmed(value === true)} /><span>I confirm the IIWA program is idle and I intend to exit it.</span></Label></> : <><div className="rounded-lg border border-warning/40 bg-warning/10 p-4"><div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Target</div><div className="mt-1 font-mono text-lg font-semibold">{LAB_IIWA_TARGET}</div><div className="mt-3 text-xs"><span className="font-semibold">Manual test request:</span> 0.1 m/s (100 mm/s)</div></div><Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox data-testid="iiwa-robot-acknowledgement" checked={robotAcknowledged} onCheckedChange={(value) => setRobotAcknowledged(value === true)} /><span>I confirm the workcell is clear and authorize real IIWA motion for this start.</span></Label><Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox data-testid="iiwa-camera-acknowledgement" checked={camerasAcknowledged} onCheckedChange={(value) => setCamerasAcknowledged(value === true)} /><span>I confirm the selected cameras and pose receiver are ready for this start.</span></Label></>}
+          <DialogFooter><Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button><Button variant={command === "stop" ? "destructive" : "default"} disabled={!confirmed || robotCommand.isPending || command === null} onClick={() => command && robotCommand.mutate(command)}>{command === "stop" ? <Square /> : <Power />}{robotCommand.isPending ? "Queueing…" : command === "stop" ? "Queue idle-program exit" : "Queue start"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
     </Card>

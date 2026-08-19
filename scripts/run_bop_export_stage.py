@@ -134,11 +134,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--annotation-mode",
         choices=sorted(ANNOTATION_MODES),
-        default=None,
+        required=True,
         help=(
-            "GT capability to publish: 'none', BlenderProc-derived 'pose', or "
-            "'pose_and_masks'. When omitted, the legacy source contract is "
-            "preserved: annotation-source blenderproc means pose_and_masks."
+            "Explicit GT capability to publish: 'none', BlenderProc-derived "
+            "'pose', or 'pose_and_masks'."
         ),
     )
     parser.add_argument(
@@ -334,10 +333,7 @@ def main() -> None:
             raise ValueError(
                 "COCO annotations require --annotation-mode pose_and_masks"
             )
-        try:
-            run_config = load_run_config_for_run_root(run_root)
-        except FileNotFoundError:
-            run_config = None
+        run_config = load_run_config_for_run_root(run_root)
         mounting_modes_by_sensor_name = enabled_sensor_mounting_modes_by_folder(
             run_config
         )

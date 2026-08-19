@@ -13,6 +13,8 @@ import trimesh
 
 from posetestbot.pose_templates.catalog import import_catalog_object
 from posetestbot.pose_templates.library import generate_template_bundle
+from posetestbot.pose_templates.orientations import analyze_catalog_orientations
+from posetestbot.pipeline.run_config import create_run_config, write_run_config
 from posetestbot.pose_templates.selection import (
     load_pose_template_selection,
     prepare_object_instances,
@@ -27,6 +29,9 @@ def _selection_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, Any]]:
     cad.write_bytes(trimesh.creation.box(extents=(20, 10, 8)).export(file_type="stl"))
     catalog = tmp_path / "catalog"
     workpiece = import_catalog_object(name="Box", cad_path=cad, catalog_root=catalog)
+    orientation_id = analyze_catalog_orientations(
+        workpiece["catalog_uuid"], catalog_root=catalog
+    )["orientations"][0]["orientation_id"]
     library = tmp_path / "library"
     bundle = generate_template_bundle(
         {
@@ -35,13 +40,11 @@ def _selection_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, Any]]:
                 {
                     "instance_uuid": "11111111-1111-4111-8111-111111111111",
                     "catalog_uuid": workpiece["catalog_uuid"],
+                    "orientation_id": orientation_id,
                     "pose": {
                         "x_mm": 40,
                         "y_mm": 40,
-                        "z_mm": 0,
-                        "roll_deg": 0,
-                        "pitch_deg": 0,
-                        "yaw_deg": 0,
+                        "rotation_deg": 0,
                     },
                 }
             ],
@@ -51,6 +54,15 @@ def _selection_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, Any]]:
     )
     run = tmp_path / "run"
     run.mkdir()
+    write_run_config(
+        run,
+        create_run_config(
+            run_root=run,
+            capture_intent="dataset",
+            bop_annotation_mode="none",
+            dataset_mode="pose_template",
+        ),
+    )
     select_pose_template(
         run,
         bundle["template_uuid"],
@@ -235,12 +247,8 @@ def test_select_pose_template_rejects_non_boolean_confirmation_at_public_boundar
         )
 
 
-@pytest.mark.parametrize(
-    "endpoint",
-    ["/pose-templates/runs/selection", "/pose-templates/runs/placement"],
-)
 def test_selection_http_routes_reject_string_false_before_queueing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, endpoint: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run = tmp_path / "run"
     run.mkdir()
@@ -259,7 +267,7 @@ def test_selection_http_routes_reject_string_false_before_queueing(
         create_app()
         .test_client()
         .post(
-            endpoint,
+            "/pose-templates/runs/selection",
             json={
                 "run_root": run.as_posix(),
                 "template_uuid": "11111111-1111-4111-8111-111111111111",

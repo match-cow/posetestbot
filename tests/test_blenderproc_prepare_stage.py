@@ -51,6 +51,15 @@ def write_json(path: Path, value: dict) -> None:
 
 def create_blenderproc_prepare_fixture(tmp_path: Path) -> tuple[Path, Path]:
     run_root = tmp_path / "run-1"
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            capture_intent="dataset",
+            bop_annotation_mode="pose",
+            sensors=(SensorRunConfig("realsense_d435", "123", "D435"),),
+        ),
+    )
     sensor_folder = run_root / "processed" / "synchronized" / "realsense_123"
     sensor_folder.mkdir(parents=True)
     (sensor_folder / "rgb").mkdir()
@@ -85,7 +94,7 @@ def create_blenderproc_prepare_fixture(tmp_path: Path) -> tuple[Path, Path]:
     write_json(
         camera_transforms,
         {
-            "realsense": {
+            "realsense_123": {
                 "quaternion": [1.0, 0.0, 0.0, 0.0],
                 "position": [0.0, 0.0, 0.0],
             }
@@ -105,6 +114,8 @@ def test_blenderproc_prepare_stage_writes_artifacts_and_manifest(
             sys.executable,
             str(repo_root / "scripts" / "run_blenderproc_prepare_stage.py"),
             str(run_root),
+            "--annotation-mode",
+            "pose",
             "--camera-transformations",
             str(camera_transforms),
         ],
@@ -147,7 +158,7 @@ def test_blenderproc_prepare_stage_writes_artifacts_and_manifest(
     ).hexdigest()
     assert frame_contract == {
         "schema_version": "blenderproc_frame_contract.v1",
-        "annotation_mode": "pose_and_masks",
+        "annotation_mode": "pose",
         "projection": "native",
         "resolution": {"width": 80, "height": 60},
         "source_artifact_sha256": {MATCH_ROBOT_EE_POSES: matched_pose_sha256},
@@ -180,6 +191,8 @@ def test_blenderproc_prepare_default_ignores_disabled_stale_sensor_folder(
     write_run_config(
         run_root,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="pose",
             run_root=run_root,
             sensors=(
                 SensorRunConfig("realsense_d435", "123", "Enabled"),
@@ -192,6 +205,8 @@ def test_blenderproc_prepare_default_ignores_disabled_stale_sensor_folder(
         sys.executable,
         str(repo_root / "scripts" / "run_blenderproc_prepare_stage.py"),
         str(run_root),
+        "--annotation-mode",
+        "pose",
         "--camera-transformations",
         str(camera_transforms),
     ]
@@ -207,6 +222,9 @@ def test_blenderproc_prepare_default_ignores_disabled_stale_sensor_folder(
     assert (synchronized / "realsense_123" / "blenderproc").is_dir()
     assert not (disabled / "blenderproc").exists()
 
+    transforms = json.loads(camera_transforms.read_text())
+    transforms["realsense_999"] = transforms["realsense_123"]
+    write_json(camera_transforms, transforms)
     subprocess.run(
         [*command, "--input-folder", str(synchronized)],
         cwd=repo_root,
@@ -230,6 +248,8 @@ def test_blenderproc_prepare_prefers_rectified_sensor_tree(tmp_path: Path) -> No
             sys.executable,
             str(repo_root / "scripts" / "run_blenderproc_prepare_stage.py"),
             str(run_root),
+            "--annotation-mode",
+            "pose",
             "--camera-transformations",
             str(camera_transforms),
         ],
@@ -264,7 +284,7 @@ def test_blenderproc_prepare_stage_accepts_calibration_profiles(
                 ),
                 extrinsics=RigidTransform(
                     from_frame=TransformFrame.CAMERA,
-                    to_frame=TransformFrame.END_EFFECTOR,
+                    to_frame=TransformFrame.ROBOT_FLANGE,
                     rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
                     translation_mm=(10.0, 20.0, 30.0),
                 ),
@@ -281,6 +301,8 @@ def test_blenderproc_prepare_stage_accepts_calibration_profiles(
             sys.executable,
             str(repo_root / "scripts" / "run_blenderproc_prepare_stage.py"),
             str(run_root),
+            "--annotation-mode",
+            "pose",
             "--calibration-profiles",
             str(calibration_profiles),
         ],
@@ -321,6 +343,8 @@ def test_blenderproc_prepare_stage_accepts_static_calibration_profiles(
     write_run_config(
         run_root,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="pose",
             run_root=run_root,
             sensors=(
                 SensorRunConfig(
@@ -329,9 +353,6 @@ def test_blenderproc_prepare_stage_accepts_static_calibration_profiles(
                     "Static camera",
                     mounting_mode="static",
                 ),
-            ),
-            robot_pose_sunrise_reference_frame_path=(
-                POSE_TEMPLATE_BASE_SUNRISE_PATH
             ),
         ),
     )
@@ -388,7 +409,7 @@ def test_blenderproc_prepare_stage_accepts_static_calibration_profiles(
                 ),
                 extrinsics=RigidTransform(
                     from_frame=TransformFrame.CAMERA,
-                    to_frame=TransformFrame.ROBOT_BASE,
+                    to_frame=TransformFrame.TEMPLATE_BASE,
                     rotation_quaternion_wxyz=(1.0, 0.0, 0.0, 0.0),
                     translation_mm=(100.0, 200.0, 300.0),
                 ),
@@ -417,6 +438,8 @@ def test_blenderproc_prepare_stage_accepts_static_calibration_profiles(
             sys.executable,
             str(repo_root / "scripts" / "run_blenderproc_prepare_stage.py"),
             str(run_root),
+            "--annotation-mode",
+            "pose",
             "--calibration-profiles",
             str(calibration_profiles),
         ],
@@ -447,6 +470,8 @@ def test_blenderproc_prepare_rejects_profile_with_wrong_run_mount(
     write_run_config(
         run_root,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="pose",
             run_root=run_root,
             sensors=(
                 SensorRunConfig(
@@ -495,6 +520,8 @@ def test_blenderproc_prepare_rejects_profile_with_wrong_run_mount(
                 / "run_blenderproc_prepare_stage.py"
             ),
             str(run_root),
+            "--annotation-mode",
+            "pose",
             "--calibration-profiles",
             str(profiles_path),
         ],
@@ -507,17 +534,10 @@ def test_blenderproc_prepare_rejects_profile_with_wrong_run_mount(
     assert result.returncode != 0
     assert "No static calibration profile matches" in result.stderr
     assert not (
-        run_root
-        / "processed"
-        / "calibration"
-        / DERIVED_CAMERA_EE_TRANSFORM
+        run_root / "processed" / "calibration" / DERIVED_CAMERA_EE_TRANSFORM
     ).exists()
     assert not (
-        run_root
-        / "processed"
-        / "synchronized"
-        / "realsense_123"
-        / "blenderproc"
+        run_root / "processed" / "synchronized" / "realsense_123" / "blenderproc"
     ).exists()
 
 
@@ -617,11 +637,12 @@ def test_blenderproc_prepare_failure_preserves_all_existing_outputs(
     (invalid_sensor / CAM_K).write_text("50 0 40\n0 50 40\n0 0 1\n")
 
     transforms = dict(load_camera_transformations(camera_transforms))
-    transforms["zed_2i"] = transforms["realsense"]
+    transforms["zed_2i_456"] = transforms["realsense_123"]
     with pytest.raises(FileNotFoundError, match="matched robot poses"):
         prepare_sensor_folders(
             input_folder=synchronized,
             camera_transformations=transforms,
+            annotation_mode="pose",
         )
 
     assert (first_output / "previous.txt").read_text() == "keep"
@@ -639,6 +660,7 @@ def test_blenderproc_prepare_objectless_clears_stale_models(tmp_path: Path) -> N
     prepared = prepare_sensor_folders(
         input_folder=run_root / "processed" / "synchronized",
         camera_transformations=load_camera_transformations(camera_transforms),
+        annotation_mode="pose",
     )
 
     output = prepared[0].output_folder
@@ -675,6 +697,7 @@ def test_blenderproc_prepare_rejects_rgb_depth_pose_key_mismatch(
         prepare_sensor_folders(
             input_folder=run_root / "processed" / "synchronized",
             camera_transformations=load_camera_transformations(camera_transforms),
+            annotation_mode="pose",
         )
 
 

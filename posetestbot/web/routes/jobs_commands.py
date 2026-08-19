@@ -1,4 +1,4 @@
-"""Manual-command and durable background-job APIs."""
+"""Durable background-job APIs."""
 
 from flask import Blueprint
 
@@ -6,11 +6,6 @@ from posetestbot.web import route_support
 
 
 jobs_commands_bp = Blueprint("jobs_commands", __name__)
-
-
-@jobs_commands_bp.post("/run-command")
-def run_command():
-    return route_support.run_command()
 
 
 @jobs_commands_bp.get("/jobs")

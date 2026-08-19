@@ -1,4 +1,4 @@
-"""Versioned run configuration for PoseTestBot pipeline jobs."""
+"""Current-only run configuration for PoseTestBot acquisition workflows."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import math
 import os
 import threading
+import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -25,31 +26,19 @@ from posetestbot.io.manifest import (
     upsert_stage,
     write_run_manifest,
 )
-from posetestbot.pipeline.sequences import (
-    PipelineSequenceSpec,
-    build_sequence_job,
-    build_sequence_plan,
-)
-from posetestbot.pipeline.stages import PipelineStageSpec
 from posetestbot.robot.reference_frames import (
-    normalize_sunrise_reference_frame_path,
+    POSE_TEMPLATE_BASE_SUNRISE_PATH,
 )
 from posetestbot.sensors.contracts import MountingMode, SensorType
 
 
-SCHEMA_VERSION = "run_config.v3"
+SCHEMA_VERSION = "run_config.v4"
 SUPPORTED_SCHEMA_VERSIONS = {SCHEMA_VERSION}
 CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION = "capture_synchronization.v1"
 CAPTURE_SYNCHRONIZATION_MODES = {"timestamp_aligned"}
+CAPTURE_INTENTS = {"calibration", "dataset"}
+BOP_ANNOTATION_MODES = {"none", "pose", "pose_and_masks"}
 DATASET_MODES = {"objectless", "pose_template"}
-CALIBRATION_PROFILE_OPTION_STAGES = ("blenderproc_prepare", "bop_export")
-INTRINSIC_CALIBRATION_PROFILE_OPTION_STAGES = ("camera_rectification",)
-DATASET_MODE_OPTION_STAGES = (
-    "blenderproc_prepare",
-    "blenderproc_render",
-    "bop_export",
-)
-EXECUTION_GATE_OPTION_KEYS = frozenset({"allow_cameras", "allow_real_robot"})
 RUN_CONFIG_LOCK = ".run_config.lock"
 
 _RUN_CONFIG_LOCK = threading.RLock()
@@ -60,19 +49,6 @@ LAB_REALSENSE_SERIALS = (
     "033422071805",
     "923322072633",
 )
-
-SENSOR_TYPE_ALIASES = {
-    "realsense": SensorType.REALSENSE_D435,
-    "realsense_d435": SensorType.REALSENSE_D435,
-    "d435": SensorType.REALSENSE_D435,
-    "luxonis": SensorType.OAK_D_PRO,
-    "oak": SensorType.OAK_D_PRO,
-    "oak_d": SensorType.OAK_D_PRO,
-    "oak_d_pro": SensorType.OAK_D_PRO,
-    "zed": SensorType.ZED_2I,
-    "zed2i": SensorType.ZED_2I,
-    "zed_2i": SensorType.ZED_2I,
-}
 
 
 @contextmanager
@@ -162,6 +138,7 @@ class CaptureSynchronizationConfig:
 class CaptureRunConfig:
     """Capture defaults shared by hardware adapters."""
 
+    intent: str
     resolution: str = "720p"
     fps: int = 6
     velocity_m_s: float = DEFAULT_CAPTURE_VELOCITY_M_S
@@ -178,15 +155,13 @@ class CaptureRunConfig:
 
 
 @dataclass(frozen=True)
-class PipelineRunConfig:
-    """Default sequence and options for one configured run."""
+class BopRunConfig:
+    """Explicit BOP annotation capability requested for a dataset run."""
 
-    sequence_id: str = "real_full_capture_validation"
-    plan_only: bool = True
-    options: Mapping[str, Any] = field(default_factory=dict)
+    annotation_mode: str
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {"annotation_mode": self.annotation_mode}
 
 
 @dataclass(frozen=True)
@@ -234,6 +209,7 @@ class PoseTestBotRunConfig:
     """Top-level versioned run configuration artifact."""
 
     schema_version: str
+    run_id: str
     run_name: str
     run_root: str
     robot_profile: RobotProfile
@@ -245,11 +221,12 @@ class PoseTestBotRunConfig:
     intrinsic_calibration_profiles: str | None = None
     calibration_profile_selection: Mapping[str, Any] | None = None
     calibration_target: Mapping[str, Any] | None = None
-    pipeline: PipelineRunConfig = field(default_factory=PipelineRunConfig)
+    bop: BopRunConfig = field(default_factory=lambda: BopRunConfig("none"))
 
     def to_dict(self) -> dict[str, Any]:
         result = {
             "schema_version": self.schema_version,
+            "run_id": self.run_id,
             "run_name": self.run_name,
             "run_root": self.run_root,
             "robot_profile": asdict(self.robot_profile),
@@ -261,7 +238,7 @@ class PoseTestBotRunConfig:
                 if self.calibration_target is not None
                 else None
             ),
-            "pipeline": self.pipeline.to_dict(),
+            "bop": self.bop.to_dict(),
         }
         if self.intrinsic_calibration_profiles is not None:
             result["intrinsic_calibration_profiles"] = (
@@ -279,13 +256,12 @@ class PoseTestBotRunConfig:
 
 
 def normalize_sensor_type(value: str) -> SensorType:
-    key = value.strip().lower().replace("-", "_")
     try:
-        return SENSOR_TYPE_ALIASES[key]
-    except KeyError as exc:
-        choices = ", ".join(sorted(SENSOR_TYPE_ALIASES))
+        return SensorType(value.strip())
+    except ValueError as exc:
+        choices = ", ".join(sensor.value for sensor in SensorType)
         raise ValueError(
-            f"Unknown sensor type {value!r}; use one of: {choices}"
+            f"Unknown sensor type {value!r}; use an exact registry identifier: {choices}"
         ) from exc
 
 
@@ -441,6 +417,22 @@ def sensor_config_from_mapping(
     *,
     default_mounting_mode: str | None = None,
 ) -> SensorRunConfig:
+    allowed_fields = {
+        "sensor_type",
+        "device_id",
+        "display_name",
+        "mounting_mode",
+        "enabled",
+        "calibration_profile_id",
+        "inverted",
+        "metadata",
+        "operator_alias",
+    }
+    unexpected = sorted(set(value) - allowed_fields)
+    if unexpected:
+        raise ValueError(
+            "Sensor entry contains unsupported fields: " + ", ".join(unexpected)
+        )
     sensor_type = normalize_sensor_type(str(value.get("sensor_type", "")))
     device_id = str(value.get("device_id", "")).strip()
     if not device_id:
@@ -461,7 +453,9 @@ def sensor_config_from_mapping(
     calibration_profile_id = value.get("calibration_profile_id")
     if calibration_profile_id is not None:
         calibration_profile_id = str(calibration_profile_id)
-    inverted = normalize_inverted(value.get("inverted", False))
+    inverted = value.get("inverted", False)
+    if not isinstance(inverted, bool):
+        raise ValueError("Sensor inverted must be a literal JSON boolean")
     _validate_sensor_orientation(sensor_type, inverted)
     return SensorRunConfig(
         sensor_type=sensor_type.value,
@@ -617,6 +611,9 @@ def default_lab_sensors(
 def create_run_config(
     *,
     run_root: str | Path,
+    capture_intent: str,
+    bop_annotation_mode: str,
+    run_id: str | None = None,
     run_name: str | None = None,
     resolution: str = "720p",
     fps: int = 6,
@@ -628,14 +625,19 @@ def create_run_config(
     intrinsic_calibration_profiles: str | None = None,
     calibration_profile_selection: Mapping[str, Any] | None = None,
     calibration_target: Mapping[str, Any] | None = None,
-    sequence_id: str = "real_full_capture_validation",
-    sequence_options: Mapping[str, Any] | None = None,
-    plan_only: bool = True,
     fixed_transforms: tuple[FixedFrameTransform, ...] = (),
-    robot_pose_sunrise_reference_frame_path: str | None = None,
     synchronization: (Mapping[str, Any] | CaptureSynchronizationConfig | None) = None,
 ) -> PoseTestBotRunConfig:
     run_root_path = Path(run_root)
+    if capture_intent not in CAPTURE_INTENTS:
+        raise ValueError(
+            "capture_intent must be one of: " + ", ".join(sorted(CAPTURE_INTENTS))
+        )
+    if bop_annotation_mode not in BOP_ANNOTATION_MODES:
+        raise ValueError(
+            "bop_annotation_mode must be one of: "
+            + ", ".join(sorted(BOP_ANNOTATION_MODES))
+        )
     sensor_configs = sensors if sensors is not None else default_lab_sensors()
     inferred_mode = dataset_mode or "objectless"
     if inferred_mode not in DATASET_MODES:
@@ -651,20 +653,15 @@ def create_run_config(
         "to": "template_base",
         "convention": "kuka_abc_radians",
     }
-    if robot_pose_sunrise_reference_frame_path is not None:
-        robot_pose["sunrise_reference_frame_path"] = (
-            normalize_sunrise_reference_frame_path(
-                robot_pose_sunrise_reference_frame_path
-            )
-        )
+    robot_pose["sunrise_reference_frame_path"] = POSE_TEMPLATE_BASE_SUNRISE_PATH
     config = PoseTestBotRunConfig(
         schema_version=SCHEMA_VERSION,
+        run_id=str(uuid.UUID(run_id)) if run_id is not None else str(uuid.uuid4()),
         run_name=run_name or run_root_path.name,
         run_root=run_root_path.as_posix(),
-        robot_profile=robot_profile().with_overrides(
-            cartesian_velocity_m_s=velocity_m_s,
-        ),
+        robot_profile=robot_profile(),
         capture=CaptureRunConfig(
+            intent=capture_intent,
             resolution=resolution,
             fps=fps,
             velocity_m_s=velocity_m_s,
@@ -687,30 +684,10 @@ def create_run_config(
         calibration_target=(
             dict(calibration_target) if calibration_target is not None else None
         ),
-        pipeline=PipelineRunConfig(
-            sequence_id=sequence_id,
-            plan_only=plan_only,
-            options=dict(sequence_options or {}),
-        ),
+        bop=BopRunConfig(annotation_mode=bop_annotation_mode),
     )
     validate_run_config(config.to_dict())
     return config
-
-
-def _persisted_execution_gate(value: Any) -> str | None:
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            if key in EXECUTION_GATE_OPTION_KEYS:
-                return key
-            nested = _persisted_execution_gate(item)
-            if nested is not None:
-                return nested
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            nested = _persisted_execution_gate(item)
-            if nested is not None:
-                return nested
-    return None
 
 
 def fixed_transform_from_mapping(value: Mapping[str, Any]) -> FixedFrameTransform:
@@ -733,12 +710,63 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
     schema = value.get("schema_version")
     if schema != SCHEMA_VERSION:
         raise ValueError(f"Run config schema_version must be {SCHEMA_VERSION}")
-    retired_fields = sorted({"object_folder", "selected_objects"} & value.keys())
+    retired_fields = sorted(
+        {"object_folder", "selected_objects", "pipeline"} & value.keys()
+    )
     if retired_fields:
         raise ValueError(
-            "Run config contains retired legacy object-registry fields: "
-            + ", ".join(retired_fields)
+            "Run config contains retired fields: " + ", ".join(retired_fields)
         )
+    allowed_top_level = {
+        "schema_version",
+        "run_id",
+        "run_name",
+        "run_root",
+        "robot_profile",
+        "capture",
+        "frames",
+        "dataset_mode",
+        "pose_template",
+        "calibration_profiles",
+        "intrinsic_calibration_profiles",
+        "calibration_profile_selection",
+        "calibration_target",
+        "bop",
+    }
+    unexpected = sorted(set(value) - allowed_top_level)
+    if unexpected:
+        raise ValueError(
+            "Run config contains unsupported fields: " + ", ".join(unexpected)
+        )
+    required_top_level = {
+        "schema_version",
+        "run_id",
+        "run_name",
+        "run_root",
+        "robot_profile",
+        "capture",
+        "frames",
+        "dataset_mode",
+        "pose_template",
+        "calibration_profiles",
+        "calibration_target",
+        "bop",
+    }
+    missing_top_level = sorted(required_top_level - value.keys())
+    if missing_top_level:
+        raise ValueError(
+            "Run config is missing required fields: " + ", ".join(missing_top_level)
+        )
+    if not isinstance(value.get("run_name"), str) or not value["run_name"].strip():
+        raise ValueError("Run config run_name must be a non-empty string")
+    if not isinstance(value.get("run_root"), str) or not value["run_root"].strip():
+        raise ValueError("Run config run_root must be a non-empty path")
+    try:
+        normalized_run_id = str(uuid.UUID(str(value.get("run_id"))))
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("Run config run_id must be a canonical UUID") from exc
+    if value.get("run_id") != normalized_run_id:
+        raise ValueError("Run config run_id must be a canonical UUID")
     dataset_mode = value.get("dataset_mode")
     if dataset_mode not in DATASET_MODES:
         raise ValueError(
@@ -749,10 +777,44 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
     if pose_template is not None:
         if not isinstance(pose_template, Mapping):
             raise ValueError("Run config pose_template must be an object or null")
+        expected_pose_template_fields = {
+            "template_uuid",
+            "selection_artifact",
+            "bundle_sha256",
+            "placement_confirmed",
+        }
+        if set(pose_template) != expected_pose_template_fields:
+            raise ValueError(
+                "Run config pose_template fields must be exactly: "
+                + ", ".join(sorted(expected_pose_template_fields))
+            )
+        try:
+            template_uuid = str(uuid.UUID(str(pose_template.get("template_uuid"))))
+        except (ValueError, AttributeError) as exc:
+            raise ValueError(
+                "Run config pose_template.template_uuid must be a canonical UUID"
+            ) from exc
+        if pose_template.get("template_uuid") != template_uuid:
+            raise ValueError(
+                "Run config pose_template.template_uuid must be a canonical UUID"
+            )
         if pose_template.get("selection_artifact") != "pose_template_selection.json":
             raise ValueError(
                 "Run config pose_template.selection_artifact must be "
                 "pose_template_selection.json"
+            )
+        template_digest = pose_template.get("bundle_sha256")
+        if (
+            not isinstance(template_digest, str)
+            or len(template_digest) != 64
+            or any(character not in "0123456789abcdef" for character in template_digest)
+        ):
+            raise ValueError(
+                "Run config pose_template.bundle_sha256 must be a SHA-256 digest"
+            )
+        if not isinstance(pose_template.get("placement_confirmed"), bool):
+            raise ValueError(
+                "Run config pose_template.placement_confirmed must be a boolean"
             )
 
     robot = value.get("robot_profile")
@@ -760,30 +822,59 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         raise ValueError("Run config robot_profile must be an object")
     if robot.get("mode") != "real":
         raise ValueError("Run config robot_profile.mode must be 'real'")
+    expected_robot = asdict(robot_profile())
+    if dict(robot) != expected_robot:
+        raise ValueError(
+            "Run config robot_profile must match the sole lab iiwa profile"
+        )
 
     capture = value.get("capture")
     if not isinstance(capture, Mapping):
         raise ValueError("Run config capture must be an object")
-    if int(capture.get("fps", 0)) <= 0:
-        raise ValueError("Run config capture.fps must be positive")
-    if not str(capture.get("resolution", "")).strip():
-        raise ValueError("Run config capture.resolution must not be empty")
-    try:
-        velocity_m_s = float(
-            capture.get(
-                "velocity_m_s",
-                robot.get("cartesian_velocity_m_s"),
-            )
-        )
-    except (TypeError, ValueError) as exc:
+    expected_capture_fields = {
+        "intent",
+        "resolution",
+        "fps",
+        "velocity_m_s",
+        "sensors",
+        "synchronization",
+    }
+    if set(capture) != expected_capture_fields:
         raise ValueError(
-            "Run config capture.velocity_m_s must be a finite positive number"
-        ) from exc
-    if not math.isfinite(velocity_m_s) or velocity_m_s <= 0.0:
+            "Run config capture fields must be exactly: "
+            + ", ".join(sorted(expected_capture_fields))
+        )
+    if capture.get("intent") not in CAPTURE_INTENTS:
+        raise ValueError(
+            "Run config capture.intent must be one of: "
+            + ", ".join(sorted(CAPTURE_INTENTS))
+        )
+    fps = capture.get("fps")
+    if isinstance(fps, bool) or not isinstance(fps, int) or fps <= 0:
+        raise ValueError("Run config capture.fps must be positive")
+    if (
+        not isinstance(capture.get("resolution"), str)
+        or not capture["resolution"].strip()
+    ):
+        raise ValueError("Run config capture.resolution must be a non-empty string")
+    velocity_m_s = capture.get("velocity_m_s")
+    if (
+        isinstance(velocity_m_s, bool)
+        or not isinstance(velocity_m_s, (int, float))
+        or not math.isfinite(velocity_m_s)
+        or velocity_m_s <= 0.0
+    ):
         raise ValueError(
             "Run config capture.velocity_m_s must be a finite positive number"
         )
     calibration_target = value.get("calibration_target")
+    calibration_profiles = value.get("calibration_profiles")
+    if calibration_profiles is not None and (
+        not isinstance(calibration_profiles, str) or not calibration_profiles.strip()
+    ):
+        raise ValueError(
+            "Run config calibration_profiles must be a non-empty path or null"
+        )
     intrinsic_profiles = value.get("intrinsic_calibration_profiles")
     if intrinsic_profiles is not None and (
         not isinstance(intrinsic_profiles, str) or not intrinsic_profiles.strip()
@@ -797,6 +888,16 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
             raise ValueError(
                 "Run config calibration_profile_selection must be an object or null"
             )
+        expected_selection_fields = {
+            "selection_artifact",
+            "bundle_sha256",
+            "selected_at",
+        }
+        if set(calibration_selection) != expected_selection_fields:
+            raise ValueError(
+                "Run config calibration_profile_selection fields must be exactly: "
+                + ", ".join(sorted(expected_selection_fields))
+            )
         if (
             calibration_selection.get("selection_artifact")
             != CALIBRATION_PROFILE_SELECTION
@@ -805,12 +906,21 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
                 "Run config calibration_profile_selection.selection_artifact must be "
                 f"{CALIBRATION_PROFILE_SELECTION}"
             )
-        digest = str(calibration_selection.get("bundle_sha256", ""))
-        if len(digest) != 64 or any(
-            character not in "0123456789abcdef" for character in digest
+        digest = calibration_selection.get("bundle_sha256")
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
         ):
             raise ValueError(
                 "Run config calibration_profile_selection.bundle_sha256 must be a SHA-256 digest"
+            )
+        if (
+            not isinstance(calibration_selection.get("selected_at"), str)
+            or not calibration_selection["selected_at"].strip()
+        ):
+            raise ValueError(
+                "Run config calibration_profile_selection.selected_at must be a non-empty string"
             )
         if not isinstance(value.get("calibration_profiles"), str) or not isinstance(
             intrinsic_profiles, str
@@ -831,6 +941,14 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
             "geometry_sha256",
             "placement",
         }
+        unexpected_target_fields = sorted(
+            calibration_target.keys() - required_target_fields
+        )
+        if unexpected_target_fields:
+            raise ValueError(
+                "Run config calibration_target contains unsupported fields: "
+                + ", ".join(unexpected_target_fields)
+            )
         missing_target_fields = sorted(
             required_target_fields - calibration_target.keys()
         )
@@ -839,11 +957,22 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
                 "Run config calibration_target is missing: "
                 + ", ".join(missing_target_fields)
             )
-        if not str(calibration_target.get("target_id", "")).strip():
+        try:
+            target_id = str(uuid.UUID(str(calibration_target.get("target_id"))))
+        except (ValueError, AttributeError) as exc:
             raise ValueError(
-                "Run config calibration_target.target_id must not be empty"
+                "Run config calibration_target.target_id must be a canonical UUID"
+            ) from exc
+        if calibration_target.get("target_id") != target_id:
+            raise ValueError(
+                "Run config calibration_target.target_id must be a canonical UUID"
             )
-        bundle_path = Path(str(calibration_target.get("bundle_path", "")))
+        bundle_path_value = calibration_target.get("bundle_path")
+        if not isinstance(bundle_path_value, str) or not bundle_path_value.strip():
+            raise ValueError(
+                "Run config calibration_target.bundle_path must be a non-empty path"
+            )
+        bundle_path = Path(bundle_path_value)
         if bundle_path.is_absolute() or ".." in bundle_path.parts:
             raise ValueError(
                 "Run config calibration_target.bundle_path must be run-relative"
@@ -855,9 +984,11 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
             "configuration_sha256",
             "geometry_sha256",
         ):
-            digest = str(calibration_target.get(hash_key, ""))
-            if len(digest) != 64 or any(
-                character not in "0123456789abcdef" for character in digest
+            digest = calibration_target.get(hash_key)
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
             ):
                 raise ValueError(
                     f"Run config calibration_target.{hash_key} must be a SHA-256 digest"
@@ -870,7 +1001,7 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         }:
             raise ValueError("Run config calibration_target placement mode is invalid")
         mounting_frame = placement.get("mounting_frame")
-        if "mounting_frame" in placement and mounting_frame not in {
+        if mounting_frame not in {
             "robot_flange",
             "template_base",
         }:
@@ -878,11 +1009,7 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
                 "Run config calibration_target placement mounting_frame must be "
                 "robot_flange or template_base"
             )
-        if (
-            placement.get("mode") != "unknown"
-            and mounting_frame is not None
-            and mounting_frame != "template_base"
-        ):
+        if placement.get("mode") != "unknown" and mounting_frame != "template_base":
             raise ValueError(
                 "Run config known calibration-target placement requires "
                 "mounting_frame=template_base"
@@ -901,6 +1028,16 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
     if not isinstance(frames, Mapping):
         raise ValueError("Run config frames must be an object")
     if frames is not None:
+        expected_frame_fields = {
+            "robot_pose",
+            "dataset_reference_frame",
+            "fixed_transforms",
+        }
+        if set(frames) != expected_frame_fields:
+            raise ValueError(
+                "Run config frames fields must be exactly: "
+                + ", ".join(sorted(expected_frame_fields))
+            )
         robot_pose = frames.get("robot_pose")
         if (
             not isinstance(robot_pose, Mapping)
@@ -914,16 +1051,17 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
             raise ValueError(
                 "Run config robot pose convention must be kuka_abc_radians"
             )
-        if "sunrise_reference_frame_path" in robot_pose:
-            try:
-                normalize_sunrise_reference_frame_path(
-                    robot_pose.get("sunrise_reference_frame_path")
-                )
-            except ValueError as exc:
-                raise ValueError(
-                    "Run config frames.robot_pose.sunrise_reference_frame_path "
-                    f"is invalid: {exc}"
-                ) from exc
+        expected_robot_pose = {
+            "from": "robot_flange",
+            "to": "template_base",
+            "convention": "kuka_abc_radians",
+            "sunrise_reference_frame_path": POSE_TEMPLATE_BASE_SUNRISE_PATH,
+        }
+        if dict(robot_pose) != expected_robot_pose:
+            raise ValueError(
+                "Run config frames.robot_pose must use the canonical "
+                "robot_flange-to-PoseTemplateBase contract"
+            )
         if frames.get("dataset_reference_frame") != "template_base":
             raise ValueError("Run config dataset_reference_frame must be template_base")
         fixed_transforms = frames.get("fixed_transforms", [])
@@ -932,8 +1070,31 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         for index, transform in enumerate(fixed_transforms):
             if not isinstance(transform, Mapping):
                 raise ValueError(f"Fixed transform {index} must be an object")
-            if not str(transform.get("from", "")) or not str(transform.get("to", "")):
+            expected_transform_fields = {
+                "from",
+                "to",
+                "rotation_quaternion_wxyz",
+                "translation_mm",
+                "source",
+            }
+            if set(transform) != expected_transform_fields:
+                raise ValueError(
+                    f"Fixed transform {index} fields do not match the current contract"
+                )
+            if (
+                not isinstance(transform.get("from"), str)
+                or not transform["from"]
+                or not isinstance(transform.get("to"), str)
+                or not transform["to"]
+            ):
                 raise ValueError(f"Fixed transform {index} requires from/to endpoints")
+            if (
+                not isinstance(transform.get("source"), str)
+                or not transform["source"].strip()
+            ):
+                raise ValueError(
+                    f"Fixed transform {index} source must be a non-empty string"
+                )
             quaternion = transform.get("rotation_quaternion_wxyz")
             translation = transform.get("translation_mm")
             if not isinstance(quaternion, list) or len(quaternion) != 4:
@@ -944,7 +1105,13 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
                 raise ValueError(
                     f"Fixed transform {index} translation must have 3 values"
                 )
-            values = [float(item) for item in [*quaternion, *translation]]
+            raw_values = [*quaternion, *translation]
+            if any(
+                isinstance(item, bool) or not isinstance(item, (int, float))
+                for item in raw_values
+            ):
+                raise ValueError(f"Fixed transform {index} must be numeric")
+            values = [float(item) for item in raw_values]
             if not all(math.isfinite(item) for item in values):
                 raise ValueError(f"Fixed transform {index} must be finite")
             if not math.isclose(
@@ -958,19 +1125,79 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
     if not isinstance(sensors, list) or not sensors:
         raise ValueError("Run config capture.sensors must be a non-empty list")
     enabled_sensor_count = 0
+    sensor_identities: set[tuple[str, str]] = set()
+    expected_sensor_fields = {
+        "sensor_type",
+        "device_id",
+        "display_name",
+        "mounting_mode",
+        "enabled",
+        "calibration_profile_id",
+        "inverted",
+        "metadata",
+    }
     for index, sensor in enumerate(sensors):
         if not isinstance(sensor, Mapping):
             raise ValueError(f"Run config sensor {index} must be an object")
-        sensor_type = normalize_sensor_type(str(sensor.get("sensor_type", "")))
-        normalize_mounting_mode(str(sensor.get("mounting_mode", "")))
-        if not str(sensor.get("device_id", "")).strip():
-            raise ValueError(f"Run config sensor {index} device_id must not be empty")
-        try:
-            normalize_operator_alias(sensor.get("operator_alias"))
-        except ValueError as exc:
+        optional_sensor_fields = {"operator_alias"}
+        if not expected_sensor_fields.issubset(sensor) or not set(sensor).issubset(
+            expected_sensor_fields | optional_sensor_fields
+        ):
             raise ValueError(
-                f"Run config sensor {index} operator_alias must be a string or null"
-            ) from exc
+                f"Run config sensor {index} fields do not match the current contract"
+            )
+        if not isinstance(sensor.get("sensor_type"), str):
+            raise ValueError(f"Run config sensor {index} sensor_type must be a string")
+        sensor_type = normalize_sensor_type(sensor["sensor_type"])
+        if not isinstance(sensor.get("mounting_mode"), str):
+            raise ValueError(
+                f"Run config sensor {index} mounting_mode must be a string"
+            )
+        normalize_mounting_mode(sensor["mounting_mode"])
+        if (
+            not isinstance(sensor.get("device_id"), str)
+            or not sensor["device_id"].strip()
+        ):
+            raise ValueError(f"Run config sensor {index} device_id must not be empty")
+        identity = (sensor_type.value, str(sensor["device_id"]).strip())
+        if identity in sensor_identities:
+            raise ValueError(
+                "Run config capture sensors repeat identity " + ":".join(identity)
+            )
+        sensor_identities.add(identity)
+        if (
+            not isinstance(sensor.get("display_name"), str)
+            or not sensor["display_name"].strip()
+        ):
+            raise ValueError(
+                f"Run config sensor {index} display_name must be a non-empty string"
+            )
+        if not isinstance(sensor.get("metadata"), Mapping):
+            raise ValueError(
+                f"Run config sensor {index} metadata must be a JSON object"
+            )
+        calibration_profile_id = sensor.get("calibration_profile_id")
+        if calibration_profile_id is not None and (
+            not isinstance(calibration_profile_id, str)
+            or not calibration_profile_id.strip()
+        ):
+            raise ValueError(
+                f"Run config sensor {index} calibration_profile_id must be a non-empty string or null"
+            )
+        if "operator_alias" in sensor:
+            operator_alias = sensor.get("operator_alias")
+            if (
+                not isinstance(operator_alias, str)
+                or not operator_alias.strip()
+                or operator_alias != operator_alias.strip()
+            ):
+                raise ValueError(
+                    f"Run config sensor {index} operator_alias must be a trimmed non-empty string"
+                )
+            if sensor["display_name"] != operator_alias:
+                raise ValueError(
+                    f"Run config sensor {index} display_name must match operator_alias"
+                )
         try:
             enabled = normalize_sensor_enabled(sensor.get("enabled", True))
         except ValueError as exc:
@@ -978,36 +1205,30 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
                 f"Run config sensor {index} enabled must be a boolean"
             ) from exc
         enabled_sensor_count += int(enabled)
-        inverted = normalize_inverted(sensor.get("inverted", False))
+        inverted = sensor.get("inverted")
+        if not isinstance(inverted, bool):
+            raise ValueError(f"Run config sensor {index} inverted must be a boolean")
         _validate_sensor_orientation(sensor_type, inverted)
     if enabled_sensor_count == 0:
         raise ValueError("Run config must enable at least one capture sensor")
     synchronization = capture.get("synchronization")
     if synchronization is None:
-        raise ValueError("run_config.v3 requires capture.synchronization")
+        raise ValueError("run_config.v4 requires capture.synchronization")
     validate_capture_synchronization(synchronization, sensors)
-
-    pipeline = value.get("pipeline")
-    if not isinstance(pipeline, Mapping):
-        raise ValueError("Run config pipeline must be an object")
-    sequence_id = str(pipeline.get("sequence_id", ""))
-    if not sequence_id:
-        raise ValueError("Run config pipeline.sequence_id must not be empty")
-    options = pipeline.get("options", {})
-    if not isinstance(options, Mapping):
-        raise ValueError("Run config pipeline.options must be an object")
-    persisted_gate = _persisted_execution_gate(options)
-    if persisted_gate is not None:
+    bop = value.get("bop")
+    if not isinstance(bop, Mapping):
+        raise ValueError("Run config bop must be an object")
+    if set(bop) != {"annotation_mode"}:
+        raise ValueError("Run config bop accepts only annotation_mode")
+    if bop.get("annotation_mode") not in BOP_ANNOTATION_MODES:
         raise ValueError(
-            f"Run config pipeline.options must not persist execution gate: "
-            f"{persisted_gate}"
+            "Run config bop.annotation_mode must be one of: "
+            + ", ".join(sorted(BOP_ANNOTATION_MODES))
         )
-    build_sequence_plan(
-        sequence_id=sequence_id,
-        run_root=str(value.get("run_root", ".")),
-        options=options,
-        plan_only=bool(pipeline.get("plan_only", True)),
-    )
+    if capture.get("intent") == "calibration" and dataset_mode != "objectless":
+        raise ValueError("Calibration capture intent requires dataset_mode=objectless")
+    if capture.get("intent") == "calibration" and bop.get("annotation_mode") != "none":
+        raise ValueError("Calibration capture intent requires bop.annotation_mode=none")
 
 
 def write_run_config(run_root: str | Path, config: PoseTestBotRunConfig) -> Path:
@@ -1031,8 +1252,7 @@ def write_run_config_with_manifest(
         message=(
             "Created run config for "
             f"{len(config.capture.sensors)} sensor(s), "
-            "real robot profile, "
-            f"sequence {config.pipeline.sequence_id}."
+            f"{config.capture.intent} capture intent, and the fixed lab iiwa profile."
         ),
     )
     write_run_manifest(manifest, run_root_path)
@@ -1044,18 +1264,6 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
         value = json.load(f)
     if not isinstance(value, dict):
         raise ValueError(f"Run config must be a JSON object: {path}")
-    capture = value.get("capture")
-    if isinstance(capture, Mapping):
-        sensors = capture.get("sensors")
-        if isinstance(sensors, list):
-            for sensor in sensors:
-                if isinstance(sensor, dict):
-                    operator_alias = normalize_operator_alias(
-                        sensor.get("operator_alias")
-                    )
-                    if operator_alias is not None:
-                        sensor["operator_alias"] = operator_alias
-                        sensor["display_name"] = operator_alias
     validate_run_config(value)
     return value
 
@@ -1070,79 +1278,3 @@ def load_run_config_for_run_root(run_root: str | Path) -> dict[str, Any]:
             f"{config['run_root']} != {run_root_path.as_posix()}"
         )
     return config
-
-
-def _sequence_options_with_run_config_defaults(
-    config: Mapping[str, Any],
-) -> dict[str, Any]:
-    pipeline = config["pipeline"]
-    options = {
-        str(key): dict(value)
-        for key, value in dict(pipeline.get("options", {})).items()
-    }
-    plan = build_sequence_plan(
-        sequence_id=str(pipeline["sequence_id"]),
-        run_root=str(config["run_root"]),
-        options=options,
-        plan_only=bool(pipeline.get("plan_only", True)),
-    )
-    available_groups = {step.id for step in plan.steps}
-    available_groups.update(step.stage_id for step in plan.steps)
-    calibration_profiles = config.get("calibration_profiles")
-    if isinstance(calibration_profiles, str) and calibration_profiles.strip():
-        for group_name in CALIBRATION_PROFILE_OPTION_STAGES:
-            if group_name not in available_groups:
-                continue
-            group_options = dict(options.get(group_name, {}))
-            group_options.setdefault("calibration_profiles", calibration_profiles)
-            options[group_name] = group_options
-
-    intrinsic_profiles = config.get("intrinsic_calibration_profiles")
-    if isinstance(intrinsic_profiles, str) and intrinsic_profiles.strip():
-        for group_name in INTRINSIC_CALIBRATION_PROFILE_OPTION_STAGES:
-            if group_name not in available_groups:
-                continue
-            group_options = dict(options.get(group_name, {}))
-            group_options.setdefault("intrinsic_profiles", intrinsic_profiles)
-            options[group_name] = group_options
-
-    for group_name in DATASET_MODE_OPTION_STAGES:
-        if group_name not in available_groups:
-            continue
-        group_options = dict(options.get(group_name, {}))
-        if (
-            "objectless" not in group_options
-            and config.get("dataset_mode") == "objectless"
-        ):
-            group_options["objectless"] = True
-        options[group_name] = group_options
-    return options
-
-
-def sequence_plan_from_run_config(config: Mapping[str, Any]):
-    validate_run_config(config)
-    pipeline = config["pipeline"]
-    return build_sequence_plan(
-        sequence_id=str(pipeline["sequence_id"]),
-        run_root=str(config["run_root"]),
-        options=_sequence_options_with_run_config_defaults(config),
-        plan_only=bool(pipeline.get("plan_only", True)),
-    )
-
-
-def build_sequence_job_from_run_config(
-    config: Mapping[str, Any],
-    *,
-    sequence_registry: Mapping[str, PipelineSequenceSpec] | None = None,
-    stage_registry: Mapping[str, PipelineStageSpec] | None = None,
-):
-    validate_run_config(config)
-    pipeline = config["pipeline"]
-    return build_sequence_job(
-        sequence_id=str(pipeline["sequence_id"]),
-        run_root=str(config["run_root"]),
-        options=_sequence_options_with_run_config_defaults(config),
-        plan_only=bool(pipeline.get("plan_only", True)),
-        sequence_registry=sequence_registry,
-        stage_registry=stage_registry,
-    )

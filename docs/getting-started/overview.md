@@ -12,7 +12,7 @@ database record.
 | Flask application | `posetestbot.web.app` | Serves the console and browser-safe HTTP API |
 | Operator console | `frontend/`, built into `posetestbot/web/static/ui/` | Guided desktop workflow and evidence inspection |
 | Local job runner | `posetestbot.jobs.runner.LocalJobRunner` | Runs long or hardware-touching work outside request handlers |
-| Pipeline registry | `posetestbot.pipeline.stages`, `.sequences`, `.workflows` | Declares acquisition stages and supported compositions |
+| Fixed orchestration | `posetestbot.pipeline.orchestration` | Owns the only capture and dataset-processing recipes |
 | Sensor registry | `posetestbot.sensors.registry` | Static supported-device metadata; does not open hardware |
 | Run storage | `working_data/`, `/mnt/working_data_ssd` | Raw evidence, immutable inputs, derived artifacts, and exports |
 | Global libraries | `working_data/object_catalog/`, `working_data/pose_templates/` | Reusable workpieces and immutable pose-template bundles |
@@ -22,7 +22,7 @@ database record.
 
 1. Create or select a run and write `run_config.json`.
 2. Snapshot reusable calibration and pose-template inputs into that run.
-3. Write preflight and capture-plan evidence.
+3. Queue preflight, then inspect the fixed capture plan and readiness evidence.
 4. Obtain explicit operator authorization and submit both execution gates.
 5. Capture independent timestamp evidence from every enabled camera and the
    robot pose stream.
@@ -41,5 +41,5 @@ browser navigates away and remain inspectable through `/jobs` and the console's
 - [Operator workflows](../OPERATOR_WORKFLOWS.md) for the two guided outcomes.
 - [Architecture and boundaries](../concepts/architecture.md) for ownership and
   process separation.
-- [Run configuration](../reference/run-config.md) for `run_config.v3`.
+- [Run configuration](../reference/run-config.md) for `run_config.v4`.
 - [API conventions](../reference/http-api.md) for HTTP usage.

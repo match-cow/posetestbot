@@ -40,8 +40,19 @@ from posetestbot.sensors.contracts import CameraIntrinsics, MountingMode, Sensor
 from scripts.run_bop_export_stage import calibration_profile_for_sensor
 
 
-def create_synchronized_sensor_fixture(tmp_path: Path) -> Path:
+def create_synchronized_sensor_fixture(
+    tmp_path: Path, *, annotation_mode: str = "none"
+) -> Path:
     run_root = tmp_path / "run-1"
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            capture_intent="dataset",
+            bop_annotation_mode=annotation_mode,
+            sensors=(SensorRunConfig("realsense_d435", "123", "D435"),),
+        ),
+    )
     sensor = run_root / "processed" / "synchronized" / "realsense_123"
     rgb = sensor / RGB_DIR
     depth = sensor / DEPTH_DIR
@@ -61,12 +72,14 @@ def create_synchronized_sensor_fixture(tmp_path: Path) -> Path:
     return run_root
 
 
-def export_command(run_root: Path) -> list[str]:
+def export_command(run_root: Path, *, annotation_mode: str = "none") -> list[str]:
     repo_root = Path(__file__).resolve().parents[1]
     return [
         sys.executable,
         str(repo_root / "scripts" / "run_bop_export_stage.py"),
         str(run_root),
+        "--annotation-mode",
+        annotation_mode,
     ]
 
 
@@ -165,6 +178,8 @@ def test_bop_export_rejects_profile_with_wrong_run_mount(tmp_path: Path) -> None
     write_run_config(
         run_root,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
             run_root=run_root,
             sensors=(
                 SensorRunConfig(
@@ -305,6 +320,8 @@ def test_bop_export_default_ignores_disabled_stale_sensor_folder(
     write_run_config(
         run_root,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
             run_root=run_root,
             sensors=(
                 SensorRunConfig("realsense_d435", "123", "Enabled"),
@@ -399,7 +416,7 @@ def test_bop_export_default_ignores_stale_rendered_gt(tmp_path: Path) -> None:
 def test_bop_export_rendered_annotation_mode_rejects_unknown_object_gt(
     tmp_path: Path,
 ) -> None:
-    run_root = create_synchronized_sensor_fixture(tmp_path)
+    run_root = create_synchronized_sensor_fixture(tmp_path, annotation_mode="pose")
     output = (
         run_root
         / "processed"
@@ -426,7 +443,11 @@ def test_bop_export_rendered_annotation_mode_rejects_unknown_object_gt(
     repo_root = Path(__file__).resolve().parents[1]
 
     result = subprocess.run(
-        [*export_command(run_root), "--annotation-source", "blenderproc"],
+        [
+            *export_command(run_root, annotation_mode="pose"),
+            "--annotation-source",
+            "blenderproc",
+        ],
         cwd=repo_root,
         check=False,
         text=True,

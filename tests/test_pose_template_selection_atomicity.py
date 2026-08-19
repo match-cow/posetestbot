@@ -23,13 +23,16 @@ from posetestbot.pose_templates.library import (
     generate_template_bundle,
     set_template_archive_state,
 )
+from posetestbot.pose_templates.orientations import analyze_catalog_orientations
 from posetestbot.pose_templates.selection import (
     load_pose_template_selection,
     select_pose_template,
 )
 
 
-def _configuration(catalog_uuid: str, *, name: str, x_mm: float) -> dict[str, Any]:
+def _configuration(
+    catalog_uuid: str, *, orientation_id: str, name: str, x_mm: float
+) -> dict[str, Any]:
     return {
         "display_name": name,
         "description": "selection transaction fixture",
@@ -37,13 +40,11 @@ def _configuration(catalog_uuid: str, *, name: str, x_mm: float) -> dict[str, An
             {
                 "instance_uuid": "11111111-1111-4111-8111-111111111111",
                 "catalog_uuid": catalog_uuid,
+                "orientation_id": orientation_id,
                 "pose": {
                     "x_mm": x_mm,
                     "y_mm": 40,
-                    "z_mm": 0,
-                    "roll_deg": 0,
-                    "pitch_deg": 0,
-                    "yaw_deg": 0,
+                    "rotation_deg": 0,
                 },
             }
         ],
@@ -61,20 +62,41 @@ def _selection_fixture(
         cad_path=cad,
         catalog_root=catalog,
     )
+    orientation_id = analyze_catalog_orientations(
+        workpiece["catalog_uuid"], catalog_root=catalog
+    )["orientations"][0]["orientation_id"]
     library = tmp_path / "library"
     first = generate_template_bundle(
-        _configuration(workpiece["catalog_uuid"], name="First", x_mm=40),
+        _configuration(
+            workpiece["catalog_uuid"],
+            orientation_id=orientation_id,
+            name="First",
+            x_mm=40,
+        ),
         catalog_root=catalog,
         library_root=library,
     )
     second = generate_template_bundle(
-        _configuration(workpiece["catalog_uuid"], name="Second", x_mm=80),
+        _configuration(
+            workpiece["catalog_uuid"],
+            orientation_id=orientation_id,
+            name="Second",
+            x_mm=80,
+        ),
         catalog_root=catalog,
         library_root=library,
     )
     run = tmp_path / "run"
     run.mkdir()
-    write_run_config(run, create_run_config(run_root=run, dataset_mode="pose_template"))
+    write_run_config(
+        run,
+        create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
+            run_root=run,
+            dataset_mode="pose_template",
+        ),
+    )
     select_pose_template(
         run,
         first["template_uuid"],
@@ -247,7 +269,12 @@ def test_archive_waits_until_active_template_snapshot_copy_finishes(
     fresh_run.mkdir()
     write_run_config(
         fresh_run,
-        create_run_config(run_root=fresh_run, dataset_mode="pose_template"),
+        create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
+            run_root=fresh_run,
+            dataset_mode="pose_template",
+        ),
     )
     original_copytree = selection_module.shutil.copytree
     copy_started = threading.Event()
@@ -298,9 +325,10 @@ def test_archive_waits_until_active_template_snapshot_copy_finishes(
 
     assert selection_errors == []
     assert archive_errors == []
-    assert load_pose_template_selection(fresh_run)["template_uuid"] == first[
-        "template_uuid"
-    ]
+    assert (
+        load_pose_template_selection(fresh_run)["template_uuid"]
+        == first["template_uuid"]
+    )
 
 
 def test_reader_recovers_prepared_selection_transaction_after_process_loss(
@@ -387,6 +415,8 @@ def test_selection_serializes_with_normal_run_config_writer(
             write_run_config(
                 run,
                 create_run_config(
+                    capture_intent="dataset",
+                    bop_annotation_mode="none",
                     run_root=run,
                     dataset_mode="pose_template",
                     fps=17,
@@ -443,13 +473,9 @@ def test_recovery_rejects_symlink_ancestor_before_touching_outside_run(
     transaction_id = "a" * 32
     entries = [
         {
-            "staged": (
-                f"processed/.pose_template_selection.{transaction_id}.tmp"
-            ),
+            "staged": (f"processed/.pose_template_selection.{transaction_id}.tmp"),
             "target": "processed/pose_template_selection",
-            "backup": (
-                f"processed/.pose_template_selection.{transaction_id}.bak"
-            ),
+            "backup": (f"processed/.pose_template_selection.{transaction_id}.bak"),
             "had_target": False,
         },
         {
@@ -484,15 +510,11 @@ def test_reader_cleans_only_exact_unjournaled_selection_staging_names(
     run, _library, first, _second = _selection_fixture(tmp_path)
     transaction_id = "b" * 32
     snapshot_orphan = (
-        run
-        / "processed"
-        / f".pose_template_selection.{transaction_id}.tmp"
+        run / "processed" / f".pose_template_selection.{transaction_id}.tmp"
     )
     snapshot_orphan.mkdir()
     (snapshot_orphan / "partial.txt").write_text("partial")
-    selection_orphan = (
-        run / f".pose_template_selection.json.{transaction_id}.tmp"
-    )
+    selection_orphan = run / f".pose_template_selection.json.{transaction_id}.tmp"
     selection_orphan.write_text('{"partial": true}')
     snapshot_decoy = run / "processed" / ".pose_template_selection.not-a-uuid.tmp"
     snapshot_decoy.mkdir()
@@ -522,6 +544,7 @@ def test_other_run_config_promoters_use_the_shared_per_run_lock(
                 run_root=run,
                 target_id="11111111-1111-4111-8111-111111111111",
                 placement_mode="unknown",
+                mounting_frame="robot_flange",
                 library_root=tmp_path / "targets",
             ),
         ),

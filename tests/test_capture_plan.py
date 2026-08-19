@@ -18,11 +18,15 @@ from posetestbot.pipeline.run_config import (
 def test_capture_plan_builds_sensor_commands_then_one_receiver(tmp_path: Path) -> None:
     run_root = tmp_path / "run-capture-plan"
     sensors = (
-        sensor_config_from_token("realsense:123:eye_in_hand:Cell RealSense:inverted"),
-        sensor_config_from_token("luxonis:auto:eye_in_hand:Cell OAK-D Pro"),
-        sensor_config_from_token("zed:auto:static:Cell ZED 2i"),
+        sensor_config_from_token(
+            "realsense_d435:123:eye_in_hand:Cell RealSense:inverted"
+        ),
+        sensor_config_from_token("oak_d_pro:auto:eye_in_hand:Cell OAK-D Pro"),
+        sensor_config_from_token("zed_2i:auto:static:Cell ZED 2i"),
     )
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
         sensors=sensors,
         fps=12,
@@ -34,12 +38,9 @@ def test_capture_plan_builds_sensor_commands_then_one_receiver(tmp_path: Path) -
     assert plan["schema_version"] == "capture_plan.v1"
     assert plan["dry_run"] is True
     assert plan["capture"]["requested_velocity_m_s"] == 0.15
-    assert plan["capture"]["velocity_m_s"] == 0.03
-    assert plan["capture"]["command_velocity_cap_m_s"] == 0.03
-    assert any(
-        "0.15 m/s is reduced to the host command cap 0.03 m/s" in note
-        for note in plan["notes"]
-    )
+    assert plan["capture"]["velocity_m_s"] == 0.15
+    assert plan["capture"]["command_velocity_cap_m_s"] == 1.0
+    assert not any("reduced to the host command cap" in note for note in plan["notes"])
     assert plan["capture"]["enabled_sensor_count"] == 3
     assert plan["capture"]["warmup_frames"] == 30
     assert [sensor["folder"] for sensor in plan["sensors"]] == [
@@ -113,7 +114,7 @@ def test_capture_plan_builds_sensor_commands_then_one_receiver(tmp_path: Path) -
     assert "--receive-start-timeout-s" not in receiver["command"]
     assert "--receive-idle-timeout-s" not in receiver["command"]
     velocity_index = receiver["command"].index("--capture_vel")
-    assert receiver["command"][velocity_index + 1] == "0.03"
+    assert receiver["command"][velocity_index + 1] == "0.15"
 
 
 def test_object_dataset_plan_passes_extended_speed_over_structured_protocol(
@@ -121,9 +122,11 @@ def test_object_dataset_plan_passes_extended_speed_over_structured_protocol(
 ) -> None:
     run_root = tmp_path / "run-extended-dataset-speed"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
         dataset_mode="pose_template",
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
         velocity_m_s=0.15,
     ).to_dict()
 
@@ -134,18 +137,20 @@ def test_object_dataset_plan_passes_extended_speed_over_structured_protocol(
     assert plan["capture"]["command_velocity_cap_m_s"] == 1.0
     assert plan["capture"]["command_protocol"] == "v1"
     assert not any("reduced to the host command cap" in note for note in plan["notes"])
-    assert any("structured robot_command.v1 protocol" in note for note in plan["notes"])
+    assert any("START always uses robot_command.v1" in note for note in plan["notes"])
     receiver = plan["commands"][-1]["command"]
     assert receiver[receiver.index("--capture_vel") + 1] == "0.15"
-    assert receiver[receiver.index("--protocol") + 1] == "v1"
+    assert "--protocol" not in receiver
     assert receiver[receiver.index("--maximum-command-velocity-m-s") + 1] == "1.0"
 
 
 def test_capture_plan_uses_adapter_resolution_validation(tmp_path: Path) -> None:
     run_root = tmp_path / "run-bad-resolution"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
         resolution="360p",
     ).to_dict()
 
@@ -158,10 +163,12 @@ def test_capture_plan_excludes_disabled_sensor_without_deleting_identity(
 ) -> None:
     run_root = tmp_path / "run-disabled-camera"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
         sensors=(
-            sensor_config_from_token("realsense:working:eye_in_hand:Working"),
-            sensor_config_from_token("realsense:offline:eye_in_hand:Offline"),
+            sensor_config_from_token("realsense_d435:working:eye_in_hand:Working"),
+            sensor_config_from_token("realsense_d435:offline:eye_in_hand:Offline"),
         ),
     ).to_dict()
     config["capture"]["sensors"][1]["enabled"] = False
@@ -182,35 +189,38 @@ def test_capture_plan_excludes_disabled_sensor_without_deleting_identity(
 def test_capture_plan_rejects_negative_warmup_frames(tmp_path: Path) -> None:
     run_root = tmp_path / "run-bad-warmup"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
     ).to_dict()
 
     with pytest.raises(ValueError, match="warmup_frames"):
         build_capture_plan(config, warmup_frames=-1)
 
 
-def test_capture_plan_treats_string_false_inverted_as_normal(tmp_path: Path) -> None:
+def test_capture_plan_rejects_string_false_inverted(tmp_path: Path) -> None:
     run_root = tmp_path / "run-string-false"
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
     ).to_dict()
     config["capture"]["sensors"][0]["inverted"] = "false"
 
-    plan = build_capture_plan(config).to_dict()
-
-    assert "--inverted" not in plan["commands"][0]["command"]
-    assert plan["sensors"][0]["metadata"]["inverted"] is False
+    with pytest.raises(ValueError, match="inverted must be a boolean"):
+        build_capture_plan(config)
 
 
-def test_capture_plan_stage_writes_manifest_artifact(tmp_path: Path) -> None:
+def test_plan_capture_cli_writes_manifest_artifact(tmp_path: Path) -> None:
     run_root = tmp_path / "run-cli"
     repo_root = Path(__file__).resolve().parents[1]
     config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
         run_root=run_root,
-        sensors=(sensor_config_from_token("realsense:123:static:Cell RealSense"),),
-        sequence_id="sync_aruco",
+        sensors=(sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),),
     )
     write_run_config(run_root, config)
 
@@ -219,12 +229,13 @@ def test_capture_plan_stage_writes_manifest_artifact(tmp_path: Path) -> None:
             "uv",
             "run",
             "python",
-            "scripts/run_capture_plan_stage.py",
+            "scripts/plan_capture.py",
             run_root.as_posix(),
             "--max-frames",
             "2",
             "--warmup-frames",
             "3",
+            "--json",
         ],
         cwd=repo_root,
         check=True,

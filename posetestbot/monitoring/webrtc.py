@@ -121,12 +121,14 @@ def build_monitor_webrtc_command(
 
 def load_monitor_status(monitor_root: str | Path) -> dict[str, Any] | None:
     path = Path(monitor_root) / MONITOR_STATUS_NAME
-    if not path.is_file():
+    if path.is_symlink() or not path.is_file():
         return None
     with open(path, encoding="utf-8") as handle:
         value = json.load(handle)
     if not isinstance(value, dict):
         raise ValueError(f"{path} must contain a JSON object")
+    if value.get("schema_version") != MONITOR_STATUS_SCHEMA:
+        raise ValueError(f"{path} must use schema_version {MONITOR_STATUS_SCHEMA!r}")
     return value
 
 
@@ -163,7 +165,7 @@ def monitor_status_health(
     if status is None:
         return False, "Monitor worker has not published status."
     if status.get("schema_version") != MONITOR_STATUS_SCHEMA:
-        return False, "Legacy monitor status is not reusable; restart the service."
+        return False, "Monitor status uses an unsupported schema; restart the service."
     heartbeat_age = _timestamp_age_s(status.get("heartbeat_at"), now=now)
     if heartbeat_age is None:
         return False, "Monitor heartbeat is missing or malformed."

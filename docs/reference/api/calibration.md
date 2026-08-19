@@ -1,8 +1,8 @@
 # Calibration API
 
-Calibration has three related surfaces: reusable target bundles, intent-level
-attempts, and compatibility stage/report endpoints. Promotion writes explicit
-evidence; it does not silently replace a reusable profile.
+Calibration has two calculation surfaces: reusable target bundles and
+intent-level attempts. Promotion writes explicit evidence; it does not silently
+replace a reusable profile.
 
 ## Calibration targets
 
@@ -45,9 +45,7 @@ Typical submission shape:
   "mode": "eye_in_hand",
   "sensor_keys": ["realsense_d435:825412070181"],
   "target_id": "…",
-  "synchronization_policy": {
-    "mode": "timestamp_aligned"
-  }
+  "synchronization_policy": "auto_offset"
 }
 ```
 
@@ -55,27 +53,12 @@ The exact accepted fields and candidate modes are returned by
 `/calibration/setup`; clients should use that setup payload rather than assume
 a mode is available.
 
-## Compatibility stage endpoints
-
-Each endpoint supports `GET` for computed/read evidence and `POST` for a
-validated run-owned write:
-
-- `/calibration/preflight`
-- `/calibration/observations`
-- `/calibration/candidates`
-- `/calibration/solver`
-- `/calibration/validation`
-
-These remain compatibility entry points and public report contracts. New
-operator flows use intent-level attempts where possible.
-
 ## Reusable profile selection
 
 | Method and path | Contract |
 | --- | --- |
 | `GET /ui/calibrations?run_root=…` | List compatible promoted calibration sources and current selection |
 | `POST /ui/calibrations/select` | Build an immutable single- or multi-source run snapshot |
-| `POST /ui/calibrations` | Compatibility alias for selection |
 
 Multi-source selection uses `calibration_profile_selection.v2`, binds every
 source bundle and per-sensor mapping, and records hashes of the exact combined

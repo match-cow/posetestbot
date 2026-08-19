@@ -139,9 +139,9 @@ canceled after submission because an inventory refresh may be finishing an
 interrupted, already confirmed transaction, and interruption during a
 filesystem commit or permanent deletion is not a safe boundary. The active run
 must be switched before either destructive action is available. A move accepts
-only another configured run root, refuses an occupied destination, and leaves
-a compatibility symlink at the original path so immutable path-bound evidence
-remains resolvable.
+only another configured run root and refuses an occupied destination. The
+transaction rebinds current run-root metadata and manifest records to the
+destination; it does not leave a symlink or alias at the former path.
 
 Mutation requests bind both the discovered run-folder identity and the
 inventory-time destination-root identity. They fail if either directory was
@@ -308,7 +308,7 @@ annotation-bearing BOP v5 dataset and either:
   rotation offsets to the dataset GT.
 
 It does not run a pose estimator, convert an estimator's proprietary output,
-or register an acquisition-pipeline stage. Install and verify its runtime with:
+or register an acquisition stage. Install and verify its runtime with:
 
 ```bash
 bash scripts/install.sh --with-bop-toolkit
@@ -460,8 +460,8 @@ The expected count is based on cameras addressable through `pyrealsense2`.
 RealSense devices seen only through USB descriptors remain in the status output
 for troubleshooting, but do not pass capture-readiness checks. SDK-enumerated
 cameras with a known `usb_type_descriptor` below USB 3 also fail readiness and
-capture-plan preflight. Older status records that do not contain transport
-metadata remain readable; a fresh status check is required before real capture.
+capture-plan preflight. A fresh status check with current transport evidence is
+required before real capture.
 
 Before capture, require every enabled/selected serial to be SDK-addressable and
 to report a 3.x-or-newer descriptor when the transport version is known. All
@@ -497,7 +497,7 @@ until the server returns the saved value. Each field-level save retains records
 for cameras that are currently disconnected. Workflow step 1 snapshots that
 default as the editable, run-owned
 `capture.sensors[].operator_alias` in `run_config.json`, with `display_name`
-retained as the compatibility-facing effective label. A later edit to the
+retained as the effective label. A later edit to the
 Devices default does not rename an existing run. Capture planning copies the
 alias into `capture_plan.json` and `dataset_manifest.json` while physical
 identity and folder naming remain bound to sensor type and device ID.
@@ -525,29 +525,24 @@ cannot be changed after raw capture evidence exists.
 
 Static `camera -> template_base` profiles are reference-frame dependent. New
 profiles retain the exact `sunrise_reference_frame_path` observed in
-`robot_pose.v1` packets. Workflow step 1 exposes this as the required
-**Robot-pose Sunrise reference**. Both static-camera calibration and ordinary
-object capture use `/PoseTestBot/PoseTemplateBase`, so a promoted static
-profile directly locates that camera in the frame of the printed pose template
-and its objects. `/PoseTestBot/TemplateBase` remains only the parent of the
-nine-frame calibration application's taught motion waypoints; it is not the
-pose-stream reference or static-calibration result frame. The single-frame
-static-camera alternative instead teaches
+`robot_pose.v1` packets. Workflow step 1 displays the fixed commissioned
+**PoseTemplateBase robot-pose reference**; it is not browser-editable. Both
+static-camera calibration and ordinary object capture use
+`/PoseTestBot/PoseTemplateBase`, so a promoted static profile directly locates
+that camera in the frame of the printed pose template and its objects.
+`/PoseTestBot/TemplateBase` remains only the parent of the nine-frame
+calibration application's taught motion waypoints; it is not the pose-stream
+reference or static-calibration result frame. The single-frame static-camera
+alternative instead teaches
 `/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle` as the
 bottom-center grid point, then generates the other points in the parent
 `PoseTemplateBase` X/Z axes. Its center is 50 mm above the taught point in
 parent-frame Z, and no generated point falls below that bottom anchor. See
 [the controller contract](docs/IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md).
-The same setting is available from the CLI:
 
-```bash
-uv run python scripts/create_run_config.py working_data/object_run \
-  --robot-pose-sunrise-reference-frame-path /PoseTestBot/PoseTemplateBase
-```
-
-Selection fails closed when the destination omits this expectation, the static
-profile predates v1 path provenance, or the paths differ. Existing raw pose
-packets are rechecked as well. Preexisting static profiles produced from poses
+Selection fails closed when the current fixed expectation is absent, the
+static profile omits current path provenance, or the paths differ. Existing raw
+pose packets are rechecked as well. Profiles produced from poses
 expressed in `/PoseTestBot/TemplateBase` are not relabelled as
 `/PoseTestBot/PoseTemplateBase`; recalibrate them against the intended result
 frame. An eye-in-hand `camera -> robot_flange` profile does not depend on this
@@ -557,7 +552,7 @@ and is aligned to the intended physical datum.
 
 #### Timestamp-aligned capture
 
-`run_config.v3` supports one synchronization mode: `timestamp_aligned`.
+`run_config.v4` supports one synchronization mode: `timestamp_aligned`.
 RealSense, OAK-D Pro, and ZED 2i recordings retain their camera timestamp and
 host-receive evidence; non-destructive synchronization pairs eligible frames
 with the robot pose stream and records the applied calibration offset and pose
@@ -633,8 +628,9 @@ MPLCONFIGDIR=/tmp/posetestbot-mpl UV_CACHE_DIR=/tmp/uv-cache \
 
 The script validates `iiwa/calibration_teaching_plan.v2.json` and writes
 `docs/images/iiwa_calibration_teaching_plan.svg` plus the corresponding PNG.
-The procedure and printable sign-off sheet are linked from
-`docs/IIWA_CALIBRATION_VARIANCE_PROPOSAL.md`.
+The operator acceptance tasks are summarized in `docs/COMMISSIONING.md`; the
+detailed reusable teaching checklist remains in
+`docs/IIWA_CALIBRATION_TEACHING_CHECKLIST.md`.
 
 ### Technical Documentation Site
 
@@ -716,7 +712,7 @@ as live state.
 
 Starting or retrying the monitor from the dashboard is safe with respect to
 the robot: it queues only the monitor worker and never runs an acquisition
-pipeline or robot command. A physical monitor smoke test still requires
+capture recipe or robot command. A physical monitor smoke test still requires
 explicit operator authorization because it opens the USB camera.
 
 All commands queued by any supported web entry point run behind a persisted
@@ -762,9 +758,9 @@ uv run python scripts/robot_status.py --json
 Create and inspect a physical capture plan without executing it:
 
 ```bash
-uv run python scripts/create_run_config.py working_data/test_run
-uv run python scripts/run_pipeline_sequence.py working_data/test_run \
-  --sequence real_full_capture_validation --plan-only
+uv run python scripts/create_run_config.py working_data/test_run \
+  --intent dataset --annotation-mode none
+uv run python scripts/plan_capture.py working_data/test_run --json
 ```
 
 ## Validation
@@ -836,7 +832,7 @@ git diff --check
   execution additionally requires explicit operator authorization and all
   three command acknowledgements: `--operator-authorized --allow-cameras
   --allow-real-robot`. Despite the shared lab safety gate, this monitor-only
-  command contains no robot or acquisition-pipeline action.
+  command contains no robot or physical-capture action.
 - `pyzed.sl` missing: install the Stereolabs ZED SDK and Python bindings outside
   uv, then rerun `uv run python scripts/runtime_status.py --json`.
 - Camera SDK imports succeed but devices are missing: check USB cabling, power,

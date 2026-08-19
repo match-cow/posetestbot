@@ -27,6 +27,7 @@ from posetestbot.pose_templates.catalog import (
     update_catalog_object_metadata,
 )
 from posetestbot.pose_templates.library import generate_template_bundle
+from posetestbot.pose_templates.orientations import analyze_catalog_orientations
 
 
 class FakeMeshBackend:
@@ -117,20 +118,18 @@ def add_workpiece(catalog_root: Path, source: Path, **metadata) -> dict:
     )
 
 
-def referenced_template_configuration(catalog_uuid: str) -> dict:
+def referenced_template_configuration(catalog_uuid: str, orientation_id: str) -> dict:
     return {
         "display_name": "Workpiece deletion guard",
         "instances": [
             {
                 "instance_uuid": "11111111-1111-4111-8111-111111111111",
                 "catalog_uuid": catalog_uuid,
+                "orientation_id": orientation_id,
                 "pose": {
                     "x_mm": 40,
                     "y_mm": 40,
-                    "z_mm": 0,
-                    "roll_deg": 0,
-                    "pitch_deg": 0,
-                    "yaw_deg": 0,
+                    "rotation_deg": 0,
                 },
             }
         ],
@@ -333,8 +332,11 @@ def test_direct_delete_blocks_valid_pose_template_references(
         trimesh.creation.box(extents=(20, 10, 10)).export(file_type="stl")
     )
     record = add_workpiece(root, source, name="Referenced fixture")
+    orientation_id = analyze_catalog_orientations(
+        record["catalog_uuid"], catalog_root=root
+    )["orientations"][0]["orientation_id"]
     bundle = generate_template_bundle(
-        referenced_template_configuration(record["catalog_uuid"]),
+        referenced_template_configuration(record["catalog_uuid"], orientation_id),
         catalog_root=root,
         library_root=library,
     )

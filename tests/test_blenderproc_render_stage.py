@@ -39,6 +39,15 @@ def write_json(path: Path, value: dict) -> None:
 
 def create_prepared_render_fixture(tmp_path: Path) -> tuple[Path, Path]:
     run_root = tmp_path / "run-1"
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            capture_intent="dataset",
+            bop_annotation_mode="pose_and_masks",
+            sensors=(SensorRunConfig("realsense_d435", "123", "D435"),),
+        ),
+    )
     bproc_folder = (
         run_root / "processed" / "synchronized" / "realsense_123" / "blenderproc"
     )
@@ -122,6 +131,8 @@ def test_blenderproc_render_stage_dry_run_writes_plan_and_manifest(
             sys.executable,
             str(repo_root / "scripts" / "run_blenderproc_render_stage.py"),
             str(run_root),
+            "--annotation-mode",
+            "pose_and_masks",
             "--dry-run",
         ],
         cwd=repo_root,
@@ -180,6 +191,8 @@ def test_blenderproc_render_default_ignores_disabled_stale_sensor_folder(
     write_run_config(
         run_root,
         create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="pose_and_masks",
             run_root=run_root,
             sensors=(
                 SensorRunConfig("realsense_d435", "123", "Enabled"),
@@ -192,6 +205,8 @@ def test_blenderproc_render_default_ignores_disabled_stale_sensor_folder(
         sys.executable,
         str(repo_root / "scripts" / "run_blenderproc_render_stage.py"),
         str(run_root),
+        "--annotation-mode",
+        "pose_and_masks",
         "--dry-run",
     ]
 
@@ -345,6 +360,7 @@ def test_render_failure_preserves_every_previous_sensor_output(tmp_path: Path) -
         / "blenderproc_render_720p_multi.py",
         subdir="blenderproc",
         blenderproc_executable="blenderproc",
+        annotation_mode="pose_and_masks",
     )
     calls = 0
 
@@ -377,6 +393,7 @@ def test_render_rejects_blenderproc_masks_or_gt_info(tmp_path: Path) -> None:
         / "blenderproc_render_720p_multi.py",
         subdir="blenderproc",
         blenderproc_executable="blenderproc",
+        annotation_mode="pose_and_masks",
     )
 
     def invalid_runner(command: list[str], *, check: bool) -> None:
@@ -410,6 +427,7 @@ def test_render_rejects_same_key_matched_pose_value_mutation(
         / "blenderproc_render_720p_multi.py",
         subdir="blenderproc",
         blenderproc_executable="blenderproc",
+        annotation_mode="pose_and_masks",
     )
     matched_path = prepared.parent / MATCH_ROBOT_EE_POSES
     matched = json.loads(matched_path.read_text())
@@ -433,6 +451,15 @@ def test_render_rejects_same_key_matched_pose_value_mutation(
 
 def test_objectless_render_skips_runtime_and_input_validation(tmp_path: Path) -> None:
     run_root = tmp_path / "objectless"
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            capture_intent="dataset",
+            bop_annotation_mode="pose_and_masks",
+            sensors=(SensorRunConfig("realsense_d435", "123", "D435"),),
+        ),
+    )
     repo_root = Path(__file__).resolve().parents[1]
 
     result = subprocess.run(
@@ -440,6 +467,8 @@ def test_objectless_render_skips_runtime_and_input_validation(tmp_path: Path) ->
             sys.executable,
             str(repo_root / "scripts" / "run_blenderproc_render_stage.py"),
             str(run_root),
+            "--annotation-mode",
+            "pose_and_masks",
             "--objectless",
             "--render-script",
             str(tmp_path / "missing.py"),
@@ -471,6 +500,8 @@ def test_blenderproc_render_prefers_rectified_sensor_tree(tmp_path: Path) -> Non
             sys.executable,
             str(repo_root / "scripts" / "run_blenderproc_render_stage.py"),
             str(run_root),
+            "--annotation-mode",
+            "pose_and_masks",
             "--dry-run",
         ],
         cwd=repo_root,

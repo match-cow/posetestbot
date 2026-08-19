@@ -6,6 +6,8 @@ from importlib.resources import files
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
 from posetestbot.web.app import create_app
 from posetestbot.web.routes import ui as web_ui
@@ -15,15 +17,15 @@ from posetestbot.web.security import DEFAULT_RUN_ROOTS
 def _write_valid_run(
     path: Path,
     *,
-    sequence: str,
-    plan_only: bool = True,
+    intent: str = "dataset",
+    annotation_mode: str = "none",
     run_name: str | None = None,
 ) -> None:
     config = create_run_config(
         run_root=path,
+        capture_intent=intent,
+        bop_annotation_mode=annotation_mode,
         run_name=run_name,
-        sequence_id=sequence,
-        plan_only=plan_only,
     )
     write_run_config(path, config)
 
@@ -40,10 +42,11 @@ def test_ui_run_discovery_is_contained_safe_and_newest_first(
     jobs = allowed / "jobs"
     object_catalog = allowed / "object_catalog"
     outside = tmp_path / "outside"
-    _write_valid_run(older, sequence="sync_aruco")
+    _write_valid_run(older, intent="calibration")
     _write_valid_run(
         newer,
-        sequence="real_full_capture_validation",
+        intent="dataset",
+        annotation_mode="pose_and_masks",
         run_name="Newest calibration recording",
     )
     invalid.mkdir()
@@ -72,10 +75,15 @@ def test_ui_run_discovery_is_contained_safe_and_newest_first(
     assert object_catalog.as_posix() not in paths
     assert paths.index(newer.as_posix()) < paths.index(older.as_posix())
     records = {item["name"]: item for item in payload["runs"]}
-    assert records["newer"]["sequence"] == "real_full_capture_validation"
+    assert records["newer"]["intent"] == "dataset"
+    assert records["newer"]["annotation_mode"] == "pose_and_masks"
+    assert records["older"]["intent"] == "calibration"
+    assert records["older"]["annotation_mode"] == "none"
+    assert records["newer"]["run_id"]
     assert records["newer"]["run_name"] == "Newest calibration recording"
     assert records["older"]["run_name"] == "older"
-    assert records["newer"]["plan_only"] is True
+    assert "sequence" not in records["newer"]
+    assert "plan_only" not in records["newer"]
     assert records["newer"]["config_valid"] is True
     assert records["invalid"]["config_valid"] is False
     assert records["invalid"]["run_name"] is None
@@ -96,7 +104,9 @@ def test_ui_bootstrap_and_run_query_reject_outside_paths(
     client = create_app().test_client()
 
     bootstrap = client.get("/ui/bootstrap").get_json()
-    outside = client.get("/ui/overview", query_string={"run_root": tmp_path / "outside"})
+    outside = client.get(
+        "/ui/overview", query_string={"run_root": tmp_path / "outside"}
+    )
 
     assert bootstrap["schema_version"] == "web_bootstrap.v1"
     assert bootstrap["default_run_root"] == (allowed / "console-default").as_posix()
@@ -128,9 +138,13 @@ def test_ui_storage_reports_selected_run_filesystem_capacity(
         ),
     )
 
-    response = create_app().test_client().get(
-        "/ui/storage",
-        query_string={"run_root": run_root.as_posix()},
+    response = (
+        create_app()
+        .test_client()
+        .get(
+            "/ui/storage",
+            query_string={"run_root": run_root.as_posix()},
+        )
     )
     payload = response.get_json()
 
@@ -173,7 +187,9 @@ def test_installed_package_data_contains_self_contained_ui() -> None:
     html = index.read_text()
     names = re.findall(r"/static/ui/assets/([^\"']+)", html)
     assert names
-    assert all(package.joinpath("static", "ui", "assets", name).is_file() for name in names)
+    assert all(
+        package.joinpath("static", "ui", "assets", name).is_file() for name in names
+    )
     assert "http://" not in html
     assert "https://" not in html
     hri = package.joinpath("static", "cell", "template_HRI_LBR_all_center_v2.svg")
@@ -181,27 +197,58 @@ def test_installed_package_data_contains_self_contained_ui() -> None:
     assert 'width="420mm"' in hri.read_text()
 
 
-def test_run_config_endpoint_refuses_non_plan_capture_sequence(
+@pytest.mark.parametrize(
+    ("method", "path", "expected_status"),
+    [
+        ("get", "/pipeline/stages", 404),
+        ("get", "/pipeline/stages/capture_plan", 404),
+        ("get", "/pipeline/sequences", 404),
+        ("get", "/pipeline/sequences/sync_aruco", 404),
+        ("get", "/pipeline/workflows", 404),
+        ("get", "/pipeline/recommendations", 404),
+        ("post", "/pipeline/run", 404),
+        ("post", "/pipeline/run-config", 404),
+        ("post", "/pipeline/run-sequence", 404),
+        ("post", "/pipeline/preflight", 404),
+        ("post", "/capture-plan", 404),
+        ("post", "/capture-plan/preflight", 404),
+        ("post", "/capture-plan/execution", 404),
+        ("post", "/calibration/preflight", 404),
+        ("post", "/calibration/observations", 404),
+        ("post", "/calibration/candidates", 404),
+        ("post", "/calibration/solver", 404),
+        ("post", "/calibration/validation", 404),
+        ("post", "/run-command", 404),
+        ("post", "/ui/calibrations", 405),
+        ("post", "/pose-templates/validate", 404),
+        ("get", "/pose-templates/validate/aabbccdd", 404),
+        ("post", "/pose-templates/runs/placement", 404),
+        (
+            "get",
+            "/pose-templates/library/11111111-1111-4111-8111-111111111111/instances/11111111-1111-4111-8111-111111111111/assets/canonical_ply",
+            404,
+        ),
+    ],
+)
+def test_removed_generic_or_compatibility_routes_are_not_registered(
     tmp_path: Path,
     monkeypatch,
+    method: str,
+    path: str,
+    expected_status: int,
 ) -> None:
     run_root = tmp_path / "physical"
-    _write_valid_run(
-        run_root,
-        sequence="real_full_capture_validation",
-        plan_only=False,
-    )
+    _write_valid_run(run_root)
     monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", tmp_path.as_posix())
     client = create_app().test_client()
 
-    response = client.post(
-        "/pipeline/run-config",
+    response = client.open(
+        path,
+        method=method.upper(),
         json={"run_root": run_root.as_posix()},
     )
 
-    assert response.status_code == 409
-    assert "cannot be queued" in response.get_json()["output"]
-    assert "gated physical capture" in response.get_json()["output"]
+    assert response.status_code == expected_status
 
 
 def test_run_config_endpoint_never_persists_capture_gates(
@@ -210,19 +257,23 @@ def test_run_config_endpoint_never_persists_capture_gates(
 ) -> None:
     monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", tmp_path.as_posix())
     run_root = tmp_path / "unsafe-options"
-    response = create_app().test_client().post(
-        "/run-config",
-        json={
-            "run_root": run_root.as_posix(),
-            "sequence_options": {
-                "capture_execution": {
-                    "allow_cameras": True,
-                    "allow_real_robot": True,
-                }
+    response = (
+        create_app()
+        .test_client()
+        .post(
+            "/run-config",
+            json={
+                "run_root": run_root.as_posix(),
+                "sequence_options": {
+                    "capture_execution": {
+                        "allow_cameras": True,
+                        "allow_real_robot": True,
+                    }
+                },
             },
-        },
+        )
     )
 
     assert response.status_code == 400
-    assert "must not be persisted" in response.get_json()["output"]
+    assert "unsupported fields: sequence_options" in response.get_json()["output"]
     assert not (run_root / "run_config.json").exists()
