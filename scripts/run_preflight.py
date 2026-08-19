@@ -16,7 +16,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Load run_config.json and summarize robot, sensor, runtime, and "
-            "workflow-input readiness without starting physical capture."
+            "workflow-input readiness, including bounded non-recording opens "
+            "of the enabled selected cameras."
         )
     )
     parser.add_argument("run_root", help="Run root containing run_config.json.")
@@ -28,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-sensors",
         action="store_true",
-        help="Skip live sensor discovery.",
+        help="Skip live sensor discovery and selected-camera open probes.",
     )
     parser.add_argument(
         "--no-runtimes",

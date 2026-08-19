@@ -45,8 +45,11 @@ def test_motion_apps_do_not_poll_completion_in_the_sampling_hot_path() -> None:
     assert "robot.move(ptp(jointTarget(A1_MAX_RAD))" in ordinary
     assert "robot.move(lin(target)" in calibration
     assert "robot.move(linRel(offset, calibrationCenter)" in calibration
-    assert "robot.move(linRel(offset, referenceFrame)" in static_calibration
-    assert "offset, poseTemplateBase, cartVelocityMmS" in static_calibration
+    assert "robot.move(linRel(offset)" in static_calibration
+    assert "linRel(offset," not in static_calibration
+    assert "poseTemplateBase = requiredFrame(POSE_TEMPLATE_BASE_PATH);" in (
+        static_calibration
+    )
 
 
 def test_v1_packets_carry_target_and_measured_sender_cadence() -> None:

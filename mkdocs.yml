@@ -98,8 +98,6 @@ nav:
       - Single-frame static calibration: IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md
       - Nine-frame teaching checklist: IIWA_CALIBRATION_TEACHING_CHECKLIST.md
       - Pose-stream cadence: IIWA_POSE_STREAM_CADENCE.md
-  - Design record:
-      - Clean-break streamlining: STREAMLINING_PLAN.md
   - Documentation maintenance: GITHUB_PAGES.md
 
 copyright: PoseTestBot is research software; physical execution remains operator-controlled.

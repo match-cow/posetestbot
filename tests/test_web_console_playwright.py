@@ -17,6 +17,17 @@ from posetestbot.web.app import create_app
 pytestmark = pytest.mark.playwright
 
 RUN_ROOT = "/tmp/posetestbot-console/new-run"
+RUN_CONFIG_SENSOR_INPUT_FIELDS = {
+    "sensor_type",
+    "device_id",
+    "display_name",
+    "mounting_mode",
+    "enabled",
+    "calibration_profile_id",
+    "inverted",
+    "metadata",
+    "operator_alias",
+}
 LOCAL_JOBS_URL_RE = re.compile(r"^https?://[^/]+/jobs(?:\?.*)?$")
 
 
@@ -401,7 +412,11 @@ def selected_sensor_status() -> dict:
                         "device_id": "wrist-1",
                         "display_name": "RealSense wrist",
                         "effective_display_name": "Wrist RGB-D",
+                        "alias": "Wrist RGB-D",
                         "connected": True,
+                        "capture_ready": True,
+                        "capture_readiness_reason": None,
+                        "live_rgb_preview_supported": True,
                         "mounting_mode": "eye_in_hand",
                         "inverted": False,
                     },
@@ -410,7 +425,11 @@ def selected_sensor_status() -> dict:
                         "device_id": "static-1",
                         "display_name": "RealSense static",
                         "effective_display_name": "Static RGB-D",
+                        "alias": "Static RGB-D",
                         "connected": True,
+                        "capture_ready": True,
+                        "capture_readiness_reason": None,
+                        "live_rgb_preview_supported": True,
                         "mounting_mode": "static",
                         "inverted": True,
                     },
@@ -889,9 +908,25 @@ def install_common_mocks(
 
     def config_handler(route) -> None:
         if route.request.method == "POST":
-            requests.append(
-                {"path": "/run-config", "body": route.request.post_data_json}
+            body = route.request.post_data_json
+            requests.append({"path": "/run-config", "body": body})
+            unexpected_sensor_fields = sorted(
+                {
+                    field
+                    for sensor in body.get("sensors", [])
+                    for field in set(sensor) - RUN_CONFIG_SENSOR_INPUT_FIELDS
+                }
             )
+            if unexpected_sensor_fields:
+                fulfill_json(
+                    route,
+                    {
+                        "output": "Sensor entry contains unsupported fields: "
+                        + ", ".join(unexpected_sensor_fields)
+                    },
+                    status=400,
+                )
+                return
             fulfill_json(
                 route, {"config": config_payload, "output": "written"}, status=201
             )
@@ -969,19 +1004,22 @@ def test_navigation_run_fallback_persistence_and_both_themes(
         "Calibration baseline"
     )
     expect(active_run_context.get_by_test_id("active-run-path")).to_have_text(RUN_ROOT)
-    expect(page.get_by_role("combobox", name="Active run folder")).to_have_count(0)
-    change_run = page.get_by_role("link", name="Change active run folder")
-    expect(change_run).to_have_attribute("href", "#/run-folders")
-    summary_box = active_run_context.locator(":scope > div").bounding_box()
-    change_box = change_run.bounding_box()
+    run_switcher = page.get_by_role("combobox", name="Active run folder")
+    expect(run_switcher).to_be_visible()
+    manage_runs = page.get_by_role("link", name="Manage run folders")
+    expect(manage_runs).to_have_attribute("href", "#/run-folders")
+    summary_box = run_switcher.bounding_box()
+    manage_box = manage_runs.bounding_box()
     app_header_box = page.locator("header").first.bounding_box()
     assert (
         summary_box is not None
-        and change_box is not None
+        and manage_box is not None
         and app_header_box is not None
     )
-    assert summary_box["height"] == pytest.approx(change_box["height"], abs=1)
-    assert summary_box["y"] == pytest.approx(change_box["y"], abs=1)
+    assert summary_box["height"] == pytest.approx(manage_box["height"], abs=1)
+    assert summary_box["height"] <= 40
+    assert app_header_box["height"] <= 56
+    assert summary_box["y"] == pytest.approx(manage_box["y"], abs=1)
     top_gap = summary_box["y"] - app_header_box["y"]
     bottom_gap = (
         app_header_box["y"]
@@ -990,7 +1028,17 @@ def test_navigation_run_fallback_persistence_and_both_themes(
         - summary_box["height"]
     )
     assert top_gap == pytest.approx(bottom_gap, abs=1)
-    change_run.click()
+    run_switcher.click()
+    expect(page.get_by_role("option")).to_have_count(2)
+    page.get_by_role("option").filter(has_text="Object A capture").click()
+    expect(page).to_have_url(f"{console_server.url}/#/dashboard")
+    expect(active_run_context).to_contain_text("Object A capture")
+    expect(active_run_context).to_contain_text("/tmp/posetestbot-console/old-run")
+    assert (
+        page.evaluate("localStorage.getItem('posetestbot.selectedRun')")
+        == "/tmp/posetestbot-console/old-run"
+    )
+    manage_runs.click()
     expect(page).to_have_url(f"{console_server.url}/#/run-folders")
     expect(page.get_by_role("heading", name="Run folders", exact=True)).to_be_visible()
     cluster_storage = page.get_by_test_id("cluster-storage-section")
@@ -1001,8 +1049,8 @@ def test_navigation_run_fallback_persistence_and_both_themes(
         "independent of every pose-estimator runtime"
     )
     active_selection = page.get_by_test_id("active-run-selection")
-    expect(active_selection).to_contain_text("Calibration baseline")
-    expect(active_selection).to_contain_text(RUN_ROOT)
+    expect(active_selection).to_contain_text("Object A capture")
+    expect(active_selection).to_contain_text("/tmp/posetestbot-console/old-run")
     cluster_storage_box = cluster_storage.bounding_box()
     active_selection_box = active_selection.bounding_box()
     assert cluster_storage_box is not None and active_selection_box is not None
@@ -1025,20 +1073,30 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     expect(chooser.get_by_test_id("run-selection-row")).to_contain_text(
         "Object A capture"
     )
-    chooser.get_by_role("button", name="Use old-run as active run").click()
-    expect(active_run_context).to_contain_text("Object A capture")
-    expect(active_run_context).to_contain_text("/tmp/posetestbot-console/old-run")
+    expect(
+        chooser.get_by_role("button", name="old-run is the active run")
+    ).to_be_disabled()
+    chooser.get_by_role("textbox", name="Search run folders").fill(
+        "Calibration baseline"
+    )
+    chooser.get_by_role("button", name="Use new-run as active run").click()
+    expect(active_run_context).to_contain_text("Calibration baseline")
+    expect(active_run_context).to_contain_text(RUN_ROOT)
     assert (
         page.evaluate("localStorage.getItem('posetestbot.selectedRun')")
-        == "/tmp/posetestbot-console/old-run"
+        == RUN_ROOT
     )
     page.get_by_role("complementary", name="Application sidebar").get_by_role(
         "link", name="Devices"
     ).click()
     expect(page).to_have_url(f"{console_server.url}/#/devices")
     page.reload(wait_until="networkidle")
+    expect(active_run_context).to_contain_text("Calibration baseline")
+    page.get_by_role("combobox", name="Active run folder").click()
+    page.get_by_role("option").filter(has_text="Object A capture").click()
+    expect(page).to_have_url(f"{console_server.url}/#/devices")
     expect(active_run_context).to_contain_text("Object A capture")
-    page.get_by_role("link", name="Change active run folder").click()
+    page.get_by_role("link", name="Manage run folders").click()
     expect(
         page.get_by_text("Use one sibling folder per physical acquisition.")
     ).to_be_visible()
@@ -1113,7 +1171,137 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     )
 
 
-def test_active_run_header_alignment_and_change_affordance(
+def test_run_folders_queues_confirmed_cluster_archive_deletion(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    archive_id = "archive-12345678-1234-4234-9234-123456789abc"
+    job_id = "job-12345678-1234-4234-9234-123456789abc"
+    delete_requests: list[dict] = []
+    archive_deleted = {"value": False}
+    archive = {
+        "schema_version": "posetestbot_cluster_archive.v1",
+        "archive_id": archive_id,
+        "job_id": "job-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "state": "succeeded",
+        "status": "succeeded",
+        "source_run_root": "/tmp/posetestbot-console/old-run",
+        "source_identity": {"device": 1, "inode": 11},
+        "created_at": "2026-08-18T10:00:00Z",
+        "updated_at": "2026-08-18T10:05:00Z",
+        "archive_sha256": "a" * 64,
+        "operator": "Archive Operator",
+        "verified": True,
+    }
+
+    page.unroute("**/cluster/archives")
+    page.route(
+        "**/cluster/archives",
+        lambda route: fulfill_json(
+            route,
+            {
+                "archives": [] if archive_deleted["value"] else [archive],
+                "integration": {"enabled": True},
+                "storage": {
+                    "ready": True,
+                    "read": True,
+                    "mutation": True,
+                    "blockers": [],
+                },
+            },
+        ),
+    )
+
+    def delete_handler(route) -> None:
+        delete_requests.append(
+            {
+                "method": route.request.method,
+                "path": urlparse(route.request.url).path,
+                "body": route.request.post_data_json,
+            }
+        )
+        archive_deleted["value"] = True
+        fulfill_json(
+            route,
+            {
+                "job": {
+                    "schema_version": "posetestbot_cluster_job.v1",
+                    "job_id": job_id,
+                    "kind": "archive-delete",
+                    "state": "queued",
+                    "status": "queued",
+                    "created_at": "2026-08-19T10:00:00Z",
+                    "updated_at": "2026-08-19T10:00:00Z",
+                    "payload": {
+                        "archive_id": archive_id,
+                        "operator": "Delete Operator",
+                    },
+                    "result": None,
+                    "error": None,
+                    "log_available": True,
+                    "cancel_requested": False,
+                    "terminal": False,
+                }
+            },
+            status=202,
+        )
+
+    page.route(f"**/cluster/archives/{archive_id}", delete_handler)
+    page.route(
+        f"**/cluster/jobs/{job_id}",
+        lambda route: fulfill_json(
+            route,
+            {
+                "job": {
+                    "schema_version": "posetestbot_cluster_job.v1",
+                    "job_id": job_id,
+                    "kind": "archive-delete",
+                    "state": "succeeded",
+                    "status": "succeeded",
+                    "created_at": "2026-08-19T10:00:00Z",
+                    "updated_at": "2026-08-19T10:00:01Z",
+                    "payload": {
+                        "archive_id": archive_id,
+                        "operator": "Delete Operator",
+                    },
+                    "result": None,
+                    "error": None,
+                    "log_available": True,
+                    "cancel_requested": False,
+                    "terminal": True,
+                }
+            },
+        ),
+    )
+
+    page.goto(f"{console_server.url}/#/run-folders", wait_until="networkidle")
+    cluster_storage = page.get_by_test_id("cluster-storage-section")
+    expect(cluster_storage).to_contain_text(archive_id)
+    cluster_storage.locator("#archive-operator").fill("Delete Operator")
+    cluster_storage.get_by_role("button", name="Delete").click()
+
+    dialog = page.get_by_test_id("cluster-archive-delete-dialog")
+    expect(dialog).to_contain_text("does not delete the local acquisition folder")
+    queue_delete = dialog.get_by_role("button", name="Queue archive deletion")
+    expect(queue_delete).to_be_disabled()
+    dialog.get_by_test_id("cluster-archive-delete-confirmation").click()
+    expect(queue_delete).to_be_enabled()
+    queue_delete.click()
+
+    expect(dialog).not_to_be_visible()
+    expect(page.get_by_text("Cluster archive deletion queued")).to_be_visible()
+    expect(cluster_storage).not_to_contain_text(archive_id)
+    assert delete_requests == [
+        {
+            "method": "DELETE",
+            "path": f"/cluster/archives/{archive_id}",
+            "body": {"confirm": True, "operator": "Delete Operator"},
+        }
+    ]
+    expect(page.get_by_test_id("run-folders-table")).to_contain_text("old-run")
+
+
+def test_active_run_header_is_compact_dropdown_with_management_handoff(
     console_server, page
 ) -> None:
     install_common_mocks(page)
@@ -1121,18 +1309,96 @@ def test_active_run_header_alignment_and_change_affordance(
     page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
 
     active_run_context = page.get_by_test_id("active-run-context")
-    change_run = page.get_by_role("link", name="Change active run folder")
+    run_switcher = page.get_by_role("combobox", name="Active run folder")
+    manage_runs = page.get_by_role("link", name="Manage run folders")
     active_context_box = active_run_context.bounding_box()
+    switcher_box = run_switcher.bounding_box()
+    header_box = page.locator("header").first.bounding_box()
     page_content_box = page.locator("main > div").first.bounding_box()
 
-    assert active_context_box is not None and page_content_box is not None
+    assert (
+        active_context_box is not None
+        and switcher_box is not None
+        and header_box is not None
+        and page_content_box is not None
+    )
     assert active_context_box["x"] == pytest.approx(page_content_box["x"], abs=1)
     assert (
         active_context_box["x"] + active_context_box["width"]
         <= page_content_box["x"] + page_content_box["width"] + 1
     )
-    expect(change_run).to_have_css("background-color", "rgb(177, 203, 33)")
-    expect(change_run).to_contain_text("Change run")
+    assert switcher_box["height"] <= 40
+    assert header_box["height"] <= 56
+    expect(run_switcher).to_contain_text("Active acquisition run")
+    expect(manage_runs).to_contain_text("Run folders")
+    expect(manage_runs).to_have_attribute("href", "#/run-folders")
+    run_switcher.click()
+    expect(page.get_by_test_id("active-run-options").get_by_role("option")).to_have_count(2)
+    expect(
+        page.get_by_role("option").filter(has_text="Object A capture")
+    ).to_contain_text("/tmp/posetestbot-console/old-run")
+    page.keyboard.press("Escape")
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
+@pytest.mark.parametrize("viewport", [(1920, 1080), (1440, 900)])
+def test_dashboard_lists_connected_camera_type_and_alias_or_device_id(
+    console_server, page, viewport: tuple[int, int]
+) -> None:
+    install_common_mocks(page)
+    page.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+    sensor_status = selected_sensor_status()
+    sensor_status["families"].extend(
+        [
+            {
+                "sensor_type": "oak_d_pro",
+                "display_name": "Luxonis OAK-D Pro",
+                "devices": [
+                    {
+                        "sensor_type": "oak_d_pro",
+                        "device_id": "oak-serial-77",
+                        "display_name": "OAK-D Pro oak-serial-77",
+                        "effective_display_name": "OAK-D Pro oak-serial-77",
+                        "alias": None,
+                        "connected": True,
+                    }
+                ],
+            },
+            {
+                "sensor_type": "zed_2i",
+                "display_name": "Stereolabs ZED 2i",
+                "devices": [
+                    {
+                        "sensor_type": "zed_2i",
+                        "device_id": "zed-offline",
+                        "alias": "Offline overview",
+                        "connected": False,
+                    }
+                ],
+            },
+        ]
+    )
+    sensor_status["total_connected"] = 3
+    page.route(
+        "**/sensors/status", lambda route: fulfill_json(route, sensor_status)
+    )
+
+    page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
+
+    summary = page.get_by_test_id("dashboard-sensor-summary")
+    expect(summary).to_contain_text("3 connected")
+    rows = summary.get_by_test_id("dashboard-connected-camera")
+    expect(rows).to_have_count(3)
+    expect(rows.nth(0)).to_have_text("Intel RealSense D435·Wrist RGB-D")
+    expect(rows.nth(1)).to_have_text("Intel RealSense D435·Static RGB-D")
+    expect(rows.nth(2)).to_have_text("Luxonis OAK-D Pro·oak-serial-77")
+    expect(summary).not_to_contain_text("wrist-1")
+    expect(summary).not_to_contain_text("zed-offline")
+    expect(summary).not_to_contain_text(
+        "RealSense, OAK-D Pro, and ZED discovery."
+    )
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
     )
@@ -2045,6 +2311,171 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
     assert page_errors == []
 
 
+def test_calibration_target_selection_returns_workflow_to_readiness(
+    console_server, page
+) -> None:
+    target_id = "5f09f41c-dd91-44ef-a048-1f43fc990e17"
+    configured = eye_in_hand_calibration_config()
+    selection_requests: list[dict] = []
+    install_common_mocks(page, config_payload=configured)
+
+    def target_handler(route) -> None:
+        path = urlparse(route.request.url).path
+        if path.endswith("/preview.png"):
+            route.fulfill(status=200, content_type="image/png", body=b"")
+            return
+        if path.endswith("/select") and route.request.method == "POST":
+            body = route.request.post_data_json
+            selection_requests.append(body)
+            configured["calibration_target"] = {
+                "target_id": target_id,
+                "placement": {
+                    "mode": body["placement"],
+                    "mounting_frame": body["mounting_frame"],
+                },
+            }
+            fulfill_json(route, {"job_id": "calibration-target-select-1"}, status=202)
+            return
+        selected = configured["calibration_target"] is not None
+        fulfill_json(
+            route,
+            {
+                "bundles": [
+                    {
+                        "target_id": target_id,
+                        "display_name": "Workflow calibration grid",
+                        "valid": True,
+                        "selected": selected,
+                        "selected_placement": (
+                            configured["calibration_target"]["placement"]
+                            if selected
+                            else None
+                        ),
+                        "target": {
+                            "target_bounds": {
+                                "width_mm": 180.0,
+                                "height_mm": 120.0,
+                            },
+                            "print_compensation": {
+                                "x_percent": 100.0,
+                                "y_percent": 100.0,
+                            },
+                            "grid_size": [6, 4],
+                        },
+                    }
+                ],
+                "replacement_blockers": [],
+            },
+        )
+
+    page.route("**/calibration-targets/bundles**", target_handler)
+    page.route(
+        "**/jobs/calibration-target-select-1",
+        lambda route: fulfill_json(
+            route,
+            {
+                "job": {
+                    "id": "calibration-target-select-1",
+                    "status": "succeeded",
+                    "message": None,
+                    "tail": [],
+                }
+            },
+        ),
+    )
+
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=target",
+        wait_until="networkidle",
+    )
+    page.get_by_role("link", name="Choose grid", exact=True).click()
+    expect(page).to_have_url(f"{console_server.url}/#/calibration-targets")
+    page.get_by_role("button", name="Select for run", exact=True).click()
+    page.get_by_role("button", name="Select target", exact=True).click()
+
+    expect(page).to_have_url(
+        f"{console_server.url}/#/workflow/calibration?step=readiness"
+    )
+    expect(page.locator('[data-selected-step="readiness"]')).to_be_visible()
+    expect(page.get_by_test_id("calibration-readiness-check")).to_be_visible()
+    assert selection_requests == [
+        {
+            "run_root": RUN_ROOT,
+            "placement": "unknown",
+            "mounting_frame": "template_base",
+        }
+    ]
+
+
+@pytest.mark.parametrize("viewport", [(1920, 1080), (1440, 900)])
+def test_workflow_step_one_owns_camera_selection_and_ignores_retired_device_draft(
+    console_server, page, viewport: tuple[int, int]
+) -> None:
+    page.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+    requests: list[dict] = []
+    install_common_mocks(
+        page,
+        requests=requests,
+        config_payload=eye_in_hand_calibration_config(),
+    )
+    page.route(
+        "**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status())
+    )
+    page.add_init_script(
+        "localStorage.setItem('posetestbot.selectedSensors', "
+        "JSON.stringify(['realsense_d435:static-1']))"
+    )
+
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=configure",
+        wait_until="networkidle",
+    )
+
+    expect(
+        page.get_by_text("Select cameras for this recording", exact=True)
+    ).to_be_visible()
+    setup = page.get_by_test_id("calibration-run-setup")
+    camera_section = page.get_by_test_id("run-camera-selection-section")
+    setup_box = setup.bounding_box()
+    camera_section_box = camera_section.bounding_box()
+    assert setup_box is not None
+    assert camera_section_box is not None
+    assert abs(camera_section_box["x"] - setup_box["x"]) <= 1
+    assert camera_section_box["width"] >= setup_box["width"] - 2
+    assert page.evaluate(
+        "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+    ) <= 1
+
+    rows = page.get_by_test_id("run-camera-row")
+    expect(rows).to_have_count(2)
+    wrist = rows.filter(has=page.get_by_text("realsense_d435:wrist-1", exact=True))
+    static = rows.filter(has=page.get_by_text("realsense_d435:static-1", exact=True))
+    expect(wrist).to_have_attribute("data-camera-state", "selected")
+    expect(static).to_have_attribute("data-camera-state", "not-selected")
+
+    selection = static.get_by_test_id("run-camera-selection")
+    expect(selection).not_to_be_checked()
+    selection_box = selection.bounding_box()
+    alias_box = static.get_by_test_id("run-camera-alias").bounding_box()
+    assert selection_box is not None
+    assert alias_box is not None
+    assert selection_box["y"] < alias_box["y"]
+    selection.click()
+    expect(selection).to_be_checked()
+    expect(static).to_have_attribute("data-camera-state", "selected")
+    page.get_by_role("button", name="Save setup", exact=True).click()
+    expect(page.get_by_text("Calibration recording setup saved")).to_be_visible()
+
+    written = next(item["body"] for item in requests if item["path"] == "/run-config")
+    assert {
+        (sensor["sensor_type"], sensor["device_id"]): sensor["enabled"]
+        for sensor in written["sensors"]
+    } == {
+        ("realsense_d435", "wrist-1"): True,
+        ("realsense_d435", "static-1"): True,
+    }
+
+
 def test_run_config_preflight_blocker_and_fresh_capture_gates(
     console_server, page
 ) -> None:
@@ -2294,10 +2725,6 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
 
     page.route("**/calibration/setup?**", calibration_setup_handler)
     page.route("**/capture/jobs**", capture_jobs_handler)
-    page.add_init_script(
-        "localStorage.setItem('posetestbot.selectedSensors', "
-        "JSON.stringify(['realsense_d435:wrist-1', 'realsense_d435:static-1']))"
-    )
     page.goto(
         f"{console_server.url}/#/workflow/calibration?step=calculate",
         wait_until="networkidle",
@@ -2337,6 +2764,10 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
         "eye_in_hand",
         "eye_in_hand",
     ]
+    assert all(
+        set(sensor).issubset(RUN_CONFIG_SENSOR_INPUT_FIELDS)
+        for sensor in written["sensors"]
+    )
     assert "allow_cameras" not in json.dumps(written)
     assert "allow_real_robot" not in json.dumps(written)
 
@@ -2348,6 +2779,7 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
     expect(readiness).to_have_count(1)
     expect(readiness).to_be_visible()
     expect(readiness).to_contain_text("Readiness has not been checked")
+    expect(readiness).to_contain_text("Selected cameras open briefly without recording")
     readiness.get_by_role("button", name="Check readiness", exact=True).click()
     preflight_request = next(
         item["body"] for item in requests if item["path"] == "/preflight/jobs"
@@ -2381,9 +2813,8 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
     )
     submit = page.locator('[data-testid="capture-submit"]')
     expect(submit).to_be_disabled()
-    page.locator('[data-testid="capture-robot-ack"]').click()
-    expect(submit).to_be_disabled()
-    page.locator('[data-testid="capture-camera-ack"]').click()
+    expect(page.get_by_role("dialog").get_by_role("checkbox")).to_have_count(1)
+    page.get_by_test_id("capture-authorization-ack").click()
     expect(submit).to_be_enabled()
     submit.click()
     expect(page.get_by_text("Calibration capture queued")).to_be_visible()
@@ -2745,7 +3176,7 @@ def test_robot_controls_are_dashboard_only_fixed_target_and_acknowledged(
     page.route("**/robot/commands", command_handler)
     page.goto(f"{console_server.url}/#/devices", wait_until="networkidle")
     expect(page.get_by_test_id("iiwa-quick-controls")).to_have_count(0)
-    expect(page.get_by_role("button", name="Start IIWA")).to_have_count(0)
+    expect(page.get_by_role("button", name="Start program")).to_have_count(0)
     expect(page.get_by_label("Robot IP")).to_have_count(0)
     expect(page.get_by_label("Command port")).to_have_count(0)
     expect(
@@ -2755,23 +3186,20 @@ def test_robot_controls_are_dashboard_only_fixed_target_and_acknowledged(
     page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
     controls = page.get_by_test_id("iiwa-quick-controls")
     expect(controls).to_contain_text("172.31.1.147:30300")
-    stop_warning = controls.get_by_test_id("iiwa-stop-warning")
-    expect(stop_warning).to_contain_text("cannot interrupt active motion")
-    expect(stop_warning).to_contain_text("not an emergency stop")
-    page.get_by_role("button", name="Start IIWA").click()
+    expect(controls).not_to_contain_text("Stop cannot interrupt active motion")
+    page.get_by_role("button", name="Start program").click()
     expect(page.get_by_role("dialog")).to_contain_text("172.31.1.147:30300")
     expect(page.get_by_role("dialog")).to_contain_text(
         "Manual test request: 0.1 m/s (100 mm/s)"
     )
     expect(page.get_by_role("button", name="Queue start")).to_be_disabled()
-    expect(page.get_by_role("dialog").get_by_role("checkbox")).to_have_count(2)
-    page.get_by_test_id("iiwa-robot-acknowledgement").click()
-    page.get_by_test_id("iiwa-camera-acknowledgement").click()
+    expect(page.get_by_role("dialog").get_by_role("checkbox")).to_have_count(1)
+    page.get_by_test_id("iiwa-start-acknowledgement").click()
     expect(page.get_by_role("button", name="Queue start")).to_be_enabled()
     page.get_by_role("button", name="Queue start").click()
     expect(page.get_by_text("IIWA start queued")).to_be_visible()
 
-    page.get_by_role("button", name="Stop / exit idle IIWA program").click()
+    page.get_by_role("button", name="End program").click()
     expect(page.get_by_role("dialog")).to_contain_text("not a motion stop")
     expect(page.get_by_role("dialog")).to_contain_text(
         "requires a manual Sunrise restart"
@@ -2800,16 +3228,17 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
         """
         window.__copiedDebugTexts = [];
         window.__execCommandCalls = 0;
+        window.__allowLegacyClipboardCopy = false;
         Object.defineProperty(navigator, "clipboard", {
           configurable: true,
-          value: {
-            writeText: async () => {
-              throw new DOMException("Clipboard permission denied", "NotAllowedError");
-            },
-          },
+          value: undefined,
         });
-        document.execCommand = () => {
+        document.execCommand = (command) => {
           window.__execCommandCalls += 1;
+          const activeElement = document.activeElement;
+          if (command !== "copy" || !(activeElement instanceof HTMLTextAreaElement)) return false;
+          if (!window.__allowLegacyClipboardCopy) return false;
+          window.__copiedDebugTexts.push(activeElement.value);
           return true;
         };
         """
@@ -2863,23 +3292,51 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
     page.goto(f"{console_server.url}/#/jobs", wait_until="networkidle")
     page.get_by_role("button", name="Log").click()
     expect(page.locator('[data-testid="job-log"]')).to_contain_text("line two")
+
     page.get_by_role("button", name="Copy output").click()
-    expect(page.get_by_text("Job output could not be copied")).to_be_visible()
-    assert page.evaluate("window.__execCommandCalls") == 0
+    error_toast = page.locator('[data-sonner-toast][data-type="error"]').last
+    expect(error_toast).to_contain_text("Job output could not be copied")
+    expect(error_toast).to_contain_text("The browser denied clipboard access")
+    assert error_toast.evaluate("element => getComputedStyle(element).userSelect") == "text"
+    description = error_toast.locator("[data-description]")
+    description.hover()
+    description_box = description.bounding_box()
+    assert description_box is not None
+    selection_y = description_box["y"] + description_box["height"] / 2
+    page.mouse.move(description_box["x"] + 2, selection_y)
+    page.mouse.down()
+    page.mouse.move(
+        description_box["x"] + description_box["width"] - 2,
+        selection_y,
+        steps=8,
+    )
+    page.mouse.up()
+    assert "browser denied clipboard access" in page.evaluate(
+        "window.getSelection()?.toString()"
+    )
+
+    page.evaluate("window.__allowLegacyClipboardCopy = true")
+    page.get_by_role("button", name="Copy output").click()
+    expect(page.get_by_text("Job output copied")).to_be_visible()
+    assert page.evaluate("window.__execCommandCalls") == 2
+    assert page.evaluate("window.__copiedDebugTexts[0]") == "line one\nline two\n"
     page.evaluate(
         """
         Object.defineProperty(navigator, "clipboard", {
           configurable: true,
           value: {
-            writeText: async (text) => window.__copiedDebugTexts.push(text),
+            writeText: async () => {
+              throw new DOMException("Clipboard permission denied", "NotAllowedError");
+            },
           },
         })
         """
     )
     page.get_by_role("button", name="Copy context").click()
     expect(page.get_by_text("Job context copied")).to_be_visible()
+    assert page.evaluate("window.__execCommandCalls") == 3
     copied = page.evaluate("window.__copiedDebugTexts")
-    context = json.loads(copied[0])
+    context = json.loads(copied[1])
     assert context["schema_version"] == "posetestbot_job_debug_context.v1"
     assert context["job"]["id"] == "capture-1"
     assert context["job"]["parameters"] == {
@@ -2889,6 +3346,7 @@ def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> No
     assert context["job"]["scope_kind"] == "run"
     assert context["job"]["run_root"] == RUN_ROOT
     assert "tail" not in context["job"]
+
     page.get_by_role("button", name="Cancel job").click()
     assert canceled == ["capture-1"]
 
@@ -3206,6 +3664,56 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                         "candidates": [static_recommended, failed],
                     },
                 ],
+            },
+            "promotion_review": {
+                "schema_version": "calibration_promotion_review.v1",
+                "policy_revision": (
+                    "pairwise_companion_warn_at_candidate_limit_fail_at_double.v2"
+                ),
+                "status": "promotable_with_warnings",
+                "selections": {
+                    "realsense_d435:wrist-1": recommended["candidate_id"],
+                    "oak_d_pro:static-1": static_recommended["candidate_id"],
+                },
+                "selected_camera_count": 2,
+                "camera_count": 2,
+                "joint_bundle_id": "IPPE|park",
+                "selected_bundle": {
+                    "bundle_id": "IPPE|park",
+                    "pnp_method": "IPPE",
+                    "extrinsic_method": "park",
+                    "candidate_ids": {
+                        "realsense_d435:wrist-1": recommended["candidate_id"],
+                        "oak_d_pro:static-1": static_recommended["candidate_id"],
+                    },
+                    "quality_state": "warning",
+                    "quality_warning_count": 1,
+                    "quality_warnings": [
+                        {
+                            "name": "joint_companion_translation_consistency",
+                            "status": "warning",
+                            "actual": 15.455,
+                            "warning_threshold": 10.0,
+                            "threshold": 20.0,
+                            "unit": "mm",
+                        }
+                    ],
+                    "max_pairwise_companion_translation_mm": 15.455,
+                    "max_pairwise_companion_rotation_deg": 1.591,
+                },
+                "eligible_bundles": [],
+                "quality_warnings": [
+                    {
+                        "name": "joint_companion_translation_consistency",
+                        "status": "warning",
+                        "actual": 15.455,
+                        "warning_threshold": 10.0,
+                        "threshold": 20.0,
+                        "unit": "mm",
+                    }
+                ],
+                "alternative_failure_count": 1,
+                "blocking_reason": None,
             },
             "intrinsic_comparison": {
                 "policy": "compare_factory_opencv",
@@ -3573,6 +4081,20 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
         "href", "#/jobs"
     )
     expect(page.get_by_test_id("calibration-results")).to_be_visible()
+    multi_camera_review = page.get_by_test_id("calibration-multi-camera-review")
+    expect(multi_camera_review).to_contain_text(
+        "Promotable with a multi-camera quality warning"
+    )
+    expect(multi_camera_review).to_contain_text("15.455 mm / 1.591°")
+    expect(multi_camera_review).to_contain_text(
+        "preferred cross-camera limits are 10 mm / 5°"
+    )
+    expect(multi_camera_review).to_contain_text(
+        "1 failed alternative solution is retained for diagnosis"
+    )
+    expect(
+        page.get_by_role("button", name="Save selected calibrations")
+    ).to_be_enabled()
     alignment = page.get_by_test_id("calibration-time-alignment")
     expect(alignment).to_contain_text(
         "not evidence that the hardware clocks are synchronized"
@@ -3624,6 +4146,10 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     )
     expect(page.get_by_test_id("calibration-acceptance-thresholds")).to_contain_text(
         "3 × 3 centroid-cell count remains diagnostic"
+    )
+    expect(page.get_by_test_id("calibration-acceptance-thresholds")).to_contain_text(
+        "common-grid disagreement above 10 mm / 5° is retained with a warning; "
+        "above 20 mm / 10° it is contradictory"
     )
     wrist_intrinsics = page.get_by_test_id(
         "intrinsic-comparison-realsense_d435:wrist-1"

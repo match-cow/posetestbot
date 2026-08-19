@@ -11,6 +11,32 @@ from posetestbot.io.artifacts import (
     DATASET_MANIFEST,
 )
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
+from scripts.run_camera_rectification import _intrinsic_profiles_path
+
+
+def test_rectification_defaults_to_run_config_intrinsic_snapshot(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "dataset"
+    intrinsic_path = (
+        "processed/calibration_inputs/"
+        + "a" * 64
+        + "/intrinsic_calibration_profiles.json"
+    )
+    write_run_config(
+        run_root,
+        create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
+            run_root=run_root,
+            intrinsic_calibration_profiles=intrinsic_path,
+        ),
+    )
+
+    assert _intrinsic_profiles_path(run_root, None) == run_root / intrinsic_path
+    assert _intrinsic_profiles_path(run_root, "explicit.json") == (
+        run_root / "explicit.json"
+    )
 
 
 @pytest.mark.parametrize(

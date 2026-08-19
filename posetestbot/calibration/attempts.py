@@ -197,6 +197,19 @@ ATTEMPT_INTRINSIC_MAX_FOCAL_DELTA_RATIO = 0.10
 ATTEMPT_INTRINSIC_MAX_PRINCIPAL_DELTA_RATIO = 0.05
 ATTEMPT_INTRINSIC_MAX_ASPECT_DELTA_RATIO = 0.05
 JOINT_RANKING_NUMERIC_DECIMALS = 6
+JOINT_CONSISTENCY_POLICY_REVISION = (
+    "pairwise_companion_warn_at_candidate_limit_fail_at_double.v2"
+)
+LEGACY_JOINT_CONSISTENCY_POLICY_REVISION = (
+    "pairwise_companion_fail_at_candidate_limit.v1"
+)
+JOINT_CONSISTENCY_WARNING_TRANSLATION_MM = DEFAULT_MAX_MEAN_TRANSLATION_MM
+JOINT_CONSISTENCY_WARNING_ROTATION_DEG = DEFAULT_MAX_MEAN_ROTATION_DEG
+# Each camera estimate is independently allowed the candidate residual bound.
+# Two estimates at opposite ends of that bound can therefore be separated by
+# twice it without contradicting either camera's retained passing evidence.
+JOINT_CONSISTENCY_MAX_TRANSLATION_MM = 2.0 * DEFAULT_MAX_MEAN_TRANSLATION_MM
+JOINT_CONSISTENCY_MAX_ROTATION_DEG = 2.0 * DEFAULT_MAX_MEAN_ROTATION_DEG
 PROMOTION_TRANSFORM_TOLERANCE_MM = 1e-6
 # Reconstructing a JSON quaternion into a matrix can introduce roughly
 # 2e-6 degrees of acos round-off even when both records describe one transform.
@@ -1064,6 +1077,18 @@ def calibration_setup(run_root: str | Path) -> dict[str, Any]:
                 "max_mean_translation_mm": 10.0,
                 "max_mean_rotation_deg": 5.0,
                 "max_outlier_ratio": 0.25,
+                "warning_pairwise_companion_translation_mm": (
+                    JOINT_CONSISTENCY_WARNING_TRANSLATION_MM
+                ),
+                "warning_pairwise_companion_rotation_deg": (
+                    JOINT_CONSISTENCY_WARNING_ROTATION_DEG
+                ),
+                "max_pairwise_companion_translation_mm": (
+                    JOINT_CONSISTENCY_MAX_TRANSLATION_MM
+                ),
+                "max_pairwise_companion_rotation_deg": (
+                    JOINT_CONSISTENCY_MAX_ROTATION_DEG
+                ),
             },
         },
         "latest_attempt": attempts[0] if attempts else None,
@@ -3928,13 +3953,51 @@ def _candidate_float(candidate: Mapping[str, Any], key: str) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def _joint_consistency_limits(policy_revision: str) -> dict[str, float]:
+    if policy_revision == LEGACY_JOINT_CONSISTENCY_POLICY_REVISION:
+        return {
+            "warning_translation_mm": DEFAULT_MAX_MEAN_TRANSLATION_MM,
+            "warning_rotation_deg": DEFAULT_MAX_MEAN_ROTATION_DEG,
+            "max_translation_mm": DEFAULT_MAX_MEAN_TRANSLATION_MM,
+            "max_rotation_deg": DEFAULT_MAX_MEAN_ROTATION_DEG,
+        }
+    if policy_revision != JOINT_CONSISTENCY_POLICY_REVISION:
+        raise ValueError(
+            f"Unsupported multi-camera consistency policy: {policy_revision}"
+        )
+    return {
+        "warning_translation_mm": JOINT_CONSISTENCY_WARNING_TRANSLATION_MM,
+        "warning_rotation_deg": JOINT_CONSISTENCY_WARNING_ROTATION_DEG,
+        "max_translation_mm": JOINT_CONSISTENCY_MAX_TRANSLATION_MM,
+        "max_rotation_deg": JOINT_CONSISTENCY_MAX_ROTATION_DEG,
+    }
+
+
+def _joint_metric_status(
+    value: float | None,
+    *,
+    warning_threshold: float,
+    failure_threshold: float,
+    evidence_complete: bool,
+) -> str:
+    if not evidence_complete or value is None:
+        return "error"
+    if value > failure_threshold:
+        return "error"
+    if value > warning_threshold:
+        return "warning"
+    return "ok"
+
+
 def _joint_bundle_record(
     *,
     sensor_keys: Sequence[str],
     pair: tuple[str, str],
     ranked_by_sensor: Mapping[str, Sequence[Mapping[str, Any]]],
     companion_frame: Mapping[str, str],
+    policy_revision: str = JOINT_CONSISTENCY_POLICY_REVISION,
 ) -> dict[str, Any]:
+    limits = _joint_consistency_limits(policy_revision)
     pnp_method, extrinsic_method = pair
     bundle_id = f"{pnp_method}|{extrinsic_method}"
     matches_by_sensor = {
@@ -4019,6 +4082,18 @@ def _joint_bundle_record(
             residual = transform_residual(
                 transforms[left_sensor_key], transforms[right_sensor_key]
             )
+            translation_status = _joint_metric_status(
+                residual["translation_mm"],
+                warning_threshold=limits["warning_translation_mm"],
+                failure_threshold=limits["max_translation_mm"],
+                evidence_complete=True,
+            )
+            rotation_status = _joint_metric_status(
+                residual["rotation_deg"],
+                warning_threshold=limits["warning_rotation_deg"],
+                failure_threshold=limits["max_rotation_deg"],
+                evidence_complete=True,
+            )
             pairwise_residuals.append(
                 {
                     "left_sensor_key": left_sensor_key,
@@ -4028,10 +4103,11 @@ def _joint_bundle_record(
                     "translation_mm": residual["translation_mm"],
                     "rotation_deg": residual["rotation_deg"],
                     "status": (
-                        "ok"
-                        if residual["translation_mm"] <= DEFAULT_MAX_MEAN_TRANSLATION_MM
-                        and residual["rotation_deg"] <= DEFAULT_MAX_MEAN_ROTATION_DEG
-                        else "error"
+                        "error"
+                        if "error" in {translation_status, rotation_status}
+                        else "warning"
+                        if "warning" in {translation_status, rotation_status}
+                        else "ok"
                     ),
                 }
             )
@@ -4058,15 +4134,17 @@ def _joint_bundle_record(
         len(transforms) == len(sensor_keys)
         and len(pairwise_residuals) == expected_pair_count
     )
-    translation_ok = (
-        transform_ok
-        and max_translation_mm is not None
-        and max_translation_mm <= DEFAULT_MAX_MEAN_TRANSLATION_MM
+    translation_status = _joint_metric_status(
+        max_translation_mm,
+        warning_threshold=limits["warning_translation_mm"],
+        failure_threshold=limits["max_translation_mm"],
+        evidence_complete=transform_ok,
     )
-    rotation_ok = (
-        transform_ok
-        and max_rotation_deg is not None
-        and max_rotation_deg <= DEFAULT_MAX_MEAN_ROTATION_DEG
+    rotation_status = _joint_metric_status(
+        max_rotation_deg,
+        warning_threshold=limits["warning_rotation_deg"],
+        failure_threshold=limits["max_rotation_deg"],
+        evidence_complete=transform_ok,
     )
     checks = [
         {
@@ -4096,16 +4174,18 @@ def _joint_bundle_record(
         },
         {
             "name": "joint_companion_translation_consistency",
-            "status": "ok" if translation_ok else "error",
+            "status": translation_status,
             "actual": max_translation_mm,
-            "threshold": DEFAULT_MAX_MEAN_TRANSLATION_MM,
+            "warning_threshold": limits["warning_translation_mm"],
+            "threshold": limits["max_translation_mm"],
             "unit": "mm",
         },
         {
             "name": "joint_companion_rotation_consistency",
-            "status": "ok" if rotation_ok else "error",
+            "status": rotation_status,
             "actual": max_rotation_deg,
-            "threshold": DEFAULT_MAX_MEAN_ROTATION_DEG,
+            "warning_threshold": limits["warning_rotation_deg"],
+            "threshold": limits["max_rotation_deg"],
             "unit": "deg",
         },
     ]
@@ -4114,9 +4194,10 @@ def _joint_bundle_record(
         and passing_ok
         and scores_valid
         and transform_ok
-        and translation_ok
-        and rotation_ok
+        and translation_status != "error"
+        and rotation_status != "error"
     )
+    quality_warnings = [dict(check) for check in checks if check["status"] == "warning"]
     return {
         "bundle_id": bundle_id,
         "pnp_method": pnp_method,
@@ -4126,6 +4207,10 @@ def _joint_bundle_record(
         "candidate_ids": candidate_ids,
         "candidate_options": candidate_options,
         "status": "passing" if passing else "failed",
+        "quality_state": "warning" if quality_warnings else "ok",
+        "quality_warning_count": len(quality_warnings),
+        "quality_warnings": quality_warnings,
+        "consistency_policy_revision": policy_revision,
         "aggregate_score": aggregate_score,
         "mean_score": mean_score,
         "mean_reprojection_error_px": mean_reprojection_error_px,
@@ -4142,6 +4227,8 @@ def _joint_bundle_record(
 def _joint_consistency_ranking(
     request_value: Mapping[str, Any],
     ranked_by_sensor: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    policy_revision: str = JOINT_CONSISTENCY_POLICY_REVISION,
 ) -> dict[str, Any] | None:
     companion_frame = _joint_companion_frame(request_value)
     if companion_frame is None:
@@ -4153,6 +4240,7 @@ def _joint_consistency_ranking(
             pair=pair,
             ranked_by_sensor=ranked_by_sensor,
             companion_frame=companion_frame,
+            policy_revision=policy_revision,
         )
         for pair in _joint_algorithm_pairs(request_value, ranked_by_sensor)
     ]
@@ -4183,11 +4271,13 @@ def _joint_consistency_ranking(
         closure_score = bundle.get("normalized_companion_closure_score")
         reprojection = bundle.get("mean_reprojection_error_px")
         passing = bundle.get("status") == "passing"
+        warning_count = int(bundle.get("quality_warning_count", 0))
         algorithm_key = _algorithm_pair_sort_key(
             (str(bundle["pnp_method"]), str(bundle["extrinsic_method"]))
         )
         return (
             0 if passing else 1,
+            warning_count,
             ranking_number(mean_score),
             ranking_number(closure_score),
             ranking_number(aggregate_score),
@@ -4202,15 +4292,26 @@ def _joint_consistency_ranking(
         bundle["rank"] = index
         bundle["recommended"] = index == 1 and bundle["status"] == "passing"
     recommendation = next((bundle for bundle in bundles if bundle["recommended"]), None)
+    limits = _joint_consistency_limits(policy_revision)
     return {
         "required": True,
+        "policy_revision": policy_revision,
         "status": "passing" if recommendation else "failed",
+        "quality_state": (
+            str(recommendation.get("quality_state", "ok"))
+            if recommendation
+            else "blocked"
+        ),
         "sensor_keys": sensor_keys,
         "sensor_count": len(sensor_keys),
         "companion_frame": companion_frame,
         "thresholds": {
-            "max_pairwise_companion_translation_mm": (DEFAULT_MAX_MEAN_TRANSLATION_MM),
-            "max_pairwise_companion_rotation_deg": DEFAULT_MAX_MEAN_ROTATION_DEG,
+            "warning_pairwise_companion_translation_mm": limits[
+                "warning_translation_mm"
+            ],
+            "warning_pairwise_companion_rotation_deg": limits["warning_rotation_deg"],
+            "max_pairwise_companion_translation_mm": limits["max_translation_mm"],
+            "max_pairwise_companion_rotation_deg": limits["max_rotation_deg"],
         },
         "ranking_policy": {
             "best_individual_score": best_individual_score,
@@ -4221,6 +4322,7 @@ def _joint_consistency_ranking(
             "numeric_round_decimals": JOINT_RANKING_NUMERIC_DECIMALS,
             "ordering": [
                 "status",
+                "quality_warning_count",
                 "rounded_mean_score",
                 "rounded_normalized_companion_closure_score",
                 "rounded_aggregate_score",
@@ -4239,6 +4341,138 @@ def _joint_consistency_ranking(
         ),
         "recommendation": recommendation,
         "bundles": bundles,
+    }
+
+
+def _promotion_bundle_summary(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: json.loads(json.dumps(bundle[key]))
+        for key in (
+            "bundle_id",
+            "pnp_method",
+            "extrinsic_method",
+            "candidate_ids",
+            "quality_state",
+            "quality_warning_count",
+            "quality_warnings",
+            "max_pairwise_companion_translation_mm",
+            "max_pairwise_companion_rotation_deg",
+            "pairwise_companion_residuals",
+            "checks",
+        )
+        if key in bundle
+    }
+
+
+def _promotion_review(
+    request_value: Mapping[str, Any], ranking: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """Interpret immutable candidate evidence under the current retention policy."""
+
+    if not isinstance(ranking, Mapping):
+        return None
+    ranked_by_sensor = {
+        str(result.get("sensor_key")): [
+            candidate
+            for candidate in result.get("candidates", [])
+            if isinstance(candidate, Mapping)
+        ]
+        for result in ranking.get("results", [])
+        if isinstance(result, Mapping) and result.get("sensor_key") is not None
+    }
+    sensor_keys = [str(item) for item in request_value.get("sensor_keys", [])]
+    alternative_failure_count = sum(
+        candidate.get("status") != "passing"
+        for candidates in ranked_by_sensor.values()
+        for candidate in candidates
+    )
+    joint_consistency = _joint_consistency_ranking(
+        request_value,
+        ranked_by_sensor,
+        policy_revision=JOINT_CONSISTENCY_POLICY_REVISION,
+    )
+    if joint_consistency is not None:
+        recommendation = joint_consistency.get("recommendation")
+        eligible_bundles = [
+            _promotion_bundle_summary(bundle)
+            for bundle in joint_consistency["bundles"]
+            if bundle.get("status") == "passing"
+        ]
+        if not isinstance(recommendation, Mapping):
+            return {
+                "schema_version": "calibration_promotion_review.v1",
+                "policy_revision": JOINT_CONSISTENCY_POLICY_REVISION,
+                "status": "blocked",
+                "selections": {},
+                "selected_camera_count": 0,
+                "camera_count": len(sensor_keys),
+                "joint_bundle_id": None,
+                "selected_bundle": None,
+                "eligible_bundles": [],
+                "quality_warnings": [],
+                "alternative_failure_count": alternative_failure_count,
+                "blocking_reason": (
+                    "No common algorithm bundle has a passing candidate for every "
+                    "camera with complete transforms inside the 20 mm / 10 deg "
+                    "hard consistency limits."
+                ),
+            }
+        selected_bundle = _promotion_bundle_summary(recommendation)
+        warnings = [
+            dict(check)
+            for check in recommendation.get("quality_warnings", [])
+            if isinstance(check, Mapping)
+        ]
+        selections = {
+            str(sensor_key): str(candidate_id)
+            for sensor_key, candidate_id in recommendation["candidate_ids"].items()
+        }
+        return {
+            "schema_version": "calibration_promotion_review.v1",
+            "policy_revision": JOINT_CONSISTENCY_POLICY_REVISION,
+            "status": "promotable_with_warnings" if warnings else "promotable",
+            "selections": selections,
+            "selected_camera_count": len(selections),
+            "camera_count": len(sensor_keys),
+            "joint_bundle_id": recommendation["bundle_id"],
+            "selected_bundle": selected_bundle,
+            "eligible_bundles": eligible_bundles,
+            "quality_warnings": warnings,
+            "alternative_failure_count": alternative_failure_count,
+            "blocking_reason": None,
+        }
+
+    selections: dict[str, str] = {}
+    for sensor_key in sensor_keys:
+        candidates = ranked_by_sensor.get(sensor_key, [])
+        selected = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.get("status") == "passing"
+            ),
+            None,
+        )
+        if isinstance(selected, Mapping):
+            selections[sensor_key] = str(selected["candidate_id"])
+    promotable = len(selections) == len(sensor_keys) and bool(sensor_keys)
+    return {
+        "schema_version": "calibration_promotion_review.v1",
+        "policy_revision": JOINT_CONSISTENCY_POLICY_REVISION,
+        "status": "promotable" if promotable else "blocked",
+        "selections": selections,
+        "selected_camera_count": len(selections),
+        "camera_count": len(sensor_keys),
+        "joint_bundle_id": None,
+        "selected_bundle": None,
+        "eligible_bundles": [],
+        "quality_warnings": [],
+        "alternative_failure_count": alternative_failure_count,
+        "blocking_reason": (
+            None
+            if promotable
+            else "At least one camera has no passing calibration candidate."
+        ),
     }
 
 
@@ -4574,15 +4808,25 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
             intrinsics,
             time_offset_search=time_offset_search,
         )
+        joint_recommendation = (
+            ranking.get("multi_camera_consistency", {}).get("recommendation")
+            if isinstance(ranking.get("multi_camera_consistency"), Mapping)
+            else None
+        )
+        joint_warning_count = (
+            int(joint_recommendation.get("quality_warning_count", 0))
+            if isinstance(joint_recommendation, Mapping)
+            else 0
+        )
         _update_progress(
             attempt_root,
             status="complete",
             phase="validate_and_rank",
             phase_status="complete",
             message=(
-                "Calibration calculations are complete with timing warnings and "
+                "Calibration calculations are complete with quality warnings and "
                 "are awaiting review."
-                if timing_warning_count
+                if timing_warning_count or joint_warning_count
                 else "Calibration calculations are complete and awaiting review."
             ),
         )
@@ -4648,6 +4892,7 @@ def load_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str,
         "request": request_value,
         "progress": progress,
         "results": ranking,
+        "promotion_review": _promotion_review(request_value, ranking),
         "intrinsic_comparison": intrinsic_comparison,
         "time_offset_search": time_offset_search,
         "promotion": promotion,
@@ -4721,18 +4966,43 @@ def _revalidate_joint_promotion(
     if [str(item) for item in consistency.get("sensor_keys", [])] != sensor_keys:
         raise ValueError("Multi-camera sensor-order evidence is inconsistent")
     thresholds = consistency.get("thresholds")
-    if (
-        not isinstance(thresholds, Mapping)
-        or not _optional_floats_match(
-            thresholds.get("max_pairwise_companion_translation_mm"),
-            DEFAULT_MAX_MEAN_TRANSLATION_MM,
-        )
-        or not _optional_floats_match(
-            thresholds.get("max_pairwise_companion_rotation_deg"),
-            DEFAULT_MAX_MEAN_ROTATION_DEG,
+    recorded_policy_revision = consistency.get("policy_revision")
+    if recorded_policy_revision is None:
+        recorded_policy_revision = LEGACY_JOINT_CONSISTENCY_POLICY_REVISION
+    if recorded_policy_revision not in {
+        LEGACY_JOINT_CONSISTENCY_POLICY_REVISION,
+        JOINT_CONSISTENCY_POLICY_REVISION,
+    }:
+        raise ValueError("Multi-camera consistency policy is unsupported")
+    recorded_limits = _joint_consistency_limits(str(recorded_policy_revision))
+    if not isinstance(thresholds, Mapping) or any(
+        not _optional_floats_match(thresholds.get(key), expected)
+        for key, expected in (
+            (
+                "max_pairwise_companion_translation_mm",
+                recorded_limits["max_translation_mm"],
+            ),
+            (
+                "max_pairwise_companion_rotation_deg",
+                recorded_limits["max_rotation_deg"],
+            ),
         )
     ):
         raise ValueError("Multi-camera consistency thresholds are invalid")
+    if recorded_policy_revision == JOINT_CONSISTENCY_POLICY_REVISION and any(
+        not _optional_floats_match(thresholds.get(key), expected)
+        for key, expected in (
+            (
+                "warning_pairwise_companion_translation_mm",
+                recorded_limits["warning_translation_mm"],
+            ),
+            (
+                "warning_pairwise_companion_rotation_deg",
+                recorded_limits["warning_rotation_deg"],
+            ),
+        )
+    ):
+        raise ValueError("Multi-camera consistency warning thresholds are invalid")
 
     results = {
         str(item.get("sensor_key")): item
@@ -4776,11 +5046,22 @@ def _revalidate_joint_promotion(
             for sensor_key, candidate in selected_candidates.items()
         },
         companion_frame=companion_frame,
+        policy_revision=JOINT_CONSISTENCY_POLICY_REVISION,
     )
     if recalculated["status"] != "passing":
         raise ValueError(
             "Selected multi-camera bundle no longer satisfies consistency gates"
         )
+    recorded_recalculated = _joint_bundle_record(
+        sensor_keys=sensor_keys,
+        pair=pair,
+        ranked_by_sensor={
+            sensor_key: [candidate]
+            for sensor_key, candidate in selected_candidates.items()
+        },
+        companion_frame=companion_frame,
+        policy_revision=str(recorded_policy_revision),
+    )
 
     recorded_matches = [
         bundle
@@ -4792,12 +5073,12 @@ def _revalidate_joint_promotion(
         raise ValueError("Selections do not match one recorded multi-camera bundle")
     recorded = recorded_matches[0]
     if (
-        recorded.get("status") != "passing"
-        or recorded.get("bundle_id") != recalculated["bundle_id"]
+        recorded.get("status") != recorded_recalculated["status"]
+        or recorded.get("bundle_id") != recorded_recalculated["bundle_id"]
         or recorded.get("pnp_method") != pair[0]
         or recorded.get("extrinsic_method") != pair[1]
     ):
-        raise ValueError("Recorded multi-camera bundle is not promotable")
+        raise ValueError("Recorded multi-camera bundle evidence is inconsistent")
     if expected_bundle_id is not None and recorded.get("bundle_id") != str(
         expected_bundle_id
     ):
@@ -4811,7 +5092,9 @@ def _revalidate_joint_promotion(
         "normalized_companion_closure_score",
     )
     if any(
-        not _optional_floats_match(recorded.get(field), recalculated.get(field))
+        not _optional_floats_match(
+            recorded.get(field), recorded_recalculated.get(field)
+        )
         for field in numeric_fields
     ):
         raise ValueError("Recorded multi-camera bundle summary is inconsistent")
@@ -4832,7 +5115,7 @@ def _revalidate_joint_promotion(
             str(item.get("left_candidate_id")),
             str(item.get("right_candidate_id")),
         ): item
-        for item in recalculated["pairwise_companion_residuals"]
+        for item in recorded_recalculated["pairwise_companion_residuals"]
     }
     if recorded_residuals.keys() != recalculated_residuals.keys():
         raise ValueError("Recorded multi-camera pairwise evidence is incomplete")
@@ -4850,7 +5133,7 @@ def _revalidate_joint_promotion(
             )
         ):
             raise ValueError("Recorded multi-camera pairwise evidence is inconsistent")
-    return dict(recorded)
+    return recalculated
 
 
 def _promotion_selections(
@@ -4862,6 +5145,15 @@ def _promotion_selections(
         raise ValueError("Calibration calculations are not complete")
     explicit = overrides is not None
     supplied = {str(key): str(value) for key, value in (overrides or {}).items()}
+    request_value = attempt.get("request")
+    review = attempt.get("promotion_review")
+    if not isinstance(review, Mapping) and isinstance(request_value, Mapping):
+        review = _promotion_review(request_value, ranking)
+    recommended_selections = (
+        {str(key): str(value) for key, value in review.get("selections", {}).items()}
+        if isinstance(review, Mapping) and isinstance(review.get("selections"), Mapping)
+        else {}
+    )
     results = {
         str(item["sensor_key"]): item
         for item in ranking.get("results", [])
@@ -4875,7 +5167,8 @@ def _promotion_selections(
         candidate_id = (
             supplied.get(sensor_key)
             if explicit
-            else result.get("recommended_candidate_id")
+            else recommended_selections.get(sensor_key)
+            or result.get("recommended_candidate_id")
         )
         if not candidate_id:
             continue
@@ -5719,6 +6012,14 @@ def create_promotion_request(
         "joint_bundle_id": (
             joint_bundle["bundle_id"] if joint_bundle is not None else None
         ),
+        "joint_consistency_policy_revision": (
+            joint_bundle["consistency_policy_revision"]
+            if joint_bundle is not None
+            else None
+        ),
+        "joint_consistency_quality_warnings": (
+            joint_bundle["quality_warnings"] if joint_bundle is not None else []
+        ),
         "previous_failure": (
             dict(prior_promotion) if isinstance(prior_promotion, Mapping) else None
         ),
@@ -5734,6 +6035,12 @@ def create_promotion_request(
             "requested_at": value["created_at"],
             "selections": selected,
             "joint_bundle_id": value["joint_bundle_id"],
+            "joint_consistency_policy_revision": value[
+                "joint_consistency_policy_revision"
+            ],
+            "joint_consistency_quality_warnings": value[
+                "joint_consistency_quality_warnings"
+            ],
             "operator": value["operator"],
         },
     )
@@ -5778,6 +6085,15 @@ def _validate_promotion_request_identity(
         raise ValueError(
             "Calibration promotion request/status bundle identity is inconsistent"
         )
+    for key in (
+        "joint_consistency_policy_revision",
+        "joint_consistency_quality_warnings",
+    ):
+        if promotion_request.get(key) != promotion_status.get(key):
+            raise ValueError(
+                "Calibration promotion request/status consistency evidence is "
+                "inconsistent"
+            )
 
 
 def _promotion_count(value: Any, *, label: str, candidate_id: str) -> int:
@@ -6081,6 +6397,13 @@ def _selected_profiles(
     )
     if joint_bundle is not None and promotion_request.get("joint_bundle_id") is None:
         raise ValueError("Promotion request lacks its multi-camera bundle identity")
+    if joint_bundle is not None and (
+        promotion_request.get("joint_consistency_policy_revision")
+        != joint_bundle["consistency_policy_revision"]
+        or promotion_request.get("joint_consistency_quality_warnings")
+        != joint_bundle["quality_warnings"]
+    ):
+        raise ValueError("Promotion request has inconsistent multi-camera warnings")
     profiles = load_profile_collection(attempt_root / CANDIDATE_PROFILES_FILE)
     by_candidate = {
         str(profile.metadata.get("candidate_id")): profile for profile in profiles
@@ -6204,6 +6527,24 @@ def _selected_profiles(
                 },
                 "promotion_multi_camera_bundle_id": (
                     joint_bundle["bundle_id"] if joint_bundle is not None else None
+                ),
+                "promotion_multi_camera_consistency": (
+                    {
+                        "policy_revision": joint_bundle["consistency_policy_revision"],
+                        "quality_state": joint_bundle["quality_state"],
+                        "quality_warnings": joint_bundle["quality_warnings"],
+                        "max_pairwise_companion_translation_mm": joint_bundle[
+                            "max_pairwise_companion_translation_mm"
+                        ],
+                        "max_pairwise_companion_rotation_deg": joint_bundle[
+                            "max_pairwise_companion_rotation_deg"
+                        ],
+                        "pairwise_companion_residuals": joint_bundle[
+                            "pairwise_companion_residuals"
+                        ],
+                    }
+                    if joint_bundle is not None
+                    else None
                 ),
                 "promoted_at": timestamp,
                 "promoted_by": promotion_request.get("operator"),

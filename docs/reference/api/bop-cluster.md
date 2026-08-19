@@ -63,9 +63,10 @@ evaluation evidence stays below `processed/bop_evaluation/`.
 | `GET /cluster/status` | Return curated controller connectivity, storage, archive, and advertised-estimator status |
 | `GET /cluster/controller-service` | Inspect the one fixed configured user-service |
 | `POST /cluster/controller-service/<action>` | Queue allow-listed start/stop/restart action; browser cannot name a unit or command |
-| `GET /cluster/archives` | List immutable controller-side run archives |
+| `GET /cluster/archives` | List immutable-while-retained controller-side run archives |
 | `POST /cluster/archives` | Submit archive creation for a locally validated run |
 | `POST /cluster/archives/<archive_id>/restore` | Submit restore with local identity/active-job checks |
+| `DELETE /cluster/archives/<archive_id>` | Queue permanent deletion of one opaque-ID archive after explicit confirmation and operator attribution |
 | `GET /cluster/pose-estimation/setup?run_root=…&estimator_id=…` | Return strict setup v2 with the browser-safe dataset identity and controller-advertised estimators |
 | `POST /cluster/pose-estimation/jobs` | Submit a typed controller job using an advertised estimator ID and supported options |
 | `GET /cluster/jobs` | List curated external jobs |
@@ -80,6 +81,10 @@ returned to the browser. Imported results bind the controller provenance,
 staged dataset hash, and local dataset hash.
 
 Archive/storage readiness is independent from estimator runtime readiness. A
-run can be archived or restored even when no qualified estimator is advertised.
+run can be archived, restored, or its retained archive can be deleted even when
+no qualified estimator is advertised. Archive deletion removes only the
+controller-owned cluster copy; it neither deletes nor accepts a path to the
+local acquisition folder. The request body is closed to `confirm: true` and a
+non-empty `operator`, while the proxy supplies its own idempotency key.
 Controllers without the current domains-and-estimators status shape fail closed;
 PoseTestBot never fabricates a default estimator or resource profile.

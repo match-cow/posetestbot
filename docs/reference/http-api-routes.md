@@ -2,7 +2,7 @@
 
 # Complete HTTP route index
 
-This index contains all **116** non-static Flask rules registered by
+This index contains all **117** non-static Flask rules registered by
 `posetestbot.web.app.create_app`. It is generated from the running route map,
 so aliases and mixed-method rules appear exactly as Flask exposes them.
 
@@ -69,6 +69,7 @@ uv run python scripts/generate_http_api_reference.py --check
 | --- | --- | --- | --- | --- |
 | `GET` | `/cluster/archives` | JSON | List cluster archives | `cluster.list_cluster_archives` |
 | `POST` | `/cluster/archives` | JSON | Create cluster archive | `cluster.create_cluster_archive` |
+| `DELETE` | `/cluster/archives/<archive_id>` | JSON | Delete cluster archive | `cluster.delete_cluster_archive` |
 | `POST` | `/cluster/archives/<archive_id>/restore` | JSON | Restore cluster archive | `cluster.restore_cluster_archive` |
 | `GET` | `/cluster/controller-service` | JSON | Cluster controller service status | `cluster.cluster_controller_service_status` |
 | `POST` | `/cluster/controller-service/<action>` | JSON | Control cluster controller service | `cluster.control_cluster_controller_service` |

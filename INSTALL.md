@@ -340,7 +340,7 @@ gated from estimator execution, and FoundationPose is the first driver behind
 its estimator registry. PoseTestBot exposes only service and capability
 status, fixed-service start/stop, estimator-job
 submission/logs/cancellation, immutable result import/download, and archive
-copy/restore.
+copy/restore/confirmed deletion.
 
 Use the companion's canonical
 [FoundationPose cluster setup](https://github.com/match-cow/posetestbot-cluster/blob/main/docs/FOUNDATIONPOSE_CLUSTER_SETUP.md)
@@ -535,9 +535,18 @@ calibration application's taught motion waypoints; it is not the pose-stream
 reference or static-calibration result frame. The single-frame static-camera
 alternative instead teaches
 `/PoseTestBot/PoseTemplateBase/CalibrationStaticBottomMiddle` as the
-bottom-center grid point, then generates the other points in the parent
-`PoseTemplateBase` X/Z axes. Its center is 50 mm above the taught point in
-parent-frame Z, and no generated point falls below that bottom anchor. See
+absolute bottom-center PTP anchor. Teach the attached target straight in front
+of the primary camera at approximately image bottom-center, with live
+flange/default-TCP +X moving image-down/toward the floor, +Y moving
+robot-left/image-right, and +Z toward the camera. The image-plane route uses
+negative X to move up and negative Y to move image-left.
+The no-reference `linRel(Transformation)` motions generate the X/Y grid, Z
+depth observations, orientation dithers, and return in those live axes;
+`PoseTemplateBase` remains only the immutable pose-stream/result frame for this
+purpose. This contract uses the flange/default motion frame, not a separately
+offset Workbench `Tool` TCP, and assumes no nonzero Tool offset. Compile that
+overload against the installed Sunrise.OS API, simulate every endpoint and
+swept path, and obtain explicit authorization before T1 single-stepping. See
 [the controller contract](docs/IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md).
 
 Selection fails closed when the current fixed expectation is absent, the
@@ -695,12 +704,13 @@ device.
 The UGREEN USB camera (`0c45:2283`) is owned by a hidden managed service using
 the resource `monitoring_camera:0c45:2283`. The service starts lazily and does
 not open the V4L2 node until a browser requests WebRTC media. It requests MJPEG
-640×480 at 30 fps with a one-frame V4L2 buffer, publishes VP8-preferred WebRTC
-video, and releases the camera after 15 seconds without a connected peer. VP8
-payloads are capped at 1100 bytes so the complete RTP datagram remains below
-the 1280-byte Tailscale interface MTU after transport overhead. It has no JPEG
-fallback. The generic RGB-D sensor preview controls remain latest-frame JPEG
-streams.
+640×480 at 30 fps with a one-frame V4L2 buffer, publishes unmodified
+VP8-preferred WebRTC frames, and releases the camera after 15 seconds without a
+connected peer. The fixed browser video view rotates those frames 180° to
+correct the camera's upside-down test-cell mount. VP8 payloads are capped at
+1100 bytes so the complete RTP datagram remains below the 1280-byte Tailscale
+interface MTU after transport overhead. It has no JPEG fallback. The generic
+RGB-D sensor preview controls remain latest-frame JPEG streams.
 
 Managed services are excluded from the normal Jobs list and held-resource
 banner. Use `GET /jobs?include_services=1` for diagnostics. Monitor health is

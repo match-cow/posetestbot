@@ -86,6 +86,31 @@ def test_manifest_write_load_and_stage_updates(tmp_path: Path) -> None:
     assert loaded["stages"][0]["name"] == "capture"
 
 
+def test_stage_retry_clears_stale_terminal_evidence(tmp_path: Path) -> None:
+    manifest = create_run_manifest(tmp_path / "run-1")
+    upsert_stage(
+        manifest,
+        name="camera_rectification",
+        status="failed",
+        message="previous failure",
+    )
+    stage = manifest["stages"][0]
+    assert stage["message"] == "previous failure"
+    assert "ended_at" in stage
+
+    upsert_stage(manifest, name="camera_rectification", status="running")
+
+    assert stage["status"] == "running"
+    assert "message" not in stage
+    assert "ended_at" not in stage
+
+    upsert_stage(manifest, name="camera_rectification", status="succeeded")
+
+    assert stage["status"] == "succeeded"
+    assert "message" not in stage
+    assert "ended_at" in stage
+
+
 def test_discover_sensor_records_from_run_folder(tmp_path: Path) -> None:
     run_root = tmp_path / "run-1"
     sensor_root = run_root / "luxonis_abc"

@@ -57,7 +57,7 @@ def test_dataset_preflight_fails_closed_without_promoted_selection(
         "promoted reusable calibration"
         in checks["calibration_profile_selection"]["message"]
     )
-    assert checks["sensor_status"]["status"] == "warning"
+    assert checks["sensor_status"]["status"] == "error"
     assert checks["runtime_status"]["status"] == "warning"
 
 
@@ -147,6 +147,46 @@ def test_preflight_counts_only_enabled_exact_sensor_entries(tmp_path: Path) -> N
     }
 
 
+def test_workflow_preflight_blocks_when_selected_camera_cannot_open(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "blocked-camera"
+    _write_config(run_root, intent="calibration")
+    blocked_readiness = {
+        "schema_version": "selected_sensor_readiness.v1",
+        "selected_count": 1,
+        "ready_count": 0,
+        "all_ready": False,
+        "probes": [
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": "123",
+                "display_name": "D435",
+                "status": "blocked",
+                "capture_ready": False,
+                "reason": "probe_failed",
+                "message": "Selected camera D435 is blocked: device or resource busy.",
+                "recorded_output": False,
+            }
+        ],
+    }
+
+    report = build_run_preflight(
+        run_root,
+        include_runtime_status=False,
+        collect_robot=_robot_status,
+        collect_sensors=lambda: {"total_connected": 1},
+        probe_selected_sensors=lambda _config: blocked_readiness,
+    )
+
+    checks = {item["name"]: item for item in report["checks"]}
+    assert report["overall_status"] == "error"
+    assert checks["sensor_status"]["status"] == "ok"
+    assert checks["selected_camera_open:realsense_d435:123"]["status"] == "error"
+    assert checks["selected_camera_readiness"]["status"] == "error"
+    assert report["selected_sensor_readiness"] == blocked_readiness
+
+
 def test_preflight_queue_summary_rejects_missing_failed_and_stale_evidence(
     tmp_path: Path,
 ) -> None:
@@ -159,7 +199,7 @@ def test_preflight_queue_summary_rejects_missing_failed_and_stale_evidence(
     )
 
     failed = {
-        "schema_version": "run_preflight.v1",
+        "schema_version": "run_preflight.v2",
         "overall_status": "error",
         "config": config,
     }
@@ -170,9 +210,29 @@ def test_preflight_queue_summary_rejects_missing_failed_and_stale_evidence(
     )
 
     ready = {
-        "schema_version": "run_preflight.v1",
+        "schema_version": "run_preflight.v2",
         "overall_status": "warning",
         "config": config,
+        "selected_sensor_readiness": {
+            "schema_version": "selected_sensor_readiness.v1",
+            "selected_count": 1,
+            "ready_count": 1,
+            "all_ready": True,
+            "probe_contract": {
+                "record": False,
+                "frames_per_camera": 1,
+                "timeout_s_per_camera": 15.0,
+            },
+            "probes": [
+                {
+                    "sensor_type": "realsense_d435",
+                    "device_id": "123",
+                    "capture_ready": True,
+                    "status": "ready",
+                    "recorded_output": False,
+                }
+            ],
+        },
     }
     write_run_preflight_report(run_root, ready)
     assert run_preflight_queue_summary(run_root, config)["ready_for_queue"] is True
@@ -181,4 +241,22 @@ def test_preflight_queue_summary_rejects_missing_failed_and_stale_evidence(
     assert (
         run_preflight_queue_summary(run_root, changed)["queue_blocker"]
         == "stale_preflight"
+    )
+
+    legacy = {**ready, "schema_version": "run_preflight.v1"}
+    write_run_preflight_report(run_root, legacy)
+    assert (
+        run_preflight_queue_summary(run_root, config)["queue_blocker"]
+        == "invalid_preflight"
+    )
+
+    missing_active_probe = {
+        "schema_version": "run_preflight.v2",
+        "overall_status": "ok",
+        "config": config,
+    }
+    write_run_preflight_report(run_root, missing_active_probe)
+    assert (
+        run_preflight_queue_summary(run_root, config)["queue_blocker"]
+        == "invalid_preflight"
     )

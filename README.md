@@ -95,11 +95,13 @@ an acquisition stage.
 
 The optional **Inspect → Pose Estimation** page is a thin integration with the
 separate [`match-cow/posetestbot-cluster`](https://github.com/match-cow/posetestbot-cluster)
-companion. That loopback-only controller owns SSH credentials, immutable run
-archives, BIGWORK staging, durable SLURM state, an estimator-driver registry,
+companion. That loopback-only controller owns SSH credentials,
+immutable-while-retained run archives, BIGWORK staging, durable SLURM state,
+an estimator-driver registry,
 qualified private runtimes, and standard BOP19 CSV generation. Archive and
-restore remain usable without any pose method. Estimators are available only
-when the controller advertises a qualified current driver. PoseTestBot
+restore, plus confirmed archive deletion, remain usable without any pose
+method. Estimators are available only when the controller advertises a
+qualified current driver. PoseTestBot
 revalidates the active run,
 proxies browser-safe requests, imports a completed CSV through its existing
 BOP19 validator, and retains external-job/container/input/output provenance.
@@ -111,8 +113,10 @@ estimator readiness. It may also inspect, start, and stop one fixed server-confi
 user-systemd controller unit. Those lifecycle actions are queued local jobs;
 the browser cannot provide a command, unit name, environment value, or
 credential. The controller card links to the **Run folders** page's top-level
-**Cluster storage** archive/restore panel, and **Pose Estimation** provides the
-same return handoff.
+**Cluster storage** archive/restore/delete panel, and **Pose Estimation**
+provides the same return handoff. Permanent archive deletion is a confirmed,
+operator-attributed controller job and never deletes the local acquisition
+folder.
 
 Deployment and qualification instructions live in the companion repository.
 

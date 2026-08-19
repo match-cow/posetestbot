@@ -14,6 +14,12 @@ from posetestbot.config import (
 )
 
 
+# This is the commissioned robot_command.v1 wire token. Keep it aligned with
+# every Sunrise application; changing it requires a coordinated controller
+# deployment, not just a host-side rename.
+IDLE_EXIT_COMMAND = "stop_after_current_motion"
+
+
 def _advertised_receiver_ip(receiver_ip: str) -> str | None:
     normalized = receiver_ip.strip()
     if normalized in {"", "0.0.0.0", "::"}:
@@ -50,7 +56,7 @@ def structured_start_command(
 def structured_stop_command() -> dict[str, str]:
     return {
         "schema_version": "robot_command.v1",
-        "command": "exit_idle_program",
+        "command": IDLE_EXIT_COMMAND,
     }
 
 

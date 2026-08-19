@@ -345,7 +345,7 @@ export function RoomMonitor() {
             ref={videoRef}
             data-testid="room-monitor-video"
             data-connection-state={connectionStatus}
-            className="size-full object-cover"
+            className="size-full rotate-180 object-cover"
             muted
             autoPlay
             playsInline

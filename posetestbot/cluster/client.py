@@ -191,6 +191,20 @@ class ClusterControllerClient:
             idempotency_key=idempotency_key,
         )
 
+    def delete_archive(
+        self,
+        archive_id: str,
+        payload: Mapping[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return self._json(
+            "DELETE",
+            f"/v1/archives/{urllib.parse.quote(archive_id, safe='')}",
+            body=payload,
+            idempotency_key=idempotency_key,
+        )
+
     def estimators(self) -> dict[str, Any]:
         return self._json("GET", "/v2/estimators")
 

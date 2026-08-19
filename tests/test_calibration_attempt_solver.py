@@ -1628,7 +1628,69 @@ def test_multi_camera_ranking_selects_best_common_bundle_and_records_evidence(
         )
 
 
-def test_multi_camera_ranking_rejects_inconsistent_passing_companions(
+def test_multi_camera_ranking_ignores_failed_unselected_solver_alternative(
+    tmp_path: Path,
+) -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+    base = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+    )
+    passing = [
+        _multi_camera_candidate_variant(
+            base,
+            sensor_key=sensor_key,
+            pnp_method="ITERATIVE",
+            extrinsic_method="park",
+            score=0.2,
+            companion_translation_offset_mm=offset,
+        )
+        for sensor_key, offset in (
+            ("realsense_d435:1", 0.0),
+            ("oak_d_pro:2", 2.0),
+        )
+    ]
+    failed_alternative = _multi_camera_candidate_variant(
+        base,
+        sensor_key="realsense_d435:1",
+        pnp_method="ITERATIVE",
+        extrinsic_method="daniilidis",
+        score=0.3,
+        companion_translation_offset_mm=0.0,
+    )
+    failed_alternative.update(
+        {
+            "status": "error",
+            "score": None,
+            "error": "degenerate robot motion",
+        }
+    )
+    request_value = _multi_camera_request()
+    request_value["pnp_methods"] = ["ITERATIVE"]
+    request_value["extrinsic_methods"] = ["park", "daniilidis"]
+
+    ranking = attempt_module._validate_and_rank(
+        tmp_path,
+        request_value,
+        [*passing, failed_alternative],
+        _multi_camera_intrinsics(),
+    )
+
+    assert ranking["status"] == "complete"
+    assert ranking["recommended_camera_count"] == 2
+    assert ranking["multi_camera_consistency"]["recommended_bundle_id"] == (
+        "ITERATIVE|park"
+    )
+    review = attempt_module._promotion_review(request_value, ranking)
+    assert review is not None
+    assert review["status"] == "promotable"
+    assert review["alternative_failure_count"] == 1
+
+
+def test_multi_camera_ranking_retains_bounded_companion_disagreement_as_warning(
     tmp_path: Path,
 ) -> None:
     observations, _expected, _companion = _fixture_observations("eye_in_hand")
@@ -1664,10 +1726,11 @@ def test_multi_camera_ranking_rejects_inconsistent_passing_companions(
     )
 
     assert all(candidate["status"] == "passing" for candidate in candidates)
-    assert ranking["status"] == "failed"
-    assert ranking["recommended_camera_count"] == 0
+    assert ranking["status"] == "complete"
+    assert ranking["recommended_camera_count"] == 2
     bundle = ranking["multi_camera_consistency"]["bundles"][0]
-    assert bundle["status"] == "failed"
+    assert bundle["status"] == "passing"
+    assert bundle["quality_state"] == "warning"
     assert bundle["max_pairwise_companion_translation_mm"] == pytest.approx(10.01)
     assert next(
         check
@@ -1675,11 +1738,150 @@ def test_multi_camera_ranking_rejects_inconsistent_passing_companions(
         if check["name"] == "joint_companion_translation_consistency"
     ) == {
         "name": "joint_companion_translation_consistency",
-        "status": "error",
+        "status": "warning",
         "actual": pytest.approx(10.01),
-        "threshold": 10.0,
+        "warning_threshold": 10.0,
+        "threshold": 20.0,
         "unit": "mm",
     }
+
+
+def test_legacy_hard_failed_bundle_is_promotable_under_current_warning_policy(
+    tmp_path: Path,
+) -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+    base = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+    )
+    candidates = [
+        _multi_camera_candidate_variant(
+            base,
+            sensor_key=sensor_key,
+            pnp_method="ITERATIVE",
+            extrinsic_method="park",
+            score=0.2,
+            companion_translation_offset_mm=offset,
+        )
+        for sensor_key, offset in (
+            ("realsense_d435:1", 0.0),
+            ("oak_d_pro:2", 15.0),
+        )
+    ]
+    request_value = _multi_camera_request()
+    request_value["pnp_methods"] = ["ITERATIVE"]
+    current = attempt_module._validate_and_rank(
+        tmp_path,
+        request_value,
+        candidates,
+        _multi_camera_intrinsics(),
+    )
+    ranked_by_sensor = {
+        result["sensor_key"]: result["candidates"] for result in current["results"]
+    }
+    legacy = attempt_module._joint_consistency_ranking(
+        request_value,
+        ranked_by_sensor,
+        policy_revision=attempt_module.LEGACY_JOINT_CONSISTENCY_POLICY_REVISION,
+    )
+    assert legacy is not None
+    legacy.pop("policy_revision")
+    legacy["thresholds"].pop("warning_pairwise_companion_translation_mm")
+    legacy["thresholds"].pop("warning_pairwise_companion_rotation_deg")
+    for bundle in legacy["bundles"]:
+        bundle.pop("consistency_policy_revision")
+        bundle.pop("quality_state")
+        bundle.pop("quality_warning_count")
+        bundle.pop("quality_warnings")
+    historical_ranking = {
+        **current,
+        "status": "failed",
+        "recommended_camera_count": 0,
+        "failed_camera_count": 2,
+        "multi_camera_consistency": legacy,
+        "results": [
+            {
+                **result,
+                "status": "failed",
+                "recommended_candidate_id": None,
+                "recommended_profile_id": None,
+                "recommendation": None,
+            }
+            for result in current["results"]
+        ],
+    }
+    attempt = {"request": request_value, "results": historical_ranking}
+
+    review = attempt_module._promotion_review(request_value, historical_ranking)
+
+    assert review is not None
+    assert review["status"] == "promotable_with_warnings"
+    assert review["selected_camera_count"] == 2
+    assert review["selected_bundle"][
+        "max_pairwise_companion_translation_mm"
+    ] == pytest.approx(15.0)
+    selections = attempt_module._promotion_selections(attempt, None)
+    assert selections == {
+        "realsense_d435:1": "realsense_d435:1|ITERATIVE|park",
+        "oak_d_pro:2": "oak_d_pro:2|ITERATIVE|park",
+    }
+    revalidated = attempt_module._revalidate_joint_promotion(attempt, selections)
+    assert revalidated is not None
+    assert revalidated["status"] == "passing"
+    assert revalidated["quality_state"] == "warning"
+
+
+def test_multi_camera_ranking_rejects_companion_disagreement_above_hard_limit(
+    tmp_path: Path,
+) -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+    base = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+    )
+    candidates = [
+        _multi_camera_candidate_variant(
+            base,
+            sensor_key=sensor_key,
+            pnp_method="ITERATIVE",
+            extrinsic_method="park",
+            score=0.2,
+            companion_translation_offset_mm=offset,
+        )
+        for sensor_key, offset in (
+            ("realsense_d435:1", 0.0),
+            ("oak_d_pro:2", 20.01),
+        )
+    ]
+    request_value = _multi_camera_request()
+    request_value["pnp_methods"] = ["ITERATIVE"]
+
+    ranking = attempt_module._validate_and_rank(
+        tmp_path,
+        request_value,
+        candidates,
+        _multi_camera_intrinsics(),
+    )
+
+    assert ranking["status"] == "failed"
+    assert ranking["recommended_camera_count"] == 0
+    bundle = ranking["multi_camera_consistency"]["bundles"][0]
+    assert bundle["status"] == "failed"
+    assert bundle["max_pairwise_companion_translation_mm"] == pytest.approx(20.01)
+    assert (
+        next(
+            check
+            for check in bundle["checks"]
+            if check["name"] == "joint_companion_translation_consistency"
+        )["status"]
+        == "error"
+    )
 
 
 def test_multi_camera_ranking_fails_closed_when_peer_fails(tmp_path) -> None:

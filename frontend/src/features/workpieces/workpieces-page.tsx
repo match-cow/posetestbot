@@ -102,6 +102,8 @@ type CatalogueAction = "archive" | "restore" | "delete"
 type UnitConversion = "meter_to_millimeter" | "millimeter_to_meter"
 
 const ALL_FILTER = "__all__"
+const EDIT_ATTRIBUTE_VALIDATION_TOAST = "workpiece-edit-attribute-validation"
+const UPLOAD_ATTRIBUTE_VALIDATION_TOAST = "workpiece-upload-attribute-validation"
 const terminalJobStates = new Set(["succeeded", "failed", "canceled"])
 let nextAttributeId = 0
 
@@ -395,6 +397,18 @@ export function WorkpiecesPage() {
   const uploadAttributeValidation = useMemo(() => validateAttributeRows(uploadDraft.attributes), [uploadDraft.attributes])
   const editAttributeValidation = useMemo(() => validateAttributeRows(editDraft.attributes), [editDraft.attributes])
 
+  useEffect(() => {
+    if (uploadValidationAttempted && !uploadAttributeValidation.message) {
+      toast.dismiss(UPLOAD_ATTRIBUTE_VALIDATION_TOAST)
+    }
+  }, [uploadAttributeValidation.message, uploadValidationAttempted])
+
+  useEffect(() => {
+    if (editValidationAttempted && !editAttributeValidation.message) {
+      toast.dismiss(EDIT_ATTRIBUTE_VALIDATION_TOAST)
+    }
+  }, [editAttributeValidation.message, editValidationAttempted])
+
   const status = useQuery({ queryKey: ["workpiece-status"], queryFn: () => api<WorkpieceStatus>("/workpieces/status") })
   const catalogue = useQuery({ queryKey: ["workpiece-catalog"], queryFn: () => api<CatalogueResponse>("/workpieces/catalog") })
   const objects = useMemo(() => catalogue.data?.objects ?? [], [catalogue.data?.objects])
@@ -618,7 +632,10 @@ export function WorkpiecesPage() {
     if (!uploadDraft.cad || !uploadDraft.name.trim()) return
     setUploadValidationAttempted(true)
     if (uploadAttributeValidation.message) {
-      toast.error("Fix the custom attributes", { description: uploadAttributeValidation.message })
+      toast.error("Fix the custom attributes", {
+        id: UPLOAD_ATTRIBUTE_VALIDATION_TOAST,
+        description: uploadAttributeValidation.message,
+      })
       return
     }
     upload.mutate(uploadDraft)
@@ -628,7 +645,10 @@ export function WorkpiecesPage() {
     if (!selected || !editDraft.name.trim()) return
     setEditValidationAttempted(true)
     if (editAttributeValidation.message) {
-      toast.error("Fix the custom attributes", { description: editAttributeValidation.message })
+      toast.error("Fix the custom attributes", {
+        id: EDIT_ATTRIBUTE_VALIDATION_TOAST,
+        description: editAttributeValidation.message,
+      })
       return
     }
     updateMetadata.mutate({ id: selected.catalog_uuid, draft: editDraft })

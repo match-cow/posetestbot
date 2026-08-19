@@ -118,7 +118,7 @@ def test_desktop_sidebar_uses_persistent_pages_and_browser_history(
     page.get_by_role("link", name="Complete route index", exact=True).first.click()
     expect(page).to_have_url(re.compile(r"/reference/http-api-routes/$"))
     expect(page.get_by_role("heading", name="Complete HTTP route index")).to_be_visible()
-    expect(page.get_by_text("116", exact=False).first).to_be_visible()
+    expect(page.get_by_text("117", exact=False).first).to_be_visible()
 
     page.go_back(wait_until="networkidle")
     expect(page.get_by_role("heading", name="HTTP API conventions")).to_be_visible()

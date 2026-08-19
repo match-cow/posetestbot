@@ -4,6 +4,7 @@ import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
 import { ArrowRight, BookOpen, Bot, Boxes, ChartNoAxesCombined, Check, Circle, CircleDot, Cpu, FolderOpen, Folders, Gauge, Grid3X3, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Route, Sun, Workflow } from "lucide-react"
 import { RestartControl } from "@/components/restart-control"
 import { Button } from "@/components/ui/button"
+import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useOperator } from "@/providers/operator-provider"
 import { useTheme } from "@/providers/theme-provider"
@@ -11,6 +12,7 @@ import { api, query } from "@/lib/api"
 import type { CaptureState, Job } from "@/lib/contracts"
 import { cn } from "@/lib/utils"
 import { activeWorkflowHref, type ActiveWorkflow, type WorkflowProgressStatus } from "@/lib/workflow-session"
+import { toast } from "sonner"
 
 const navigationGroups = [
   {
@@ -89,13 +91,26 @@ function CurrentWorkflowCard({ workflow, runtime }: { workflow: ActiveWorkflow; 
 }
 
 export function AppShell() {
-  const { bootstrap, runs, selectedRun, currentWorkflow } = useOperator()
+  const { bootstrap, runs, selectedRun, selectRun, currentWorkflow } = useOperator()
   const { theme, setTheme } = useTheme()
   const location = useLocation()
   const workflowHref = currentWorkflow ? activeWorkflowHref(currentWorkflow) : "/workflow/setup"
   const activeRun = runs.find((run) => run.path === selectedRun)
   const activeFolderName = selectedRun.split("/").filter(Boolean).at(-1) ?? selectedRun
   const activeRunName = activeRun?.run_name ?? activeFolderName
+  const runOptions = activeRun
+    ? runs
+    : [{
+        path: selectedRun,
+        name: activeFolderName,
+        run_name: null,
+        run_id: null,
+        intent: null,
+        annotation_mode: null,
+        config_valid: false,
+        config_error: null,
+        modified_at: "",
+      }, ...runs]
   const captureState = useQuery({
     queryKey: ["capture-jobs", selectedRun],
     queryFn: () => api<CaptureState>(query("/capture/jobs", { run_root: selectedRun })),
@@ -148,6 +163,18 @@ export function AppShell() {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" })
   }, [location.pathname])
 
+  const switchRun = (path: string) => {
+    if (path === selectedRun) return
+    const nextRun = runs.find((run) => run.path === path)
+    if (!selectRun(path)) {
+      toast.error("Run folder must stay inside an allowed storage root")
+      return
+    }
+    toast.success("Active run changed", {
+      description: `${nextRun?.run_name ?? nextRun?.name ?? path} is now used by every run-owned page and action.`,
+    })
+  }
+
   return (
     <TooltipProvider delayDuration={150}>
       <div className="min-h-screen bg-workspace text-foreground">
@@ -178,7 +205,7 @@ export function AppShell() {
         </aside>
 
         <div className="min-w-0 xl:ml-[244px]">
-          <header className="sticky top-0 z-30 border-b border-border bg-card/95 py-2 backdrop-blur-xl xl:h-[72px] xl:py-2">
+          <header className="sticky top-0 z-30 border-b border-border bg-card/95 py-2 backdrop-blur-xl xl:h-14 xl:py-2">
             <div className="mx-auto flex h-full max-w-[1600px] flex-wrap items-center justify-between gap-3 px-4 sm:px-5 xl:px-7">
               <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
                 <Link to="/dashboard" className="shrink-0 xl:hidden" aria-label="Open dashboard">
@@ -186,26 +213,40 @@ export function AppShell() {
                 </Link>
                 <section
                   aria-label="Active run context"
-                  className="flex h-14 min-w-0 flex-1 items-stretch gap-2 xl:max-w-[1000px]"
+                  className="flex h-10 min-w-0 flex-1 items-stretch gap-2 xl:max-w-[1000px]"
                   data-testid="active-run-context"
                 >
-                  <div className="flex h-full min-w-0 flex-1 items-center gap-3 rounded-lg border border-border bg-muted/35 px-3.5" title={selectedRun}>
-                    <span className="hidden size-9 shrink-0 place-items-center rounded-md bg-primary/10 sm:grid"><FolderOpen className="size-[18px] text-primary-strong" aria-hidden="true" /></span>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <span className="shrink-0 text-[9px] font-bold uppercase tracking-[0.14em] text-primary-strong">Active acquisition run</span>
-                        <span className={cn("hidden rounded-full border px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider sm:inline-flex", activeRun?.config_valid ? "border-success/30 bg-success/10 text-success" : "border-warning/35 bg-warning/10 text-warning-foreground")}>{activeRun?.config_valid ? "Configured" : "Not configured"}</span>
+                  <Select value={selectedRun} onValueChange={switchRun}>
+                    <SelectTrigger
+                      aria-label="Active run folder"
+                      className="h-full min-w-0 flex-1 justify-start gap-2 bg-muted/35 px-3 text-left shadow-sm [&>svg:last-child]:ml-auto"
+                      data-testid="active-run-switcher"
+                      title={selectedRun}
+                    >
+                      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+                        <span className="grid size-7 shrink-0 place-items-center rounded-md bg-primary/10"><FolderOpen className="size-4 text-primary-strong" aria-hidden="true" /></span>
+                        <span className="hidden shrink-0 text-[9px] font-bold uppercase tracking-[0.14em] text-primary-strong sm:inline">Active acquisition run</span>
+                        <span className="hidden h-3.5 w-px shrink-0 bg-border sm:inline" aria-hidden="true" />
+                        <strong className="max-w-[34%] shrink-0 truncate text-xs" data-testid="active-run-name">{activeRunName}</strong>
+                        <span className="hidden shrink-0 text-[8px] font-bold uppercase tracking-wider text-muted-foreground md:inline">Folder</span>
+                        <span className="hidden min-w-0 flex-1 truncate font-mono text-[9px] text-muted-foreground md:inline" data-testid="active-run-path">{selectedRun}</span>
+                        <span className={cn("hidden shrink-0 rounded-full border px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider lg:inline-flex", activeRun?.config_valid ? "border-success/30 bg-success/10 text-success" : "border-warning/35 bg-warning/10 text-warning-foreground")}>{activeRun?.config_valid ? "Configured" : "Not configured"}</span>
                       </div>
-                      <div className="mt-1 flex min-w-0 items-center gap-2">
-                        <strong className="max-w-[36%] shrink-0 truncate text-[12px]" data-testid="active-run-name">{activeRunName}</strong>
-                        <span className="h-3.5 w-px shrink-0 bg-border" aria-hidden="true" />
-                        <span className="shrink-0 text-[8px] font-bold uppercase tracking-wider text-muted-foreground">Folder</span>
-                        <span className="min-w-0 truncate font-mono text-[9px] text-muted-foreground" data-testid="active-run-path">{selectedRun}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <Button asChild className="h-full shrink-0 rounded-lg px-4 shadow-sm" data-testid="change-active-run">
-                    <Link to="/run-folders" aria-label="Change active run folder"><Folders aria-hidden="true" /><span className="hidden sm:inline">Change run</span></Link>
+                    </SelectTrigger>
+                    <SelectContent align="start" className="w-[var(--radix-select-trigger-width)] max-w-[calc(100vw-2rem)]" data-testid="active-run-options">
+                      {runOptions.map((run) => <SelectItem key={run.path} value={run.path} className="py-2 pr-3">
+                        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span className="truncate font-semibold">{run.run_name ?? run.name}</span>
+                            <span className={cn("shrink-0 rounded-full border px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider", run.config_valid ? "border-success/30 bg-success/10 text-success" : "border-warning/35 bg-warning/10 text-warning-foreground")}>{run.config_valid ? run.intent ?? "Configured" : "Not configured"}</span>
+                          </span>
+                          <span className="truncate font-mono text-[9px] text-muted-foreground">{run.path}</span>
+                        </span>
+                      </SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  <Button asChild variant="outline" className="h-full shrink-0 rounded-lg px-3" data-testid="manage-run-folders">
+                    <Link to="/run-folders" aria-label="Manage run folders"><Folders aria-hidden="true" /><span className="hidden sm:inline">Run folders</span></Link>
                   </Button>
                 </section>
               </div>

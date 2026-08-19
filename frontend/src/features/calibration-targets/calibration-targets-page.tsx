@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Download, FileJson, FileText, Grid3X3, LoaderCircle, ScanLine, Sparkles, Trash2, TriangleAlert } from "lucide-react"
-import { Link } from "react-router-dom"
+import { Link, useLocation, useNavigate } from "react-router-dom"
 import { toast } from "sonner"
 import { EmptyState } from "@/components/empty-state"
 import { HelpTip } from "@/components/help-tip"
@@ -95,9 +95,15 @@ type RunConfigResponse = {
   camera_contract?: { mutable: boolean; blockers: string[] }
 }
 
+const CALIBRATION_WORKFLOW_NEXT_STEP = "/workflow/calibration?step=readiness"
+
 export function CalibrationTargetsPage() {
   const { selectedRun } = useOperator()
   const queryClient = useQueryClient()
+  const location = useLocation()
+  const navigate = useNavigate()
+  const workflowReturnTo = (location.state as { workflowReturnTo?: unknown } | null)?.workflowReturnTo
+  const shouldReturnToCalibrationWorkflow = workflowReturnTo === CALIBRATION_WORKFLOW_NEXT_STEP
   const status = useQuery({ queryKey: ["calibration-targets", "status"], queryFn: () => api<GeneratorStatus>("/calibration-targets/status"), staleTime: 30_000 })
   const capabilities = useQuery({ queryKey: ["calibration-targets", "capabilities"], queryFn: () => api<Capabilities>("/calibration-targets/capabilities"), enabled: status.data?.generation_available === true, staleTime: Infinity })
   const library = useQuery({ queryKey: ["calibration-targets", "bundles", selectedRun], queryFn: () => api<LibraryResponse>(query("/calibration-targets/bundles", { run_root: selectedRun })) })
@@ -181,14 +187,19 @@ export function CalibrationTargetsPage() {
         queryClient.invalidateQueries({ queryKey: ["overview", affectedRun] })
       }
     } else toast.error("Calibration target job did not complete", { description: result.message ?? result.tail.at(-1) })
+    const continueCalibrationWorkflow = result.status === "succeeded"
+      && pendingJob.kind === "select"
+      && affectedRun === selectedRun
+      && shouldReturnToCalibrationWorkflow
     queueMicrotask(() => {
       if (result.status === "succeeded") {
         setDisplayName("")
         setSelection(null)
       }
       setPendingJob(null)
+      if (continueCalibrationWorkflow) navigate(CALIBRATION_WORKFLOW_NEXT_STEP, { replace: true })
     })
-  }, [job.data, pendingJob, queryClient])
+  }, [job.data, navigate, pendingJob, queryClient, selectedRun, shouldReturnToCalibrationWorkflow])
 
   const fit = useMutation({
     mutationFn: () => api<{ request: Configuration }>("/calibration-targets/fit", { method: "POST", body: serialized }),
@@ -217,6 +228,7 @@ export function CalibrationTargetsPage() {
       if (result.status === "unchanged") {
         setSelection(null)
         toast.success("Calibration target already selected", { description: "The same saved target remains available for another calibration attempt." })
+        if (shouldReturnToCalibrationWorkflow) navigate(CALIBRATION_WORKFLOW_NEXT_STEP, { replace: true })
         return
       }
       if (!result.job_id) {

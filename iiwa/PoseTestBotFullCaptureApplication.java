@@ -39,6 +39,9 @@ public class PoseTestBotFullCaptureApplication extends RoboticsAPIApplication {
 			"/PoseTestBot/CaptureStart";
 	private static final String CAPTURE_END_FRAME_PATH =
 			"/PoseTestBot/CaptureEnd";
+	/* Commissioned robot_command.v1 token; coordinate any wire-level rename. */
+	private static final String IDLE_EXIT_COMMAND =
+			"stop_after_current_motion";
 	private static final Charset UTF_8 = Charset.forName("UTF-8");
 
 	private static final int SETTLE_TIME_MS = 1500;
@@ -443,7 +446,7 @@ public class PoseTestBotFullCaptureApplication extends RoboticsAPIApplication {
 
 	private boolean isStopCommand(JSONObject jsonObject) {
 		return "robot_command.v1".equals(jsonObject.get("schema_version"))
-				&& "exit_idle_program".equals(jsonObject.get("command"));
+				&& IDLE_EXIT_COMMAND.equals(jsonObject.get("command"));
 	}
 
 	private void sleepWithLogging(int millis, String reason) {

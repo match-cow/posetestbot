@@ -98,7 +98,7 @@ invalidate and recommission every connected path.
 - [ ] Create a fresh calibration-intent `run_config.v4` and select the exact
   target bundle and mounting frame.
 - [ ] Queue preflight and inspect the fixed plan before deliberately submitting
-  both fresh physical execution acknowledgements.
+  the single fresh acknowledgement covering both physical execution gates.
 - [ ] Run a short trial before the full capture. Require current metadata and
   strict `robot_pose.v1` evidence for every enabled camera.
 - [ ] Retain the capture plan, preflight, execution plan/status/report/logs,

@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 
 from posetestbot.bop.evaluation import inspect_dataset, list_results
-from posetestbot.cluster.client import ClusterClientError
+from posetestbot.cluster.client import ClusterClientError, ClusterControllerClient
 from posetestbot.web.app import create_app
 from posetestbot.web.runtime import WebRuntime, WebSettings
 from tests.test_bop_evaluation import make_tiny_evaluation_run, write_result_csv
@@ -44,6 +44,31 @@ class FakeRunner:
                 }
 
         return FakeJob()
+
+
+def test_cluster_client_delete_archive_uses_opaque_versioned_route(monkeypatch) -> None:
+    controller = ClusterControllerClient("http://127.0.0.1:8765", "x" * 32)
+    request: dict[str, Any] = {}
+
+    def fake_json(method, path, **kwargs):
+        request.update({"method": method, "path": path, **kwargs})
+        return {"job": {"job_id": "job-fixture"}}
+
+    monkeypatch.setattr(controller, "_json", fake_json)
+    payload = {"confirm": True, "operator": "Fixture Operator"}
+    response = controller.delete_archive(
+        "archive/unsafe-separator",
+        payload,
+        idempotency_key="archive-delete:fixture",
+    )
+
+    assert response == {"job": {"job_id": "job-fixture"}}
+    assert request == {
+        "method": "DELETE",
+        "path": "/v1/archives/archive%2Funsafe-separator",
+        "body": payload,
+        "idempotency_key": "archive-delete:fixture",
+    }
 
 
 def _status() -> dict[str, Any]:
@@ -130,6 +155,8 @@ class FakeController:
         self.archive_key: str | None = None
         self.restore_payload: dict[str, Any] | None = None
         self.restore_key: str | None = None
+        self.delete_payload: dict[str, Any] | None = None
+        self.delete_key: str | None = None
         self.cancel_key: str | None = None
 
     def status(self):
@@ -194,6 +221,11 @@ class FakeController:
     def restore_archive(self, _archive_id, payload, *, idempotency_key: str):
         self.restore_payload = dict(payload)
         self.restore_key = idempotency_key
+        return {"job": self.job_value}
+
+    def delete_archive(self, _archive_id, payload, *, idempotency_key: str):
+        self.delete_payload = dict(payload)
+        self.delete_key = idempotency_key
         return {"job": self.job_value}
 
     def cancel_job(self, _job_id, *, idempotency_key: str):
@@ -996,7 +1028,11 @@ def test_cluster_jobs_logs_cancel_and_archive_copy_restore_use_server_keys(
         "kind": "pose-estimation",
         "state": "running",
         "status": "running",
-        "payload": {"run_root": run.as_posix(), "remote_path": "/secret/work"},
+        "payload": {
+            "archive_id": archive_id,
+            "run_root": run.as_posix(),
+            "remote_path": "/secret/work",
+        },
         "error": "remote failure at /secret/work",
         "log_available": True,
         "terminal": False,
@@ -1046,12 +1082,46 @@ def test_cluster_jobs_logs_cancel_and_archive_copy_restore_use_server_keys(
     assert controller.restore_key is not None
     assert controller.restore_key.startswith("archive-restore:")
 
+    unconfirmed_delete = client.delete(
+        f"/cluster/archives/{archive_id}",
+        json={"confirm": False, "operator": "Fixture Operator"},
+    )
+    assert unconfirmed_delete.status_code == 400
+    assert controller.delete_payload is None
+
+    rejected_delete = client.delete(
+        f"/cluster/archives/{archive_id}",
+        json={
+            "confirm": True,
+            "operator": "Fixture Operator",
+            "remote_path": "/secret/project/archive",
+        },
+    )
+    assert rejected_delete.status_code == 400
+    assert controller.delete_payload is None
+
+    deleted = client.delete(
+        f"/cluster/archives/{archive_id}",
+        headers={"Idempotency-Key": "browser-controlled"},
+        json={"confirm": True, "operator": "Fixture Operator"},
+    )
+    assert deleted.status_code == 202
+    assert deleted.get_json()["job"]["job_id"] == job_id
+    assert controller.delete_payload == {
+        "confirm": True,
+        "operator": "Fixture Operator",
+    }
+    assert controller.delete_key is not None
+    assert controller.delete_key.startswith("archive-delete:")
+    assert controller.delete_key != "browser-controlled"
+
     job = client.get(f"/cluster/jobs/{job_id}", query_string={"include_log": "1"})
     assert job.status_code == 200
     assert job.get_json()["log"] == (
         "controller log\nremote [controller path]\n[redacted controller detail]\n"
     )
     assert job.get_json()["job"]["error"] == "remote failure at [controller path]"
+    assert job.get_json()["job"]["payload"]["archive_id"] == archive_id
     assert "remote_path" not in job.get_json()["job"]["payload"]
 
     canceled = client.post(

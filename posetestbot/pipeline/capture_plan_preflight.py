@@ -34,6 +34,7 @@ from posetestbot.sensors.registry import (
     is_auto_device_id,
     sensor_folder_name,
 )
+from posetestbot.sensors.readiness import selected_sensor_readiness_checks
 from posetestbot.sensors.status import (
     REALSENSE_MIN_USB_MAJOR,
     collect_sensor_status,
@@ -621,6 +622,7 @@ def build_capture_plan_preflight(
     allow_real_robot: bool = False,
     collect_sensors: Callable[[], dict] = collect_sensor_status,
     write_plan_if_missing: bool = True,
+    selected_sensor_readiness: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a capture readiness report without launching robot or camera processes."""
 
@@ -748,6 +750,13 @@ def build_capture_plan_preflight(
                 sensor_status=sensor_status,
             )
         )
+        if selected_sensor_readiness is not None:
+            checks.extend(
+                selected_sensor_readiness_checks(
+                    selected_sensor_readiness,
+                    config=config,
+                )
+            )
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -759,6 +768,7 @@ def build_capture_plan_preflight(
         "capture_plan": plan,
         "capture_plan_build_error": plan_build_error,
         "sensor_status": sensor_status,
+        "selected_sensor_readiness": selected_sensor_readiness,
         "allow_real_robot": allow_real_robot,
     }
 
@@ -770,6 +780,7 @@ def write_capture_plan_preflight_with_manifest(
     allow_real_robot: bool = False,
     collect_sensors: Callable[[], dict] = collect_sensor_status,
     write_plan_if_missing: bool = True,
+    selected_sensor_readiness: Mapping[str, Any] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     run_root_path = Path(run_root)
     manifest = load_or_create_run_manifest(run_root_path)
@@ -782,6 +793,7 @@ def write_capture_plan_preflight_with_manifest(
             allow_real_robot=allow_real_robot,
             collect_sensors=collect_sensors,
             write_plan_if_missing=write_plan_if_missing,
+            selected_sensor_readiness=selected_sensor_readiness,
         )
         path = write_capture_plan_preflight_report(run_root_path, report)
         manifest["robot_profile"] = dict(report["config"].get("robot_profile") or {})

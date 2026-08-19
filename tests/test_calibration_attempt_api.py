@@ -362,6 +362,10 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
         "max_mean_translation_mm": 10.0,
         "max_mean_rotation_deg": 5.0,
         "max_outlier_ratio": 0.25,
+        "warning_pairwise_companion_translation_mm": 10.0,
+        "warning_pairwise_companion_rotation_deg": 5.0,
+        "max_pairwise_companion_translation_mm": 20.0,
+        "max_pairwise_companion_rotation_deg": 10.0,
     }
 
 
@@ -778,8 +782,9 @@ def test_attempt_rejects_legacy_target_selection_without_mounting_frame(
     )
 
     assert response.status_code == 400
-    assert "placement mounting_frame must be robot_flange or template_base" in (
-        response.get_json()["output"]
+    assert (
+        "placement mounting_frame must be robot_flange or template_base"
+        in (response.get_json()["output"])
     )
     assert len(runner.submissions) == before
 
