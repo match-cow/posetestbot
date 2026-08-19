@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from posetestbot.io._report_checks import make_check as _check
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import REALSENSE_CAPTURE_SMOKE_REPORT
 from posetestbot.io.manifest import (
@@ -28,21 +29,6 @@ STAGE_NAME = "realsense_capture_smoke"
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _check(
-    name: str,
-    status: str,
-    message: str,
-    *,
-    details: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    return {
-        "name": name,
-        "status": status,
-        "message": message,
-        "details": dict(details or {}),
-    }
 
 
 def _enabled_sensors(config: Mapping[str, Any]) -> list[dict[str, Any]]:

@@ -117,16 +117,19 @@ normal checkout enables both:
 - `<repository>/working_data`; and
 - `/mnt/working_data_ssd`, the lab acquisition SSD.
 
-The top bar always shows the active acquisition's display name and exact folder
-path; it does not contain the potentially long run list. Choose **Change** to
-open **Inspect → Run folders**, where the active context, new-acquisition form,
-and searchable/sortable existing-run chooser appear before the detailed storage
-inventory. That detailed inventory has its own search and a bounded scrolling
-table so storage actions remain usable as the run count grows. To start a run,
-choose an approved storage root and one folder name;
+The top bar's **Active acquisition run** selector shows the current display
+name, exact folder path, and configuration state. Open it to switch directly
+among discovered runs, or choose **Run folders** beside it to create a run and
+inspect storage. The Run folders page provides the active context,
+new-acquisition form, searchable/sortable run chooser, and a separately
+searchable bounded storage table. To start a run, choose an approved storage
+root and one folder name;
 the console derives the direct child `<root>/<run-folder>`, and Workflow writes
-its `run_config.json` when setup is saved. Use a different sibling folder for
-each acquisition (`<root>/run-a`, `<root>/run-b`, and so on). The optional
+its `run_config.json` when setup is saved. Creation remains disabled until the
+run-folder inventory is current and rejects a path already present in the
+inventory, saved-run index, or active browser selection. Use a different
+sibling folder for each acquisition (`<root>/run-a`, `<root>/run-b`, and so
+on). The optional
 **Run display name** inside setup is human-readable metadata, defaults to the
 folder name, and does not select or rename that folder. The Run folders page
 also reports recursively measured size, saved sensor/object setup, and evidence
@@ -509,8 +512,9 @@ the selector. Existing runs keep their run-owned values. Change those
 explicitly with **Mounting for this run** and **Image orientation for this
 run** in Workflow step 1, then save setup. Switching either value also requires
 calibration evidence compatible with the new `static`/`eye_in_hand` and
-normal/inverted interpretation. The **Include in next run** checkbox is only a
-browser-local draft; Workflow step 1 owns durable camera membership.
+normal/inverted interpretation. **Devices** does not select cameras for an
+acquisition. Workflow step 1 owns the run's durable camera membership and
+snapshots the current lab defaults when a camera is added.
 
 One camera-calibration recording must contain one mounting group. An all-static
 group uses a grid rigidly attached to `robot_flange`; select unknown placement
@@ -627,16 +631,29 @@ uv run python scripts/runtime_status.py --json
 ### Calibration Teaching Plot
 
 Matplotlib is a direct project dependency installed by `uv sync`. Regenerating
-the committed iiwa Workbench teaching SVG and PNG is headless and does not open
-the robot or cameras:
+the committed iiwa Workbench teaching SVG is headless and does not open the
+robot or cameras:
 
 ```bash
 MPLCONFIGDIR=/tmp/posetestbot-mpl UV_CACHE_DIR=/tmp/uv-cache \
   uv run python scripts/plot_iiwa_calibration_teaching_plan.py
+MPLCONFIGDIR=/tmp/posetestbot-mpl UV_CACHE_DIR=/tmp/uv-cache \
+  uv run python scripts/plot_iiwa_calibration_teaching_plan.py --check
 ```
 
 The script validates `iiwa/calibration_teaching_plan.v2.json` and writes
-`docs/images/iiwa_calibration_teaching_plan.svg` plus the corresponding PNG.
+`docs/images/iiwa_calibration_teaching_plan.svg`, which is embedded in the
+teaching checklist. The non-writing `--check` command fails when that committed
+asset differs from a fresh render, while ignoring opaque Matplotlib-internal SVG
+identifier changes that do not affect the drawing. A raster copy is optional
+and should be written outside the tracked documentation tree when needed:
+
+```bash
+MPLCONFIGDIR=/tmp/posetestbot-mpl UV_CACHE_DIR=/tmp/uv-cache \
+  uv run python scripts/plot_iiwa_calibration_teaching_plan.py \
+  --png /tmp/iiwa_calibration_teaching_plan.png
+```
+
 The operator acceptance tasks are summarized in `docs/COMMISSIONING.md`; the
 detailed reusable teaching checklist remains in
 `docs/IIWA_CALIBRATION_TEACHING_CHECKLIST.md`.
@@ -659,10 +676,17 @@ Or run the build directly in an already synchronized development environment:
 UV_CACHE_DIR=/tmp/uv-cache uv run --frozen mkdocs build --strict
 ```
 
-GitHub Actions uses a lean documentation-only environment:
+GitHub Actions excludes default development dependencies but includes the
+project runtime and documentation groups so it can validate the generated
+teaching plot and Flask route index before building:
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run --frozen --only-group docs \
+MPLCONFIGDIR=/tmp/posetestbot-mpl UV_CACHE_DIR=/tmp/uv-cache \
+  uv run --frozen --no-default-groups --group docs \
+  python scripts/plot_iiwa_calibration_teaching_plan.py --check
+UV_CACHE_DIR=/tmp/uv-cache uv run --frozen --no-default-groups --group docs \
+  python scripts/generate_http_api_reference.py --check
+UV_CACHE_DIR=/tmp/uv-cache uv run --frozen --no-default-groups --group docs \
   mkdocs build --strict
 ```
 
@@ -717,8 +741,8 @@ banner. Use `GET /jobs?include_services=1` for diagnostics. Monitor health is
 persisted as `monitor_webrtc.v2` with one-second heartbeats, camera state,
 capture/media counters, frame timestamps, peer counts, STUN port, and a
 concrete failure reason. The status also records `vp8_packet_max_bytes` for
-transport diagnostics. Legacy v1 artifacts remain readable but are never reused
-as live state.
+transport diagnostics. Current readers reject retired `monitor_webrtc.v1`
+artifacts rather than interpreting them as live state.
 
 Starting or retrying the monitor from the dashboard is safe with respect to
 the robot: it queues only the monitor worker and never runs an acquisition

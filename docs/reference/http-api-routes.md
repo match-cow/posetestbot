@@ -3,8 +3,11 @@
 # Complete HTTP route index
 
 This index contains all **117** non-static Flask rules registered by
-`posetestbot.web.app.create_app`. It is generated from the running route map,
-so aliases and mixed-method rules appear exactly as Flask exposes them.
+`posetestbot.web.app.create_app`, rendered as
+**121** method-specific operations. It is generated from the
+running route map, so aliases remain explicit and every application-declared
+method has its own row. Flask's implicit `HEAD` and `OPTIONS` methods are
+excluded.
 
 The index describes reachability and transport type. Request bodies, state
 transitions, safety gates, and response semantics are documented in the
@@ -59,7 +62,8 @@ uv run python scripts/generate_http_api_reference.py --check
 
 | Method | Path | Returns | Purpose | Flask endpoint |
 | --- | --- | --- | --- | --- |
-| `GET, POST` | `/capture/jobs` | JSON | List capture jobs | `capture.list_capture_jobs` |
+| `GET` | `/capture/jobs` | JSON | List capture jobs | `capture.list_capture_jobs` |
+| `POST` | `/capture/jobs` | JSON | Queue the supervised capture recipe | `capture.list_capture_jobs` |
 | `POST` | `/capture/jobs/<job_id>/stop` | JSON | Stop capture job | `capture.stop_capture_job` |
 | `GET` | `/capture/status` | JSON | Capture execution status | `capture.capture_execution_status` |
 
@@ -88,7 +92,8 @@ uv run python scripts/generate_http_api_reference.py --check
 | `POST` | `/dataset-processing/jobs` | JSON | Dataset processing jobs | `orchestration.dataset_processing_jobs` |
 | `POST` | `/preflight/jobs` | JSON | Preflight jobs | `orchestration.preflight_jobs` |
 | `POST` | `/robot/commands` | JSON | Robot commands | `orchestration.robot_commands` |
-| `GET, POST` | `/run-config` | JSON | Run config | `orchestration.run_config` |
+| `GET` | `/run-config` | JSON | Load run configuration | `orchestration.run_config` |
+| `POST` | `/run-config` | JSON | Create or update run configuration | `orchestration.run_config` |
 
 ## Local jobs and commands
 
@@ -182,7 +187,8 @@ uv run python scripts/generate_http_api_reference.py --check
 
 | Method | Path | Returns | Purpose | Flask endpoint |
 | --- | --- | --- | --- | --- |
-| `GET, POST` | `/sync/quality` | JSON | Sync quality | `sync_quality.sync_quality_endpoint` |
+| `GET` | `/sync/quality` | JSON | Build synchronization quality report | `sync_quality.sync_quality_endpoint` |
+| `POST` | `/sync/quality` | JSON | Build and persist synchronization quality report | `sync_quality.sync_quality_endpoint` |
 
 ## System lifecycle
 
@@ -195,7 +201,8 @@ uv run python scripts/generate_http_api_reference.py --check
 
 | Method | Path | Returns | Purpose | Flask endpoint |
 | --- | --- | --- | --- | --- |
-| `GET, POST` | `/hardware/status` | JSON | Hardware status | `system_status.hardware_status` |
+| `GET` | `/hardware/status` | JSON | Load hardware status report | `system_status.hardware_status` |
+| `POST` | `/hardware/status` | JSON | Collect and persist hardware status report | `system_status.hardware_status` |
 | `GET` | `/robot/status` | JSON | Robot status | `system_status.robot_status` |
 | `GET` | `/runtime/status` | JSON | Runtime status | `system_status.runtime_status` |
 

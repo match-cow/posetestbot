@@ -349,10 +349,17 @@ function ClusterStorageSection({ inventory }: { inventory: RunFolderInventory })
     onError: (error) => toast.error("Archive request was refused", { description: errorMessage(error) }),
   })
   const restore = useMutation({
-    mutationFn: (archive: ClusterArchive) => api<{ job: ClusterJob }>(`/cluster/archives/${archive.archive_id}/restore`, {
-      method: "POST",
-      body: JSON.stringify({ destination_root: destinationRoot, destination_name: destinationName.trim() || undefined, operator: operator.trim() }),
-    }),
+    mutationFn: (archive: ClusterArchive) => {
+      if (!destinationRoot || !validRunFolderName(destinationName)) throw new Error("Choose one valid destination folder name")
+      const destinationPath = runFolderPath(destinationRoot, destinationName)
+      if (runs.some((run) => normalizeRunPath(run.path) === normalizeRunPath(destinationPath))) {
+        throw new Error("Destination run folder already exists")
+      }
+      return api<{ job: ClusterJob }>(`/cluster/archives/${archive.archive_id}/restore`, {
+        method: "POST",
+        body: JSON.stringify({ destination_root: destinationRoot, destination_name: destinationName.trim(), operator: operator.trim() }),
+      })
+    },
     onSuccess: ({ job }) => {
       setRemoteOperation({ kind: "restore", jobId: job.job_id })
       setRestoreArchive(null)
@@ -385,6 +392,9 @@ function ClusterStorageSection({ inventory }: { inventory: RunFolderInventory })
   const mutationReady = Boolean(integration?.enabled && storageConnected && storageMutationEnabled && operator.trim().length >= 2)
   const remoteOnlyCount = (archives.data?.archives ?? []).filter((archive) => !runs.some((run) => run.path === archive.source_run_root)).length
   const remoteOperationActive = Boolean(remoteOperation && !remoteJob.data?.job.terminal)
+  const restoreNameValid = validRunFolderName(destinationName)
+  const restoreDestinationPath = destinationRoot && restoreNameValid ? runFolderPath(destinationRoot, destinationName) : null
+  const restoreCollision = Boolean(restoreDestinationPath && runs.some((run) => normalizeRunPath(run.path) === normalizeRunPath(restoreDestinationPath)))
 
   return <Card data-testid="cluster-storage-section" className="border-primary/25">
     <CardHeader>
@@ -418,7 +428,7 @@ function ClusterStorageSection({ inventory }: { inventory: RunFolderInventory })
         </>}
     </CardContent>
 
-    <Dialog open={Boolean(restoreArchive)} onOpenChange={(open) => !open && !restore.isPending && setRestoreArchive(null)}><DialogContent><DialogHeader><DialogTitle>Restore verified archive</DialogTitle><DialogDescription>The controller downloads into temporary storage, verifies the archive and every regular file, then atomically publishes the run below an approved root.</DialogDescription></DialogHeader><div className="space-y-3"><div className="space-y-1.5"><Label>Destination root</Label><Select value={destinationRoot} onValueChange={setDestinationRoot}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{inventory.roots.filter((root) => root.exists).map((root) => <SelectItem value={root.path} key={root.path}>{root.path} · {formatBytes(root.storage.free_bytes)} free</SelectItem>)}</SelectContent></Select></div><div className="space-y-1.5"><Label htmlFor="restore-name">Run folder name</Label><Input id="restore-name" value={destinationName} onChange={(event) => setDestinationName(event.target.value)} /></div></div><DialogFooter><Button variant="outline" onClick={() => setRestoreArchive(null)} disabled={restore.isPending}>Cancel</Button><Button onClick={() => restoreArchive && restore.mutate(restoreArchive)} disabled={!restoreArchive || !destinationRoot || !destinationName.trim() || !mutationReady || restore.isPending}>{restore.isPending ? <LoaderCircle className="animate-spin" /> : <CloudDownload />}Queue verified restore</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={Boolean(restoreArchive)} onOpenChange={(open) => !open && !restore.isPending && setRestoreArchive(null)}><DialogContent data-testid="cluster-archive-restore-dialog"><DialogHeader><DialogTitle>Restore verified archive</DialogTitle><DialogDescription>The controller downloads into temporary storage, verifies the archive and every regular file, then atomically publishes the run below an approved root.</DialogDescription></DialogHeader><div className="space-y-3"><div className="space-y-1.5"><Label htmlFor="restore-destination-root">Destination root</Label><Select value={destinationRoot} onValueChange={setDestinationRoot}><SelectTrigger id="restore-destination-root" aria-label="Destination root"><SelectValue /></SelectTrigger><SelectContent>{inventory.roots.filter((root) => root.exists).map((root) => <SelectItem value={root.path} key={root.path}>{root.path} · {formatBytes(root.storage.free_bytes)} free</SelectItem>)}</SelectContent></Select></div><div className="space-y-1.5"><Label htmlFor="restore-name">Run folder name</Label><Input id="restore-name" aria-invalid={!restoreNameValid || restoreCollision} aria-describedby={!restoreNameValid || restoreCollision ? "restore-name-error" : undefined} value={destinationName} onChange={(event) => setDestinationName(event.target.value)} />{(!restoreNameValid || restoreCollision) && <p id="restore-name-error" role="alert" className="text-xs text-destructive">{restoreCollision ? "This destination run folder already exists. Choose another name or use the local run." : "Use one folder name only; paths, “.”, and “..” are not allowed."}</p>}</div></div><DialogFooter><Button variant="outline" onClick={() => setRestoreArchive(null)} disabled={restore.isPending}>Cancel</Button><Button onClick={() => restoreArchive && restore.mutate(restoreArchive)} disabled={!restoreArchive || !destinationRoot || !restoreNameValid || restoreCollision || !mutationReady || restore.isPending}>{restore.isPending ? <LoaderCircle className="animate-spin" /> : <CloudDownload />}Queue verified restore</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={Boolean(deleteArchive)} onOpenChange={(open) => { if (!open && !removeArchive.isPending) { setDeleteArchive(null); setDeleteArchiveConfirmed(false) } }}>
       <DialogContent data-testid="cluster-archive-delete-dialog">
         <DialogHeader>
@@ -639,6 +649,19 @@ export function RunFoldersPage() {
   const inventoryReadyForMutation = inventory.data?.inventory_state === "ready"
     && inventory.data.stale === false
     && !inventoryRefreshing
+  const newRunInventoryReady = inventoryReadyForMutation
+    && !inventory.isError
+    && !operationBlocking
+    && !maintenanceBlocking
+  const newRunNameValid = validRunFolderName(newRunFolderName)
+  const proposedNewRunPath = newRunNameValid ? runFolderPath(newRunRoot, newRunFolderName) : null
+  const normalizedProposedNewRunPath = proposedNewRunPath ? normalizeRunPath(proposedNewRunPath) : null
+  const knownRunPaths = [
+    ...runs.map((run) => run.path),
+    ...indexedRuns.map((run) => run.path),
+    selectedRun,
+  ]
+  const newRunCollision = Boolean(normalizedProposedNewRunPath && knownRunPaths.some((path) => normalizeRunPath(path) === normalizedProposedNewRunPath))
 
   const openMove = (run: RunFolder) => {
     const target = (inventory.data?.roots ?? []).find((root) => root.path !== run.root && root.exists && root.identity)
@@ -655,12 +678,19 @@ export function RunFoldersPage() {
   }
 
   const activateNewRun = () => {
-    if (!validRunFolderName(newRunFolderName)) {
+    if (!newRunInventoryReady) {
+      toast.error("Current run-folder inventory is required", { description: "Refresh inventory before selecting a new acquisition folder." })
+      return
+    }
+    if (!newRunNameValid || !proposedNewRunPath) {
       toast.error("Run folder name must be one folder, not a path")
       return
     }
-    const path = runFolderPath(newRunRoot, newRunFolderName)
-    if (!selectRun(path)) {
+    if (newRunCollision) {
+      toast.error("Run folder already exists", { description: "Choose the existing run below or enter a different folder name." })
+      return
+    }
+    if (!selectRun(proposedNewRunPath)) {
       toast.error("Run folder must stay inside an allowed storage root")
       return
     }
@@ -703,10 +733,13 @@ export function RunFoldersPage() {
           <div className="flex items-start gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10"><FolderPlus className="size-4 text-primary-strong" /></span><div><h2 className="text-sm font-semibold">Start another acquisition</h2><p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">Select a new sibling folder now. It remains unconfigured until you save setup in Workflow; its run name will initially default to this folder name.</p></div></div>
           <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(220px,1fr)_minmax(190px,0.8fr)]">
             <div className="space-y-1.5"><Label htmlFor="new-run-root">Storage root</Label><Select value={newRunRoot} onValueChange={setNewRunRoot}><SelectTrigger id="new-run-root" aria-label="New run storage root"><SelectValue /></SelectTrigger><SelectContent>{bootstrap.allowed_run_roots.map((root) => <SelectItem value={root} key={root}>{root}</SelectItem>)}</SelectContent></Select></div>
-            <div className="space-y-1.5"><Label htmlFor="new-run-folder-name">Run folder name</Label><Input id="new-run-folder-name" value={newRunFolderName} onChange={(event) => setNewRunFolderName(event.target.value)} placeholder="object_A_20260806_001" /></div>
+            <div className="space-y-1.5"><Label htmlFor="new-run-folder-name">Run folder name</Label><Input id="new-run-folder-name" aria-invalid={Boolean(newRunFolderName) && (!newRunNameValid || newRunCollision)} aria-describedby={Boolean(newRunFolderName) && (!newRunNameValid || newRunCollision) ? "new-run-folder-error" : undefined} value={newRunFolderName} onChange={(event) => setNewRunFolderName(event.target.value)} placeholder="object_A_20260806_001" />{Boolean(newRunFolderName) && (!newRunNameValid || newRunCollision) && <p id="new-run-folder-error" role="alert" className="text-xs text-destructive">{newRunCollision ? "This run folder already exists. Choose it below or enter a new name." : "Use one folder name only; paths, “.”, and “..” are not allowed."}</p>}</div>
           </div>
-          <div className="mt-3 rounded-md bg-muted p-3"><div className="text-[9px] font-bold uppercase tracking-[0.12em] text-muted-foreground">Resulting folder</div><div className="mt-1 break-all font-mono text-[10px]" data-testid="new-run-path-preview">{validRunFolderName(newRunFolderName) ? runFolderPath(newRunRoot, newRunFolderName) : `${newRunRoot.replace(/\/+$/, "")}/…`}</div></div>
-          <div className="mt-3 flex justify-end"><Button type="submit" disabled={!validRunFolderName(newRunFolderName)}><FolderPlus />Use new run folder</Button></div>
+          <div className="mt-3 rounded-md bg-muted p-3"><div className="text-[9px] font-bold uppercase tracking-[0.12em] text-muted-foreground">Resulting folder</div><div className="mt-1 break-all font-mono text-[10px]" data-testid="new-run-path-preview">{proposedNewRunPath ?? `${newRunRoot.replace(/\/+$/, "")}/…`}</div></div>
+          <div className="mt-3 flex items-center justify-between gap-3">
+            {!newRunInventoryReady && <p id="new-run-inventory-reason" data-testid="new-run-inventory-reason" role="status" className="text-xs text-warning-foreground">A current run-folder inventory is required. Refresh inventory and resolve any active maintenance or storage operation first.</p>}
+            <Button className="ml-auto" type="submit" aria-describedby={!newRunInventoryReady ? "new-run-inventory-reason" : undefined} disabled={!newRunInventoryReady || !newRunNameValid || newRunCollision}><FolderPlus />Use new run folder</Button>
+          </div>
         </form>
       </CardContent>
     </Card>
@@ -869,7 +902,7 @@ export function RunFoldersPage() {
           </Card>}
 
     <Dialog open={moveTarget !== null} onOpenChange={(open) => { if (!open && !moveRun.isPending) setMoveTarget(null) }}>
-      <DialogContent data-testid="run-folder-move-dialog" className="max-h-[calc(100vh-2rem)] overflow-y-auto">
+      <DialogContent data-testid="run-folder-move-dialog">
         <DialogHeader>
           <DialogTitle>Move {moveTarget?.name ?? "run folder"}?</DialogTitle>
           <DialogDescription>Move the complete folder to another allowed storage root. The operation is serialized as disk work, continues after navigation, and cannot be canceled after submission.</DialogDescription>
@@ -895,7 +928,7 @@ export function RunFoldersPage() {
     </Dialog>
 
     <Dialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open && !deleteRun.isPending) setDeleteTarget(null) }}>
-      <DialogContent data-testid="run-folder-delete-dialog" className="max-h-[calc(100vh-2rem)] overflow-y-auto">
+      <DialogContent data-testid="run-folder-delete-dialog">
         <DialogHeader>
           <DialogTitle>Delete {deleteTarget?.name ?? "run folder"}?</DialogTitle>
           <DialogDescription>This permanently deletes the entire run folder, including raw capture data and all derived evidence. This action cannot be undone or canceled after submission.</DialogDescription>

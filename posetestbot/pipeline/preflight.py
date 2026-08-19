@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from posetestbot.calibration.target_library import validate_run_target_selection
+from posetestbot.io._report_checks import (
+    make_check as _check,
+    overall_status as _overall_status,
+)
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import CALIBRATION_PROFILE_SELECTION, RUN_PREFLIGHT_REPORT
 from posetestbot.io.manifest import (
@@ -32,30 +36,6 @@ from posetestbot.sensors.status import collect_sensor_status
 
 
 SCHEMA_VERSION = "run_preflight.v2"
-
-
-def _check(
-    name: str,
-    status: str,
-    message: str,
-    *,
-    details: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    return {
-        "name": name,
-        "status": status,
-        "message": message,
-        "details": dict(details or {}),
-    }
-
-
-def _overall_status(checks: list[Mapping[str, Any]]) -> str:
-    statuses = {str(check.get("status")) for check in checks}
-    if "error" in statuses:
-        return "error"
-    if "warning" in statuses:
-        return "warning"
-    return "ok"
 
 
 def load_run_preflight_report(run_root: str | Path) -> dict[str, Any] | None:

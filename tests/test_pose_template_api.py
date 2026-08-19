@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from posetestbot.jobs.runner import ResourceBusyError
 from posetestbot.web.app import create_app
@@ -92,3 +95,129 @@ def test_pose_template_delete_reports_pending_after_cleanup_queue_conflict(
     assert response.status_code == 200
     assert response.get_json()["status"] == "deleted_cleanup_pending"
     assert "resources are busy" in response.get_json()["cleanup_job_error"]
+
+
+def test_pose_template_request_pruning_does_not_follow_symlink_races(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    request_root = tmp_path / "requests"
+    kind_root = request_root / "preview"
+    kind_root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "keep.txt"
+    marker.write_text("untouched")
+
+    direct_symlink = kind_root / "direct-symlink"
+    direct_symlink.symlink_to(outside, target_is_directory=True)
+    raced = kind_root / "raced"
+    raced.mkdir()
+    (raced / "request.json").write_text("{}\n")
+    ordinary = kind_root / "ordinary"
+    ordinary.mkdir()
+    (ordinary / "request.json").write_text("{}\n")
+    stale_time = time.time() - routes.REQUEST_RETENTION_SECONDS - 60
+    os.utime(raced, (stale_time, stale_time))
+    os.utime(ordinary, (stale_time, stale_time))
+
+    class NoJobsRunner:
+        def list(self, *, include_services: bool = True) -> list[FakeJob]:
+            return []
+
+    monkeypatch.setattr(routes, "job_runner", NoJobsRunner())
+    original_rmtree = routes.shutil.rmtree
+    displaced = kind_root / "raced-original"
+
+    def replace_with_symlink(
+        path: str | Path,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        candidate = Path(path)
+        if candidate.name == raced.name:
+            raced.rename(displaced)
+            raced.symlink_to(outside, target_is_directory=True)
+        original_rmtree(candidate, dir_fd=dir_fd)
+
+    monkeypatch.setattr(routes.shutil, "rmtree", replace_with_symlink)
+
+    routes._prune_stale_requests("preview", request_root=request_root)
+
+    assert direct_symlink.is_symlink()
+    assert raced.is_symlink()
+    assert displaced.is_dir()
+    assert not ordinary.exists()
+    assert marker.read_text() == "untouched"
+
+
+def test_pose_template_request_pruning_rejects_symlinked_kind_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    request_root = tmp_path / "requests"
+    request_root.mkdir()
+    outside = tmp_path / "outside"
+    stale = outside / "stale-request"
+    stale.mkdir(parents=True)
+    marker = stale / "keep.txt"
+    marker.write_text("untouched")
+    stale_time = time.time() - routes.REQUEST_RETENTION_SECONDS - 60
+    os.utime(stale, (stale_time, stale_time))
+    (request_root / "preview").symlink_to(outside, target_is_directory=True)
+
+    class NoJobsRunner:
+        def list(self, *, include_services: bool = True) -> list[FakeJob]:
+            return []
+
+    monkeypatch.setattr(routes, "job_runner", NoJobsRunner())
+
+    routes._prune_stale_requests("preview", request_root=request_root)
+
+    assert stale.is_dir()
+    assert marker.read_text() == "untouched"
+
+
+def test_pose_template_request_pruning_stays_anchored_during_root_replacement(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    request_root = tmp_path / "requests"
+    kind_root = request_root / "preview"
+    stale = kind_root / "ordinary"
+    stale.mkdir(parents=True)
+    (stale / "request.json").write_text("{}\n")
+    outside = tmp_path / "outside"
+    outside_stale = outside / "ordinary"
+    outside_stale.mkdir(parents=True)
+    marker = outside_stale / "keep.txt"
+    marker.write_text("untouched")
+    stale_time = time.time() - routes.REQUEST_RETENTION_SECONDS - 60
+    os.utime(stale, (stale_time, stale_time))
+    os.utime(outside_stale, (stale_time, stale_time))
+
+    class NoJobsRunner:
+        def list(self, *, include_services: bool = True) -> list[FakeJob]:
+            return []
+
+    monkeypatch.setattr(routes, "job_runner", NoJobsRunner())
+    original_scandir = routes.os.scandir
+    displaced = request_root / "preview-original"
+    replaced = False
+
+    def replace_root(directory: int):
+        nonlocal replaced
+        if not replaced:
+            kind_root.rename(displaced)
+            kind_root.symlink_to(outside, target_is_directory=True)
+            replaced = True
+        return original_scandir(directory)
+
+    monkeypatch.setattr(routes.os, "scandir", replace_root)
+
+    routes._prune_stale_requests("preview", request_root=request_root)
+
+    assert kind_root.is_symlink()
+    assert not (displaced / "ordinary").exists()
+    assert outside_stale.is_dir()
+    assert marker.read_text() == "untouched"

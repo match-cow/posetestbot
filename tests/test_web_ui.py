@@ -160,6 +160,59 @@ def test_ui_storage_reports_selected_run_filesystem_capacity(
     assert payload["error"] is None
 
 
+def test_cell_pose_template_assets_reject_unknown_kinds(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root = tmp_path / "run"
+    snapshot = run_root / "processed" / "pose_template_selection"
+    snapshot.mkdir(parents=True)
+    mesh = snapshot / "object.ply"
+    texture = snapshot / "texture.png"
+    mesh.write_bytes(b"ply\nmesh")
+    texture.write_bytes(b"\x89PNG\r\n\x1a\ntexture")
+    selection = {
+        "bundle_snapshot": "processed/pose_template_selection",
+        "instances": [
+            {
+                "instance_uuid": "instance-1",
+                "assets": {
+                    "canonical_ply": {"path": mesh.name},
+                    "texture": {"path": texture.name},
+                },
+            }
+        ],
+    }
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", tmp_path.as_posix())
+    monkeypatch.setattr(
+        web_ui,
+        "load_pose_template_selection",
+        lambda _run_root: selection,
+    )
+    client = create_app().test_client()
+    query = {"run_root": run_root.as_posix()}
+
+    mesh_response = client.get(
+        "/ui/cell-pose-template-assets/instance-1/mesh",
+        query_string=query,
+    )
+    texture_response = client.get(
+        "/ui/cell-pose-template-assets/instance-1/texture",
+        query_string=query,
+    )
+    unknown_response = client.get(
+        "/ui/cell-pose-template-assets/instance-1/not-an-asset",
+        query_string=query,
+    )
+
+    assert mesh_response.status_code == 200
+    assert mesh_response.data == mesh.read_bytes()
+    assert texture_response.status_code == 200
+    assert texture_response.data == texture.read_bytes()
+    assert unknown_response.status_code == 404
+    assert unknown_response.get_json()["output"] == "Unknown instance asset kind"
+
+
 def test_spa_index_and_hashed_assets_are_served() -> None:
     client = create_app().test_client()
 

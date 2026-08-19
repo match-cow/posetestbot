@@ -1301,6 +1301,127 @@ def test_run_folders_queues_confirmed_cluster_archive_deletion(
     expect(page.get_by_test_id("run-folders-table")).to_contain_text("old-run")
 
 
+def test_run_folder_name_validation_rejects_paths_and_existing_run_collisions(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    inventory = run_folder_inventory()
+    inventory["runs"] = [
+        run for run in inventory["runs"] if run["path"] != "/tmp/posetestbot-console/old-run"
+    ]
+    page.unroute("**/ui/run-folders")
+    page.route("**/ui/run-folders", lambda route: fulfill_json(route, inventory))
+    page.goto(f"{console_server.url}/#/run-folders", wait_until="networkidle")
+
+    folder_name = page.get_by_label("Run folder name", exact=True)
+    submit = page.get_by_role("button", name="Use new run folder")
+
+    folder_name.fill("../escaped-run")
+    expect(folder_name).to_have_attribute("aria-invalid", "true")
+    expect(page.get_by_text("Use one folder name only", exact=False)).to_be_visible()
+    expect(submit).to_be_disabled()
+
+    folder_name.fill("old-run")
+    expect(folder_name).to_have_attribute("aria-invalid", "true")
+    expect(page.get_by_text("This run folder already exists", exact=False)).to_be_visible()
+    expect(submit).to_be_disabled()
+    expect(page.get_by_test_id("run-folder-active-path")).to_have_text(RUN_ROOT)
+
+    folder_name.fill("new-run")
+    expect(folder_name).to_have_attribute("aria-invalid", "true")
+    expect(page.get_by_text("This run folder already exists", exact=False)).to_be_visible()
+    expect(submit).to_be_disabled()
+
+    folder_name.fill("fresh-run")
+    expect(folder_name).to_have_attribute("aria-invalid", "false")
+    expect(submit).to_be_enabled()
+
+
+def test_new_run_selection_waits_for_authoritative_inventory(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    page.unroute("**/ui/run-folders")
+    page.route(
+        "**/ui/run-folders",
+        lambda route: fulfill_json(
+            route, {"error": "Run-folder inventory unavailable"}, status=503
+        ),
+    )
+    page.goto(f"{console_server.url}/#/run-folders", wait_until="networkidle")
+
+    page.get_by_label("Run folder name", exact=True).fill("fresh-run")
+    reason = page.get_by_test_id("new-run-inventory-reason")
+    expect(reason).to_contain_text("current run-folder inventory is required")
+    submit = page.get_by_role("button", name="Use new run folder")
+    expect(submit).to_be_disabled()
+    expect(submit).to_have_attribute(
+        "aria-describedby", "new-run-inventory-reason"
+    )
+
+
+def test_cluster_restore_uses_the_shared_single_folder_name_contract(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    archive_id = "archive-12345678-1234-4234-9234-123456789abc"
+    page.unroute("**/cluster/archives")
+    page.route(
+        "**/cluster/archives",
+        lambda route: fulfill_json(
+            route,
+            {
+                "archives": [
+                    {
+                        "schema_version": "posetestbot_cluster_archive.v1",
+                        "archive_id": archive_id,
+                        "job_id": "job-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        "state": "succeeded",
+                        "status": "succeeded",
+                        "source_run_root": "/tmp/posetestbot-console/old-run",
+                        "source_identity": {"device": 1, "inode": 11},
+                        "created_at": "2026-08-18T10:00:00Z",
+                        "updated_at": "2026-08-18T10:05:00Z",
+                        "archive_sha256": "a" * 64,
+                        "operator": "Archive Operator",
+                        "verified": True,
+                    }
+                ],
+                "integration": {"enabled": True},
+                "storage": {
+                    "ready": True,
+                    "read": True,
+                    "mutation": True,
+                    "blockers": [],
+                },
+            },
+        ),
+    )
+    page.goto(f"{console_server.url}/#/run-folders", wait_until="networkidle")
+    page.get_by_label("Operator", exact=True).fill("Restore Operator")
+    page.get_by_role("button", name="Restore", exact=True).click()
+
+    dialog = page.get_by_test_id("cluster-archive-restore-dialog")
+    expect(dialog).to_be_visible()
+    expect(dialog.get_by_label("Destination root", exact=True)).to_be_visible()
+    restore_name = dialog.get_by_label("Run folder name", exact=True)
+    expect(restore_name).to_have_value("old-run")
+    expect(restore_name).to_have_attribute("aria-invalid", "true")
+    expect(
+        dialog.get_by_text("This destination run folder already exists", exact=False)
+    ).to_be_visible()
+    expect(dialog.get_by_role("button", name="Queue verified restore")).to_be_disabled()
+
+    restore_name.fill("..")
+    expect(restore_name).to_have_attribute("aria-invalid", "true")
+    expect(dialog.get_by_text("Use one folder name only", exact=False)).to_be_visible()
+    expect(dialog.get_by_role("button", name="Queue verified restore")).to_be_disabled()
+
+    restore_name.fill("restored-run")
+    expect(restore_name).to_have_attribute("aria-invalid", "false")
+    expect(dialog.get_by_role("button", name="Queue verified restore")).to_be_enabled()
+
+
 def test_active_run_header_is_compact_dropdown_with_management_handoff(
     console_server, page
 ) -> None:
@@ -2309,6 +2430,141 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
     expect(page.get_by_role("button", name="Select New clamp")).to_have_count(0)
     assert delete_requests["count"] == 2
     assert page_errors == []
+
+
+def test_workpiece_service_status_fails_closed_when_status_request_errors(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    install_workpiece_readonly_mocks(page, status_error=True)
+    page.add_init_script("HTMLCanvasElement.prototype.getContext = () => null")
+    page.goto(f"{console_server.url}/#/workpieces", wait_until="networkidle")
+
+    service = page.get_by_test_id("workpiece-catalog-status")
+    expect(service).to_contain_text("unavailable")
+    expect(service.get_by_text("ready", exact=True)).to_have_count(0)
+    expect(service).to_contain_text("Request failed (503)")
+    upload = page.get_by_test_id("workpiece-upload-button")
+    expect(upload).to_be_disabled()
+    expect(upload).to_have_attribute(
+        "aria-describedby", "workpiece-service-disabled-reason"
+    )
+
+
+def test_workpiece_implicit_selection_survives_archive_refresh(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    catalogue = workpiece_catalog()
+    second_active = dict(catalogue["objects"][0])
+    second_active.update(
+        {
+            "catalog_uuid": "22222222-2222-4222-8222-222222222222",
+            "obj_id": 9,
+            "name": "Second clamp",
+            "alias": "Alternative fixture",
+        }
+    )
+    catalogue["objects"].append(second_active)
+    install_workpiece_readonly_mocks(page, catalogue=catalogue)
+
+    def archive_handler(route) -> None:
+        item = catalogue["objects"][0]
+        item["state"] = "archived"
+        item["archived_at"] = "2026-08-19T10:00:00Z"
+        fulfill_json(route, item)
+
+    page.route("**/workpieces/catalog/*/archive", archive_handler)
+    page.add_init_script("HTMLCanvasElement.prototype.getContext = () => null")
+    page.goto(f"{console_server.url}/#/workpieces", wait_until="networkidle")
+
+    detail = page.get_by_test_id("workpiece-selected-object")
+    expect(detail).to_contain_text("Clamp")
+    detail.get_by_role("button", name="Archive", exact=True).click()
+    confirmation = page.get_by_test_id("workpiece-action-confirmation")
+    confirmation.get_by_role("button", name="Confirm archive").click()
+
+    expect(page.get_by_text("Workpiece archived")).to_be_visible()
+    expect(detail).to_contain_text("Clamp")
+    expect(page.get_by_test_id("workpiece-selection-hidden-by-filters")).to_be_visible()
+    expect(page.get_by_role("button", name="Select Second clamp")).to_be_visible()
+    expect(page.get_by_role("button", name="Select Clamp")).to_have_count(0)
+
+
+def test_workpiece_hidden_selection_is_explained_and_can_be_revealed(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    catalogue = workpiece_catalog()
+    for index in range(1, 17):
+        item = dict(catalogue["objects"][0])
+        item.update(
+            {
+                "catalog_uuid": f"90000000-0000-4000-8000-{index:012d}",
+                "obj_id": 20 + index,
+                "name": f"Fixture {index:02d}",
+                "alias": f"Fixture row {index:02d}",
+            }
+        )
+        catalogue["objects"].append(item)
+    install_workpiece_readonly_mocks(page, catalogue=catalogue)
+    page.add_init_script("HTMLCanvasElement.prototype.getContext = () => null")
+    page.goto(f"{console_server.url}/#/workpieces", wait_until="networkidle")
+
+    expect(page.get_by_test_id("workpiece-selected-object")).to_contain_text("Clamp")
+    selected_control = page.get_by_role("button", name="Select Fixture 16")
+    selected_control.click()
+    expect(page.get_by_test_id("workpiece-selected-object")).to_contain_text(
+        "Fixture 16"
+    )
+    page.get_by_label("Filter by state").click()
+    page.get_by_role("option", name="Archived", exact=True).click()
+
+    notice = page.get_by_test_id("workpiece-selection-hidden-by-filters")
+    expect(notice).to_be_visible()
+    expect(notice).to_contain_text("Selected workpiece is hidden")
+    expect(page.get_by_role("button", name="Select Gauge block")).to_be_visible()
+    expect(page.get_by_role("button", name="Select Fixture 16")).to_have_count(0)
+
+    notice.get_by_role("button", name="Reveal in list").click()
+    expect(notice).to_have_count(0)
+    selected_control = page.get_by_role("button", name="Select Fixture 16")
+    expect(selected_control).to_be_visible()
+    expect(selected_control).to_be_focused()
+    expect(page.get_by_role("button", name="Select Gauge block")).to_have_count(0)
+    scroll_box = page.get_by_test_id("workpiece-catalog-scroll").bounding_box()
+    selected_box = selected_control.bounding_box()
+    assert scroll_box is not None
+    assert selected_box is not None
+    assert selected_box["y"] >= scroll_box["y"]
+    assert selected_box["y"] + selected_box["height"] <= scroll_box["y"] + scroll_box["height"]
+
+
+def test_shared_dialog_keeps_actions_reachable_in_reduced_desktop_height(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    install_workpiece_readonly_mocks(page)
+    page.add_init_script("HTMLCanvasElement.prototype.getContext = () => null")
+    page.set_viewport_size({"width": 1440, "height": 520})
+    page.goto(f"{console_server.url}/#/workpieces", wait_until="networkidle")
+    page.get_by_test_id("workpiece-upload-button").click()
+
+    dialog = page.get_by_test_id("workpiece-upload-dialog")
+    expect(dialog).to_be_visible()
+    assert dialog.evaluate("element => getComputedStyle(element).overflowY") == "auto"
+    assert dialog.evaluate("element => element.scrollHeight > element.clientHeight")
+    dialog_box = dialog.bounding_box()
+    assert dialog_box is not None
+    assert dialog_box["y"] >= 15
+    assert dialog_box["y"] + dialog_box["height"] <= 505
+
+    submit = dialog.get_by_role("button", name="Upload and inspect")
+    submit.scroll_into_view_if_needed()
+    expect(submit).to_be_visible()
+    submit_box = submit.bounding_box()
+    assert submit_box is not None
+    assert submit_box["y"] + submit_box["height"] <= 505
 
 
 def test_calibration_target_selection_returns_workflow_to_readiness(
@@ -4864,6 +5120,45 @@ def workpiece_catalog() -> dict:
         }
     )
     return value
+
+
+def install_workpiece_readonly_mocks(
+    page, *, status_error: bool = False, catalogue: dict | None = None
+) -> None:
+    catalogue = catalogue if catalogue is not None else workpiece_catalog()
+    active_count = sum(item["state"] == "active" for item in catalogue["objects"])
+    archived_count = sum(item["state"] == "archived" for item in catalogue["objects"])
+    if status_error:
+        page.route(
+            "**/workpieces/status",
+            lambda route: fulfill_json(
+                route, {"error": "Inspection service unavailable"}, status=503
+            ),
+        )
+    else:
+        page.route(
+            "**/workpieces/status",
+            lambda route: fulfill_json(
+                route,
+                {
+                    "schema_version": "workpiece_catalog_status.v1",
+                    "available": True,
+                    "status": "available",
+                    "reason": None,
+                    "catalog_root": "/repo/working_data/object_catalog",
+                    "formats": ["ply", "stl", "obj"],
+                    "limits": {"cad_bytes": 52428800, "batch_bytes": 104857600},
+                    "counts": {
+                        "active": active_count,
+                        "archived": archived_count,
+                        "total": len(catalogue["objects"]),
+                    },
+                },
+            ),
+        )
+    page.route(
+        "**/workpieces/catalog", lambda route: fulfill_json(route, catalogue)
+    )
 
 
 def pose_template_orientation_analysis(

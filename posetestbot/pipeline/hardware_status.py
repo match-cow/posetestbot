@@ -7,6 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from posetestbot.io._report_checks import (
+    make_check as _check,
+    overall_status as _overall_status,
+)
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.artifacts import HARDWARE_STATUS_REPORT
 from posetestbot.io.manifest import (
@@ -20,30 +24,6 @@ from posetestbot.sensors.status import collect_sensor_status
 
 
 SCHEMA_VERSION = "hardware_status_report.v1"
-
-
-def _check(
-    name: str,
-    status: str,
-    message: str,
-    *,
-    details: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    return {
-        "name": name,
-        "status": status,
-        "message": message,
-        "details": dict(details or {}),
-    }
-
-
-def _overall_status(checks: list[Mapping[str, Any]]) -> str:
-    statuses = {str(check.get("status")) for check in checks}
-    if "error" in statuses:
-        return "error"
-    if "warning" in statuses:
-        return "warning"
-    return "ok"
 
 
 def _sensor_family_checks(sensor_status: Mapping[str, Any]) -> list[dict[str, Any]]:

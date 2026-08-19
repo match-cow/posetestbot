@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 from itertools import pairwise
 from pathlib import Path
+import re
+import tempfile
 from typing import Any, Mapping
 
 import matplotlib
@@ -29,7 +31,7 @@ from posetestbot.calibration.teaching_plan import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SVG_PATH = REPO_ROOT / "docs" / "images" / "iiwa_calibration_teaching_plan.svg"
-DEFAULT_PNG_PATH = REPO_ROOT / "docs" / "images" / "iiwa_calibration_teaching_plan.png"
+MATPLOTLIB_SVG_ID = re.compile(r'id="([A-Za-z][0-9a-f]{10})"')
 
 COVERAGE = "#00a6c7"
 ORIENTATION = "#c23bb5"
@@ -51,7 +53,7 @@ RESULT_LABELS = (
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate the headless SVG/PNG iiwa calibration teaching aid."
+        description="Generate the headless SVG iiwa calibration teaching aid."
     )
     parser.add_argument(
         "--manifest",
@@ -63,9 +65,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--svg", type=Path, default=DEFAULT_SVG_PATH, help="SVG output path."
     )
     parser.add_argument(
-        "--png", type=Path, default=DEFAULT_PNG_PATH, help="PNG output path."
+        "--png",
+        type=Path,
+        default=None,
+        help="Optional PNG output path; no raster copy is written when omitted.",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Fail when the existing SVG does not match the generated teaching aid.",
+    )
+    args = parser.parse_args(argv)
+    if args.check and args.png is not None:
+        parser.error("--check cannot be combined with --png")
+    return args
 
 
 def _template_corners(plan: Mapping[str, Any]) -> np.ndarray:
@@ -639,13 +652,14 @@ def build_figure(plan: Mapping[str, Any]) -> plt.Figure:
 def render_teaching_plot(
     manifest_path: str | Path,
     svg_path: str | Path,
-    png_path: str | Path,
-) -> tuple[Path, Path]:
+    png_path: str | Path | None = None,
+) -> tuple[Path, Path | None]:
     plan = load_teaching_plan(manifest_path)
     svg_output = Path(svg_path)
-    png_output = Path(png_path)
+    png_output = Path(png_path) if png_path is not None else None
     svg_output.parent.mkdir(parents=True, exist_ok=True)
-    png_output.parent.mkdir(parents=True, exist_ok=True)
+    if png_output is not None:
+        png_output.parent.mkdir(parents=True, exist_ok=True)
     figure = build_figure(plan)
     metadata = {
         "Title": "PoseTestBot iiwa nine-frame calibration teaching plan",
@@ -655,20 +669,64 @@ def render_teaching_plot(
             "program-relative orientation motions under /PoseTestBot/TemplateBase."
         ),
     }
-    figure.savefig(svg_output, format="svg", dpi=160, metadata=metadata)
-    figure.savefig(
-        png_output, format="png", dpi=160, metadata={"Software": "PoseTestBot"}
-    )
-    plt.close(figure)
+    try:
+        figure.savefig(svg_output, format="svg", dpi=160, metadata=metadata)
+        if png_output is not None:
+            figure.savefig(
+                png_output,
+                format="png",
+                dpi=160,
+                metadata={"Software": "PoseTestBot"},
+            )
+    finally:
+        plt.close(figure)
     return svg_output, png_output
 
 
-def main(argv: list[str] | None = None) -> None:
+def _comparable_svg(value: str) -> str:
+    """Normalize opaque Matplotlib IDs while preserving rendered SVG content."""
+
+    identifiers = dict.fromkeys(MATPLOTLIB_SVG_ID.findall(value))
+    for index, identifier in enumerate(identifiers, start=1):
+        value = value.replace(identifier, f"matplotlib_auto_id_{index:04d}")
+    return value
+
+
+def teaching_plot_is_current(
+    manifest_path: str | Path,
+    svg_path: str | Path,
+) -> bool:
+    """Return whether the committed SVG matches a fresh deterministic render."""
+
+    existing_path = Path(svg_path)
+    try:
+        existing = existing_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    with tempfile.TemporaryDirectory(prefix="posetestbot-teaching-plot-") as directory:
+        generated_path = Path(directory) / "teaching.svg"
+        render_teaching_plot(manifest_path, generated_path)
+        generated = generated_path.read_text(encoding="utf-8")
+    return _comparable_svg(existing) == _comparable_svg(generated)
+
+
+def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.check:
+        if not teaching_plot_is_current(args.manifest, args.svg):
+            print(
+                f"{args.svg} is stale; run "
+                "`uv run python scripts/plot_iiwa_calibration_teaching_plan.py`."
+            )
+            return 1
+        print(f"Teaching SVG is current: {args.svg}")
+        return 0
     svg_path, png_path = render_teaching_plot(args.manifest, args.svg, args.png)
     print(f"Wrote {svg_path}")
-    print(f"Wrote {png_path}")
+    if png_path is not None:
+        print(f"Wrote {png_path}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
