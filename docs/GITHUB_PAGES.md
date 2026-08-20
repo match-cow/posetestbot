@@ -58,9 +58,20 @@ safety semantics belong in the appropriate `docs/reference/api/` domain page.
 Build exactly as CI does:
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run --frozen --only-group docs \
+MPLCONFIGDIR=/tmp/posetestbot-mpl UV_CACHE_DIR=/tmp/uv-cache \
+  uv run --frozen --no-default-groups --group docs \
+  python scripts/plot_iiwa_calibration_teaching_plan.py --check
+UV_CACHE_DIR=/tmp/uv-cache uv run --frozen --no-default-groups --group docs \
+  python scripts/generate_http_api_reference.py --check
+UV_CACHE_DIR=/tmp/uv-cache uv run --frozen --no-default-groups --group docs \
   mkdocs build --strict
 ```
+
+The teaching-plot check renders to a temporary file and compares it with the
+committed SVG without rewriting the documentation tree. It ignores only opaque
+Matplotlib-internal SVG identifiers. The route check loads the Flask
+application, so CI includes project runtime and documentation dependencies
+while excluding the default development group.
 
 In a normal development environment already synchronized with all groups:
 
@@ -82,11 +93,12 @@ Chromium installation remains explicitly opt-in.
 
 ## Publish
 
-`.github/workflows/pages.yml` runs for documentation, MkDocs configuration, and
-locked dependency changes on `main`. It installs `uv`, creates a docs-only
-environment, runs a strict build, uploads only generated `site/`, and deploys
-through the protected `github-pages` environment. The repository Pages source
-must remain **GitHub Actions**.
+`.github/workflows/pages.yml` runs for documentation, MkDocs configuration,
+teaching-plan and teaching-plot inputs, route-generator, Flask web-route, and
+locked dependency changes on `main`. It installs `uv`, checks both generated
+assets, runs a strict build, uploads only generated `site/`, and deploys through
+the protected `github-pages` environment. The repository Pages source must
+remain **GitHub Actions**.
 
 The deployment does not publish repository source, run data, credentials, or
 the Flask operator API. It publishes only MkDocs output.
@@ -94,7 +106,8 @@ the Flask operator API. It publishes only MkDocs output.
 ## Update checklist
 
 1. Change authoritative Markdown and, when required, `mkdocs.yml` navigation.
-2. Regenerate the HTTP route index after any Flask route-map change.
-3. Run the strict MkDocs build.
-4. Run focused source and Playwright navigation tests.
-5. Check `git diff --check` and confirm `site/` is not staged.
+2. Regenerate and check the teaching SVG after a teaching-plan or plot change.
+3. Regenerate the HTTP route index after any Flask route-map change.
+4. Run the strict MkDocs build.
+5. Run focused source and Playwright navigation tests.
+6. Check `git diff --check` and confirm `site/` is not staged.

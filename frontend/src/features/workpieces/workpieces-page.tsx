@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react"
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   Archive,
@@ -324,11 +324,12 @@ function Tokens({ values, variant = "secondary" }: { values: string[]; variant?:
   return <div className="flex flex-wrap gap-1.5">{values.map((value) => <Badge key={value} variant={variant} className="normal-case tracking-normal">{value}</Badge>)}</div>
 }
 
-function WorkpieceCard({ item, selected, onSelect }: { item: Workpiece; selected: boolean; onSelect: () => void }) {
+function WorkpieceCard({ item, selected, onSelect, buttonRef }: { item: Workpiece; selected: boolean; onSelect: () => void; buttonRef?: (element: HTMLButtonElement | null) => void }) {
   const tags = item.tags ?? []
   const groups = item.groups ?? []
   return <Card data-testid={`workpiece-card-${item.catalog_uuid}`} className={`relative ${selected ? "border-primary/60 bg-accent/45 shadow-sm" : "transition-colors hover:border-foreground/20 hover:bg-secondary/30"} ${item.state === "archived" ? "opacity-70" : ""}`}>
     <button
+      ref={buttonRef}
       type="button"
       onClick={onSelect}
       aria-pressed={selected}
@@ -394,6 +395,8 @@ export function WorkpiecesPage() {
   const [pendingUpload, setPendingUpload] = useState<{ id: string; filename: string; startedAt: number } | null>(null)
   const [pendingCorrection, setPendingCorrection] = useState<{ id: string; name: string; startedAt: number } | null>(null)
   const [pendingPreview, setPendingPreview] = useState<{ id: string; catalogUuid: string; name: string; startedAt: number } | null>(null)
+  const workpieceControlRefs = useRef(new Map<string, HTMLButtonElement>())
+  const revealTargetId = useRef<string | null>(null)
   const uploadAttributeValidation = useMemo(() => validateAttributeRows(uploadDraft.attributes), [uploadDraft.attributes])
   const editAttributeValidation = useMemo(() => validateAttributeRows(editDraft.attributes), [editDraft.attributes])
 
@@ -439,6 +442,16 @@ export function WorkpiecesPage() {
     ? selectedId
     : objects.find((item) => item.state === "active")?.catalog_uuid ?? objects[0]?.catalog_uuid ?? null
   const selected = objects.find((item) => item.catalog_uuid === effectiveSelectedId) ?? null
+
+  useEffect(() => {
+    const targetId = revealTargetId.current
+    if (!targetId || !filtered.some((item) => item.catalog_uuid === targetId)) return
+    const control = workpieceControlRefs.current.get(targetId)
+    if (!control) return
+    control.scrollIntoView({ block: "nearest" })
+    control.focus({ preventScroll: true })
+    revealTargetId.current = null
+  }, [filtered])
 
   const upload = useMutation({
     mutationFn: async (draft: UploadDraft) => {
@@ -660,8 +673,32 @@ export function WorkpiecesPage() {
     archived: objects.filter((item) => item.state === "archived").length,
     total: objects.length,
   }
-  const serviceAvailable = status.data?.available !== false
+  const serviceChecking = status.isPending
+  const serviceAvailable = !status.isError && status.data?.available === true
+  const serviceStatus = serviceChecking
+    ? "checking"
+    : serviceAvailable
+      ? "available"
+      : status.data?.status ?? "unavailable"
+  const serviceReason = serviceChecking
+    ? "Checking canonical mesh inspection and catalogue storage."
+    : status.isError
+      ? errorMessage(status.error)
+      : status.data?.reason ?? (serviceAvailable ? "Canonical mesh inspection is available." : "Canonical mesh inspection is unavailable.")
   const unitCorrectionAvailable = status.data?.unit_corrections?.supported ?? serviceAvailable
+  const selectedHiddenByFilters = Boolean(selected && !filtered.some((item) => item.catalog_uuid === selected.catalog_uuid))
+  const revealSelected = () => {
+    if (!selected) return
+    revealTargetId.current = selected.catalog_uuid
+    setSearch("")
+    setTagFilter(ALL_FILTER)
+    setGroupFilter(ALL_FILTER)
+    setStateFilter(selected.state)
+  }
+  const confirmCatalogueAction = (action: CatalogueAction, item: Workpiece) => {
+    setSelectedId(item.catalog_uuid)
+    setConfirmation({ action, item })
+  }
   const unitCorrectionDisabledReason = selected
     ? !unitCorrectionAvailable
       ? "PoseTemplateCreator is required for unit correction."
@@ -692,13 +729,13 @@ export function WorkpiecesPage() {
       action="Arrange pose template"
     />
 
-    <Card className={serviceAvailable ? "border-success/30" : "border-destructive/40"} data-testid="workpiece-catalog-status">
+    <Card className={serviceChecking ? "border-primary/30" : serviceAvailable ? "border-success/30" : "border-destructive/40"} data-testid="workpiece-catalog-status">
       <CardContent className="flex items-center justify-between gap-5 py-3.5">
         <div className="flex items-center gap-3">
-          <div className={`grid size-9 place-items-center rounded-lg ${serviceAvailable ? "bg-success/10 text-success" : "bg-destructive/10 text-destructive"}`}><PackageOpen className="size-5" /></div>
-          <div><div className="flex items-center gap-2 text-sm font-semibold">CAD inspection service <StatusBadge status={serviceAvailable ? "ready" : status.data?.status} tone={serviceAvailable ? "success" : status.isError ? "destructive" : "warning"} /></div><p id={!serviceAvailable ? "workpiece-service-disabled-reason" : undefined} className="mt-0.5 text-[11px] text-muted-foreground">{status.isError ? errorMessage(status.error) : status.data?.reason ?? "Canonical mesh inspection is available."}</p>{status.data?.catalog_root && <p className="mt-0.5 max-w-3xl truncate font-mono text-[9px] text-muted-foreground" title={status.data.catalog_root}>Persistent JSON and assets · {status.data.catalog_root}</p>}</div>
+          <div className={`grid size-9 place-items-center rounded-lg ${serviceChecking ? "bg-primary/10 text-primary-strong" : serviceAvailable ? "bg-success/10 text-success" : "bg-destructive/10 text-destructive"}`}><PackageOpen className="size-5" /></div>
+          <div><div className="flex items-center gap-2 text-sm font-semibold">CAD inspection service <StatusBadge status={serviceStatus} tone={serviceChecking ? "informational" : serviceAvailable ? "success" : "destructive"} /></div><p id={!serviceAvailable ? "workpiece-service-disabled-reason" : undefined} className="mt-0.5 text-[11px] text-muted-foreground">{serviceReason}</p>{status.data?.catalog_root && <p className="mt-0.5 max-w-3xl truncate font-mono text-[9px] text-muted-foreground" title={status.data.catalog_root}>Persistent JSON and assets · {status.data.catalog_root}</p>}</div>
         </div>
-        <div className="text-right text-[10px] leading-5 text-muted-foreground">{status.data?.formats?.map((format) => format.toUpperCase()).join(" · ") || "PLY · STL · OBJ"}<br />{formatBytes(status.data?.limits?.cad_bytes)} per CAD file</div>
+        <div className="text-right text-[10px] leading-5 text-muted-foreground">{status.data?.formats?.map((format) => format.toUpperCase()).join(" · ") || (serviceChecking ? "Checking formats…" : "Formats unavailable")}<br />{status.data?.limits?.cad_bytes ? `${formatBytes(status.data.limits.cad_bytes)} per CAD file` : "Size limit unavailable"}</div>
       </CardContent>
     </Card>
 
@@ -730,8 +767,8 @@ export function WorkpiecesPage() {
           : <div className="grid items-start gap-5 xl:grid-cols-[minmax(285px,.72fr)_minmax(0,1.65fr)]">
             <Card data-testid="workpiece-catalog-list">
               <CardHeader className="border-b"><div className="flex items-center justify-between gap-3"><div><CardTitle>Objects</CardTitle><CardDescription className="mt-1">{filtered.length} of {objects.length} visible</CardDescription></div><Layers3 className="size-5 text-muted-foreground" /></div></CardHeader>
-              <CardContent className="max-h-[74rem] space-y-2 overflow-y-auto p-3">
-                {filtered.map((item) => <WorkpieceCard item={item} selected={item.catalog_uuid === effectiveSelectedId} onSelect={() => setSelectedId(item.catalog_uuid)} key={item.catalog_uuid} />)}
+              <CardContent className="max-h-[74rem] space-y-2 overflow-y-auto p-3" data-testid="workpiece-catalog-scroll">
+                {filtered.map((item) => <WorkpieceCard item={item} selected={item.catalog_uuid === effectiveSelectedId} onSelect={() => setSelectedId(item.catalog_uuid)} buttonRef={(element) => { if (element) workpieceControlRefs.current.set(item.catalog_uuid, element); else workpieceControlRefs.current.delete(item.catalog_uuid) }} key={item.catalog_uuid} />)}
                 {filtered.length === 0 && <div className="py-12 text-center"><Search className="mx-auto mb-2 size-5 text-muted-foreground" /><div className="text-sm font-semibold">No matches</div><p className="mt-1 text-xs text-muted-foreground">Adjust or clear the catalogue filters.</p><Button className="mt-3" size="sm" variant="outline" onClick={clearFilters}>Clear filters</Button></div>}
               </CardContent>
             </Card>
@@ -749,13 +786,14 @@ export function WorkpiecesPage() {
                       title={!unitCorrectionAvailable ? "PoseTemplateCreator is required for unit correction" : selected.state === "active" ? "Archive this workpiece before correcting its model units" : "Create a corrected canonical geometry revision"}
                       onClick={() => { setUnitConversion("meter_to_millimeter"); setUnitCorrectionOperator(""); setUnitCorrectionConfirmed(false); setUnitCorrectionOpen(true) }}
                     ><Scaling />Correct model units</Button>
-                    <Button variant="outline" onClick={() => setConfirmation({ action: selected.state === "active" ? "archive" : "restore", item: selected })}>{selected.state === "active" ? <Archive /> : <RotateCcw />}{selected.state === "active" ? "Archive" : "Restore"}</Button>
-                    <Button variant="ghost" className="text-destructive hover:text-destructive" aria-label={`Delete ${selected.name}`} title="Permanently delete this workpiece" onClick={() => setConfirmation({ action: "delete", item: selected })}><Trash2 />Delete</Button>
+                    <Button variant="outline" onClick={() => confirmCatalogueAction(selected.state === "active" ? "archive" : "restore", selected)}>{selected.state === "active" ? <Archive /> : <RotateCcw />}{selected.state === "active" ? "Archive" : "Restore"}</Button>
+                    <Button variant="ghost" className="text-destructive hover:text-destructive" aria-label={`Delete ${selected.name}`} title="Permanently delete this workpiece" onClick={() => confirmCatalogueAction("delete", selected)}><Trash2 />Delete</Button>
                   </div>
                 </div>
                 {unitCorrectionDisabledReason && <p id="unit-correction-disabled-reason" className="mt-3 text-right text-xs text-muted-foreground">{unitCorrectionDisabledReason}</p>}
               </CardHeader>
               <CardContent className="space-y-6 pt-5">
+                {selectedHiddenByFilters && <div data-testid="workpiece-selection-hidden-by-filters" role="status" className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/40 bg-warning/5 p-3 text-xs"><div><div className="font-semibold text-warning-foreground">Selected workpiece is hidden by the current filters</div><p className="mt-1 text-muted-foreground">Its detail remains open so an archive or restore action does not discard your context.</p></div><Button type="button" size="sm" variant="outline" onClick={revealSelected}><Search />Reveal in list</Button></div>}
                 <section aria-labelledby="workpiece-preview-heading"><div className="mb-3 flex items-end justify-between gap-3"><div><h3 id="workpiece-preview-heading" className="text-sm font-semibold">3D preview</h3><p className="mt-0.5 text-[11px] text-muted-foreground">The selected detail loads the full canonical PLY so holes, recesses, ports, and other identifying features remain visible. Drag to rotate and scroll to zoom.</p></div><div className="flex shrink-0 items-center gap-2"><Badge variant="outline">{selected.source_format.toUpperCase()}</Badge><Button size="sm" variant="outline" disabled={!serviceAvailable || regeneratePreview.isPending || Boolean(pendingPreview)} onClick={() => regeneratePreview.mutate(selected)} title="Queue stable-orientation analysis and rebuild the bounded catalogue-card mesh"><RefreshCw className={pendingPreview?.catalogUuid === selected.catalog_uuid ? "animate-spin" : undefined} />Refresh card preview</Button></div></div><WorkpiecePreviews key={`${selected.catalog_uuid}:${selected.canonical_ply_sha256 ?? selected.geometry_revision ?? 1}`} object={selected} /></section>
 
                 {selected.description && <div className="rounded-lg border bg-muted/25 p-4 text-sm leading-relaxed">{selected.description}</div>}
@@ -783,7 +821,7 @@ export function WorkpiecesPage() {
           </div>}
 
     <Dialog open={uploadOpen} onOpenChange={(open) => { if (!upload.isPending) setUploadOpen(open) }}>
-      <DialogContent className="max-h-[92vh] max-w-2xl overflow-y-auto" data-testid="workpiece-upload-dialog">
+      <DialogContent className="max-w-2xl" data-testid="workpiece-upload-dialog">
         <form onSubmit={submitUpload} className="space-y-5">
           <DialogHeader><DialogTitle>Add workpiece</DialogTitle><DialogDescription>Upload the original CAD asset and optional PNG texture. PoseTestBot retains the source, creates a canonical PLY, and stores portable metadata in JSON.</DialogDescription></DialogHeader>
           <div className="grid grid-cols-2 gap-3 rounded-lg border bg-muted/20 p-3">
@@ -797,7 +835,7 @@ export function WorkpiecesPage() {
     </Dialog>
 
     <Dialog open={editOpen} onOpenChange={(open) => { if (!updateMetadata.isPending) setEditOpen(open) }}>
-      <DialogContent className="max-h-[92vh] max-w-2xl overflow-y-auto" data-testid="workpiece-metadata-dialog">
+      <DialogContent className="max-w-2xl" data-testid="workpiece-metadata-dialog">
         <form onSubmit={submitEdit} className="space-y-5">
           <DialogHeader><DialogTitle>Edit {selected?.name ?? "workpiece"}</DialogTitle><DialogDescription>Names, labels, and custom attributes remain exportable JSON metadata. Geometry and stable object identity are unchanged.</DialogDescription></DialogHeader>
           <MetadataFields draft={editDraft} setDraft={setEditDraft} prefix="workpiece-edit" attributeValidation={editValidationAttempted ? editAttributeValidation : undefined} />

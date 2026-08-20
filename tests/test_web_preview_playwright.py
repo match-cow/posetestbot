@@ -545,6 +545,50 @@ def test_unready_camera_is_not_presented_as_usable_or_selectable_on_devices(
     assert runner.submitted == []
 
 
+def test_device_disabled_reasons_describe_only_the_affected_control(
+    preview_server,
+    page,
+    monkeypatch,
+) -> None:
+    server, _runner = preview_server
+    monkeypatch.setattr(
+        web_sensors,
+        "collect_sensor_status",
+        fake_full_lab_sensor_status,
+    )
+    page.goto(f"{server.url}/#/devices", wait_until="domcontentloaded")
+
+    oak = sensor_card(page, OAK_SENSOR)
+    oak_orientation = oak.locator('[data-testid="sensor-orientation"]')
+    oak_preview = oak.locator('[data-testid="sensor-preview-toggle"]')
+    oak_snapshot = oak.get_by_role("button", name="Snapshot")
+    expect(oak_orientation).to_be_disabled()
+    orientation_reason_id = oak_orientation.get_attribute("aria-describedby")
+    assert orientation_reason_id
+    expect(oak.locator(f"#{orientation_reason_id}")).to_contain_text(
+        "only for RealSense D435"
+    )
+    expect(oak_preview).to_be_enabled()
+    expect(oak_snapshot).to_be_enabled()
+    assert oak_preview.get_attribute("aria-describedby") is None
+    assert oak_snapshot.get_attribute("aria-describedby") is None
+
+    zed = sensor_card(page, ZED_SENSOR)
+    zed_orientation = zed.locator('[data-testid="sensor-orientation"]')
+    zed_preview = zed.locator('[data-testid="sensor-preview-toggle"]')
+    orientation_reason_id = zed_orientation.get_attribute("aria-describedby")
+    preview_reason_id = zed_preview.get_attribute("aria-describedby")
+    assert orientation_reason_id
+    assert preview_reason_id
+    assert orientation_reason_id != preview_reason_id
+    expect(zed.locator(f"#{orientation_reason_id}")).to_contain_text(
+        "only for RealSense D435"
+    )
+    expect(zed.locator(f"#{preview_reason_id}")).to_contain_text(
+        "Live RGB preview is unavailable"
+    )
+
+
 def test_saving_visible_alias_preserves_offline_alias_and_survives_reload(
     preview_server,
     page,

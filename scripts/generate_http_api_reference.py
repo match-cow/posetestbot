@@ -7,7 +7,6 @@ import argparse
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from flask import Flask
 from werkzeug.routing import Rule
@@ -23,7 +22,7 @@ IGNORED_ENDPOINTS = {"static"}
 @dataclass(frozen=True)
 class RouteRecord:
     group: str
-    methods: str
+    method: str
     path: str
     interface: str
     purpose: str
@@ -100,8 +99,27 @@ PURPOSE_OVERRIDES = {
     "pages.index": "Serve the bundled operator console",
 }
 
+METHOD_PURPOSE_OVERRIDES = {
+    ("capture.list_capture_jobs", "GET"): "List capture jobs",
+    ("capture.list_capture_jobs", "POST"): "Queue the supervised capture recipe",
+    ("orchestration.run_config", "GET"): "Load run configuration",
+    ("orchestration.run_config", "POST"): "Create or update run configuration",
+    ("sync_quality.sync_quality_endpoint", "GET"): (
+        "Build synchronization quality report"
+    ),
+    ("sync_quality.sync_quality_endpoint", "POST"): (
+        "Build and persist synchronization quality report"
+    ),
+    ("system_status.hardware_status", "GET"): "Load hardware status report",
+    ("system_status.hardware_status", "POST"): (
+        "Collect and persist hardware status report"
+    ),
+}
 
-def _purpose(endpoint: str) -> str:
+
+def _purpose(endpoint: str, method: str) -> str:
+    if (endpoint, method) in METHOD_PURPOSE_OVERRIDES:
+        return METHOD_PURPOSE_OVERRIDES[(endpoint, method)]
     if endpoint in PURPOSE_OVERRIDES:
         return PURPOSE_OVERRIDES[endpoint]
     function_name = endpoint.rsplit(".", maxsplit=1)[-1]
@@ -111,28 +129,34 @@ def _purpose(endpoint: str) -> str:
     return function_name.replace("_", " ").capitalize()
 
 
+def non_static_rules(application: Flask) -> list[Rule]:
+    return [
+        rule
+        for rule in application.url_map.iter_rules()
+        if rule.endpoint not in IGNORED_ENDPOINTS
+    ]
+
+
 def route_records(application: Flask) -> list[RouteRecord]:
     records: list[RouteRecord] = []
-    rules: Iterable[Rule] = application.url_map.iter_rules()
-    for rule in rules:
-        if rule.endpoint in IGNORED_ENDPOINTS:
-            continue
-        methods = sorted(set(rule.methods or ()) - {"HEAD", "OPTIONS"})
-        records.append(
-            RouteRecord(
-                group=_group(rule.rule),
-                methods=", ".join(methods),
-                path=rule.rule,
-                interface=_interface(rule.rule, rule.endpoint),
-                purpose=_purpose(rule.endpoint),
-                endpoint=rule.endpoint,
+    for rule in non_static_rules(application):
+        for method in sorted(set(rule.methods or ()) - {"HEAD", "OPTIONS"}):
+            records.append(
+                RouteRecord(
+                    group=_group(rule.rule),
+                    method=method,
+                    path=rule.rule,
+                    interface=_interface(rule.rule, rule.endpoint),
+                    purpose=_purpose(rule.endpoint, method),
+                    endpoint=rule.endpoint,
+                )
             )
-        )
-    return sorted(records, key=lambda item: (item.group, item.path, item.methods))
+    return sorted(records, key=lambda item: (item.group, item.path, item.method))
 
 
 def render_route_index(application: Flask) -> str:
     records = route_records(application)
+    rule_count = len(non_static_rules(application))
     grouped: dict[str, list[RouteRecord]] = defaultdict(list)
     for record in records:
         grouped[record.group].append(record)
@@ -142,9 +166,12 @@ def render_route_index(application: Flask) -> str:
         "",
         "# Complete HTTP route index",
         "",
-        f"This index contains all **{len(records)}** non-static Flask rules registered by",
-        "`posetestbot.web.app.create_app`. It is generated from the running route map,",
-        "so aliases and mixed-method rules appear exactly as Flask exposes them.",
+        f"This index contains all **{rule_count}** non-static Flask rules registered by",
+        "`posetestbot.web.app.create_app`, rendered as",
+        f"**{len(records)}** method-specific operations. It is generated from the",
+        "running route map, so aliases remain explicit and every application-declared",
+        "method has its own row. Flask's implicit `HEAD` and `OPTIONS` methods are",
+        "excluded.",
         "",
         "The index describes reachability and transport type. Request bodies, state",
         "transitions, safety gates, and response semantics are documented in the",
@@ -173,7 +200,7 @@ def render_route_index(application: Flask) -> str:
                 "| "
                 + " | ".join(
                     (
-                        f"`{record.methods}`",
+                        f"`{record.method}`",
                         f"`{record.path}`",
                         record.interface,
                         record.purpose,
@@ -214,12 +241,19 @@ def main() -> int:
                 "`uv run python scripts/generate_http_api_reference.py --write`."
             )
             return 1
-        print(f"HTTP route reference is current ({len(route_records(app))} routes).")
+        print(
+            "HTTP route reference is current "
+            f"({len(non_static_rules(app))} rules, "
+            f"{len(route_records(app))} operations)."
+        )
         return 0
 
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(rendered, encoding="utf-8")
-    print(f"Wrote {output} ({len(route_records(app))} routes).")
+    print(
+        f"Wrote {output} ({len(non_static_rules(app))} rules, "
+        f"{len(route_records(app))} operations)."
+    )
     return 0
 
 

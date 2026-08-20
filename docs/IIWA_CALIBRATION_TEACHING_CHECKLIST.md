@@ -11,6 +11,11 @@ controller safety functions, explicit authorization, an operator, and a
 reviewer. Never send the UDP Stop command during repeated calibration. UDP stop messages cannot interrupt active motion and are not an emergency stop;
 while idle they exit the waiting application, which requires a manual application restart.
 
+The generated overview below visualizes the versioned teaching plan; use the
+checklist and controller read-back as the commissioning record.
+
+![Nine-frame iiwa calibration teaching plan](images/iiwa_calibration_teaching_plan.svg)
+
 ## Deployment record
 
 | Record | Value |

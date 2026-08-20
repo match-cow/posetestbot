@@ -34,12 +34,16 @@ starting the fixed recipe.
 | --- | --- |
 | per-sensor `rgb/`, `depth/` | Preserved raw PNG frames |
 | per-sensor `frame_metadata.jsonl` | Current timestamp and frame identity records |
-| camera sidecars | Current intrinsic/depth/alignment evidence required by consumers |
+| per-sensor `cam_K.txt` | Camera intrinsic matrix consumed by calibration and export |
+| per-sensor `depthscale.txt` | Positive raw-depth-to-millimetre scale |
+| per-sensor `camera.json`, `camera_data.json` | Current intrinsic and resolution evidence, with distortion/projection provenance when supplied |
 | `raw_robot_ee_poses.json` | Strict `robot_pose.v1` packets with run/frame provenance |
 | `processed/robot_pose_cadence_report.json` | Optional derived delivery-cadence evidence |
 | per-sensor `match_robot_ee_poses.json` | Non-destructive nearest-pose matches |
 | `sync_report.json` | Matching decisions and exclusions |
 | `sync_quality_report.json` | In-motion coverage, deltas, packet loss, and blockers |
+| `processed/rectified/<sensor>/` | Derived rectified RGB-D frames, metadata, and projection sidecars |
+| `camera_rectification_report.json` | Rectification source/output and per-sensor provenance |
 
 Lead-in and tail camera frames remain raw context. They are not counted as
 failed in-motion matches.
@@ -50,7 +54,8 @@ failed in-motion matches.
 | --- | --- |
 | `calibration_target.json` | Run-owned selected target bundle and hashes |
 | `calibration_profile_selection.json` | Current v2 per-sensor reusable selection |
-| `processed/calibration_inputs/<bundle_sha256>/` | Exact combined extrinsic/intrinsic snapshots |
+| `processed/calibration_inputs/<bundle_sha256>/calibration_profiles.json` | Exact selected extrinsic-profile snapshot |
+| `processed/calibration_inputs/<bundle_sha256>/intrinsic_calibration_profiles.json` | Exact selected intrinsic-profile snapshot |
 | `processed/calibration/<attempt_id>/request.json` | Immutable attempt intent |
 | `processed/calibration/<attempt_id>/progress.json` | Five-phase attempt status |
 | `processed/calibration/<attempt_id>/intrinsic_comparison.json` | Factory/OpenCV evidence |
@@ -61,6 +66,8 @@ failed in-motion matches.
 | `processed/calibration/<attempt_id>/checks.json` | Blocking checks and retained warnings |
 | `processed/calibration/<attempt_id>/candidate_profiles.json` | Profiles eligible for review/promotion |
 | `calibration_profiles.json` | Explicitly promoted `calibration.v2` profiles, including retained multi-camera consistency warnings |
+| `intrinsic_calibration_profiles.json` | Explicitly promoted intrinsic profiles and projection evidence |
+| `processed/calibration/camera_ee_transform_from_calibration_profiles.json` | Derived BlenderProc camera transform bound to selected profiles |
 
 There are no root-level preflight/observations/candidates/solver/validation
 artifacts from the removed staged calibration implementation.
@@ -91,6 +98,7 @@ artifacts from the removed staged calibration implementation.
 | `bop/posetestbot_instance_map.json` | Run instance to BOP object mapping |
 | `bop/posetestbot_coco_annotations.json` | Optional COCO view of generated annotations |
 | `processed/bop_annotations/generation_report.json` | Optional GT/mask generation evidence |
+| `blenderproc_render_plan.json` | Transactional optional GT/mask render plan, dry-run, or skip evidence |
 | scene `scene_gt.json` | Pose annotations for `pose` or `pose_and_masks` |
 | scene `scene_gt_info.json`, `mask/`, `mask_visib/` | Additional mask/visibility product |
 

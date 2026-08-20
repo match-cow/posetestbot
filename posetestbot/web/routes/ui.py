@@ -37,6 +37,10 @@ STORAGE_CRITICAL_FREE_BYTES_CAP = 100 * GIB
 STORAGE_WARNING_FREE_BYTES_CAP = 500 * GIB
 STORAGE_CRITICAL_FREE_FRACTION = 0.05
 STORAGE_WARNING_FREE_FRACTION = 0.15
+CELL_POSE_TEMPLATE_ASSET_KEYS = {
+    "mesh": "canonical_ply",
+    "texture": "texture",
+}
 
 
 def _is_below(path: Path, root: Path) -> bool:
@@ -382,7 +386,9 @@ def ui_cell_pose_template_asset(instance_uuid: str, asset_kind: str):
         )
         if item is None:
             return jsonify({"output": "Unknown selected template instance"}), 404
-        key = "canonical_ply" if asset_kind == "mesh" else "texture"
+        key = CELL_POSE_TEMPLATE_ASSET_KEYS.get(asset_kind)
+        if key is None:
+            return jsonify({"output": "Unknown instance asset kind"}), 404
         if key not in item["assets"]:
             return jsonify({"output": "Unknown or unavailable instance asset"}), 404
         snapshot = run_root / selection["bundle_snapshot"]

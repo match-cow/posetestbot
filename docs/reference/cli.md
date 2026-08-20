@@ -78,6 +78,8 @@ estimation.
 ## Documentation and validation
 
 ```bash
+uv run python scripts/plot_iiwa_calibration_teaching_plan.py
+uv run python scripts/plot_iiwa_calibration_teaching_plan.py --check
 uv run python scripts/generate_http_api_reference.py --write
 uv run python scripts/generate_http_api_reference.py --check
 uv run python -m mkdocs build --strict

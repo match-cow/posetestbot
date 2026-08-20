@@ -140,10 +140,37 @@ def test_generated_route_reference_matches_every_flask_rule() -> None:
 
     reference = ROUTE_REFERENCE.read_text(encoding="utf-8")
     rules = [rule for rule in app.url_map.iter_rules() if rule.endpoint != "static"]
+    operation_count = sum(
+        len(set(rule.methods or ()) - {"HEAD", "OPTIONS"}) for rule in rules
+    )
     assert f"all **{len(rules)}** non-static Flask rules" in reference
+    assert f"**{operation_count}** method-specific operations" in reference
+    assert "every application-declared\nmethod has its own row" in reference
+    assert "implicit `HEAD` and `OPTIONS` methods are\nexcluded" in reference
+    assert "every allowed method" not in reference
     for rule in rules:
-        assert f"`{rule.rule}`" in reference
-        assert f"`{rule.endpoint}`" in reference
+        for method in set(rule.methods or ()) - {"HEAD", "OPTIONS"}:
+            row_start = f"| `{method}` | `{rule.rule}` |"
+            matching_rows = [
+                line
+                for line in reference.splitlines()
+                if line.startswith(row_start) and line.endswith(f"`{rule.endpoint}` |")
+            ]
+            assert len(matching_rows) == 1, (rule.endpoint, method, matching_rows)
+
+    assert "`GET, POST`" not in reference
+    mixed_method_purposes = {
+        ("GET", "/capture/jobs"): "List capture jobs",
+        ("POST", "/capture/jobs"): "Queue the supervised capture recipe",
+        ("GET", "/run-config"): "Load run configuration",
+        ("POST", "/run-config"): "Create or update run configuration",
+        ("GET", "/sync/quality"): "Build synchronization quality report",
+        ("POST", "/sync/quality"): ("Build and persist synchronization quality report"),
+        ("GET", "/hardware/status"): "Load hardware status report",
+        ("POST", "/hardware/status"): ("Collect and persist hardware status report"),
+    }
+    for (method, path), purpose in mixed_method_purposes.items():
+        assert f"| `{method}` | `{path}` | JSON | {purpose} |" in reference
 
 
 def test_strict_build_has_search_persistent_pages_and_resolved_links(
@@ -202,17 +229,44 @@ def test_pages_workflow_builds_source_before_uploading_generated_site() -> None:
 
     assert "actions/checkout@v7" in workflow
     assert "astral-sh/setup-uv@" in workflow
-    assert "uv run --frozen --only-group docs mkdocs build --strict" in workflow
+    teaching_plot_check = (
+        "uv run --frozen --no-default-groups --group docs python "
+        "scripts/plot_iiwa_calibration_teaching_plan.py --check"
+    )
+    route_check = (
+        "uv run --frozen --no-default-groups --group docs python "
+        "scripts/generate_http_api_reference.py --check"
+    )
+    strict_build = (
+        "uv run --frozen --no-default-groups --group docs mkdocs build --strict"
+    )
+    assert teaching_plot_check in workflow
+    assert "MPLCONFIGDIR: /tmp/posetestbot-mpl" in workflow
+    assert route_check in workflow
+    assert strict_build in workflow
     assert "actions/configure-pages@v5" in workflow
     assert "actions/upload-pages-artifact@v4" in workflow
     assert "actions/deploy-pages@v4" in workflow
     assert "pages: write" in workflow
     assert "id-token: write" in workflow
     assert "path: site" in workflow
-    assert workflow.index("mkdocs build --strict") < workflow.index(
+    assert workflow.index(teaching_plot_check) < workflow.index(route_check)
+    assert workflow.index(route_check) < workflow.index(strict_build)
+    assert workflow.index(strict_build) < workflow.index(
         "actions/upload-pages-artifact"
     )
-    for trigger in ('"docs/**"', '"mkdocs.yml"', '"pyproject.toml"', '"uv.lock"'):
+    for trigger in (
+        '"docs/**"',
+        '"iiwa/calibration_teaching_plan.v2.json"',
+        '"mkdocs.yml"',
+        '"posetestbot/calibration/teaching_plan.py"',
+        '"posetestbot/web/app.py"',
+        '"posetestbot/web/routes/**"',
+        '"scripts/generate_http_api_reference.py"',
+        '"scripts/plot_iiwa_calibration_teaching_plan.py"',
+        '"pyproject.toml"',
+        '"uv.lock"',
+    ):
         assert trigger in workflow
 
 
@@ -221,6 +275,9 @@ def test_documentation_dependency_and_generated_output_contract() -> None:
     ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     maintenance = (DOCS_ROOT / "GITHUB_PAGES.md").read_text(encoding="utf-8")
+    teaching_checklist = (
+        DOCS_ROOT / "IIWA_CALIBRATION_TEACHING_CHECKLIST.md"
+    ).read_text(encoding="utf-8")
     typography = TECHNICAL_STYLESHEET.read_text(encoding="utf-8")
 
     assert re.search(r"(?ms)^docs = \[.*mkdocs-material>=9\.7\.7.*^\]", project)
@@ -235,5 +292,8 @@ def test_documentation_dependency_and_generated_output_contract() -> None:
         "generated `site/` directory is a disposable ignored build artifact"
         in " ".join(maintenance.split())
     )
+    assert "(images/iiwa_calibration_teaching_plan.svg)" in teaching_checklist
+    assert (DOCS_ROOT / "images" / "iiwa_calibration_teaching_plan.svg").is_file()
+    assert not (DOCS_ROOT / "images" / "iiwa_calibration_teaching_plan.png").exists()
     assert not (ROOT / "site" / "app.js").exists()
     assert not (ROOT / "site" / "styles.css").exists()

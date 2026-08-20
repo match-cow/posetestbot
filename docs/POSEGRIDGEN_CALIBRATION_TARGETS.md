@@ -105,11 +105,11 @@ Selection copies the unchanged bundle to
 fields to the run config. New guided selections also record
 `placement.mounting_frame` as `robot_flange` or `template_base`. The bundle,
 root target, run config, and dataset manifest are promoted together with
-rollback on failure. Earlier v2 selections without `mounting_frame` remain
-readable for inspection: a known placement still implies `template_base`, but
-an unknown placement is intentionally not inferred from mutable camera setup.
-Readiness, attempt creation, and promotion require the operator to reselect the
-target with an explicit physical mounting frame first.
+rollback on failure. Current readers reject selections without
+`mounting_frame`; neither known nor unknown placement implies a physical frame.
+Select the target again with an explicit mounting frame before readiness,
+attempt creation, or promotion. If retained raw evidence prevents replacement,
+create a fresh run rather than weakening the current contract.
 
 Intent-level calculation snapshots the bundle below
 `<run>/processed/calibration/<attempt_id>/target_bundle/`. Prior attempts and

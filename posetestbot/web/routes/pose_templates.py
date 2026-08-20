@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
+import stat
 import shutil
 import time
 import uuid
@@ -59,6 +62,13 @@ WORKPIECE_REQUEST_ROOT = (
     default_working_data_root() / "jobs" / "workpiece_catalog_requests"
 )
 REQUEST_RETENTION_SECONDS = 24 * 60 * 60
+_RMTREE_AVOIDS_SYMLINK_ATTACKS = shutil.rmtree.avoids_symlink_attacks
+_CAN_ANCHOR_REQUEST_PRUNING = (
+    _RMTREE_AVOIDS_SYMLINK_ATTACKS
+    and hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and os.stat in os.supports_dir_fd
+)
 
 
 def _json() -> dict[str, Any]:
@@ -84,6 +94,11 @@ def _write_request(kind: str, value: dict[str, Any]) -> tuple[str, Path]:
 def _prune_stale_requests(kind: str, *, request_root: Path | None = None) -> None:
     """Bound abandoned request/result storage without touching active jobs."""
 
+    # Refuse recursive cleanup unless the complete scan/stat/remove sequence can
+    # remain anchored to a directory opened without following its final link.
+    if not _CAN_ANCHOR_REQUEST_PRUNING:
+        return
+
     root = (request_root or REQUEST_ROOT) / kind
     active_ids = {
         str(job.parameters.get("request_id"))
@@ -93,19 +108,69 @@ def _prune_stale_requests(kind: str, *, request_root: Path | None = None) -> Non
     }
     cutoff = time.time() - REQUEST_RETENTION_SECONDS
     try:
-        folders = list(root.iterdir())
+        root_fd = os.open(
+            root,
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+        )
     except FileNotFoundError:
         return
-    for folder in folders:
+    except OSError as exc:
+        unsupported_errors = {
+            errno.EINVAL,
+            getattr(errno, "ENOTSUP", errno.EINVAL),
+            getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+        }
+        if exc.errno in unsupported_errors:
+            return
         try:
-            if (
-                folder.is_dir()
-                and folder.name not in active_ids
-                and folder.stat().st_mtime < cutoff
-            ):
-                shutil.rmtree(folder)
+            root_metadata = root.stat(follow_symlinks=False)
         except FileNotFoundError:
-            continue
+            return
+        if stat.S_ISLNK(root_metadata.st_mode):
+            return
+        raise
+
+    try:
+        try:
+            with os.scandir(root_fd) as entries:
+                folder_names = [entry.name for entry in entries]
+        except (NotImplementedError, TypeError):
+            return
+        for folder_name in folder_names:
+            try:
+                metadata = os.stat(
+                    folder_name,
+                    dir_fd=root_fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    stat.S_ISDIR(metadata.st_mode)
+                    and folder_name not in active_ids
+                    and metadata.st_mtime < cutoff
+                ):
+                    shutil.rmtree(folder_name, dir_fd=root_fd)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError:
+                # A child swapped for a symlink after the anchored stat is
+                # rejected by fd-based rmtree. Confirm that state using the
+                # same root descriptor; propagate unrelated I/O failures.
+                try:
+                    current = os.stat(
+                        folder_name,
+                        dir_fd=root_fd,
+                        follow_symlinks=False,
+                    )
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                if stat.S_ISLNK(current.st_mode):
+                    continue
+                raise
+    finally:
+        os.close(root_fd)
 
 
 def _submit(
