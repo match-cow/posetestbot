@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -69,8 +70,13 @@ def _configuration() -> dict:
     return value
 
 
-def _write_capture_folder(path: Path) -> None:
-    image = np.zeros((8, 8), dtype=np.uint16)
+def _write_capture_folder(
+    path: Path,
+    *,
+    image_size: tuple[int, int] = (8, 8),
+) -> None:
+    width, height = image_size
+    image = np.zeros((height, width), dtype=np.uint16)
     for directory in (RGB_DIR, DEPTH_DIR):
         target = path / directory / "1000.png"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -100,9 +106,19 @@ def _write_capture_folder(path: Path) -> None:
     write_camera_sidecars(
         path,
         CameraIntrinsics(
-            cam_k=(600.0, 0.0, 4.0, 0.0, 600.0, 4.0, 0.0, 0.0, 1.0),
-            width=8,
-            height=8,
+            cam_k=(
+                600.0,
+                0.0,
+                width / 2.0,
+                0.0,
+                600.0,
+                height / 2.0,
+                0.0,
+                0.0,
+                1.0,
+            ),
+            width=width,
+            height=height,
             distortion=(0.0, 0.0, 0.0, 0.0, 0.0),
             depth_scale_to_mm=1.0,
         ),
@@ -246,11 +262,23 @@ def _profile(
     inlier_count: int = 8,
     outlier_ratio: float = 0.0,
     sync_delta_ms: float | None = None,
+    image_size: tuple[int, int] = (8, 8),
 ) -> CalibrationProfile:
+    width, height = image_size
     intrinsics = CameraIntrinsics(
-        cam_k=(600.0, 0.0, 4.0, 0.0, 600.0, 4.0, 0.0, 0.0, 1.0),
-        width=8,
-        height=8,
+        cam_k=(
+            600.0,
+            0.0,
+            width / 2.0,
+            0.0,
+            600.0,
+            height / 2.0,
+            0.0,
+            0.0,
+            1.0,
+        ),
+        width=width,
+        height=height,
         distortion=(0.0, 0.0, 0.0, 0.0, 0.0),
         depth_scale_to_mm=1.0,
     )
@@ -391,6 +419,20 @@ def _motion_balanced_candidate(
             },
         ],
     }
+
+
+def _rebind_promotion_review_inputs(attempt_root: Path) -> None:
+    """Keep semantic-tampering tests behind the immutable snapshot boundary."""
+
+    bindings = attempt_module._promotion_review_input_bindings(attempt_root)
+    for filename in (
+        attempt_module.PROMOTION_REQUEST_FILE,
+        attempt_module.PROMOTION_FILE,
+    ):
+        path = attempt_root / filename
+        value = json.loads(path.read_text())
+        value["review_input_bindings"] = bindings
+        path.write_text(json.dumps(value))
 
 
 def test_promotion_outlier_evidence_rejects_tampered_aggregate() -> None:
@@ -902,6 +944,7 @@ def _exercise_promotion_transaction(
     tamper_mode: str | None,
     *,
     sdk_inverse_projection: bool = True,
+    image_size: tuple[int, int] = (8, 8),
 ) -> None:
     run_root = tmp_path / "run"
     configured = sensor_configs_from_values(
@@ -944,8 +987,8 @@ def _exercise_promotion_transaction(
         mounting_frame="template_base",
         library_root=library,
     )
-    _write_capture_folder(run_root / "realsense_1")
-    _write_capture_folder(run_root / "luxonis_2")
+    _write_capture_folder(run_root / "realsense_1", image_size=image_size)
+    _write_capture_folder(run_root / "luxonis_2", image_size=image_size)
     run_id = load_run_config_for_run_root(run_root)["run_id"]
     (run_root / "raw_robot_ee_poses.json").write_text(
         json.dumps(
@@ -1006,6 +1049,7 @@ def _exercise_promotion_transaction(
         inlier_count=12,
         outlier_ratio=3 / 15,
         sync_delta_ms=0.0,
+        image_size=image_size,
     )
     synchronization = {
         "source": time_offset_source,
@@ -1031,12 +1075,33 @@ def _exercise_promotion_transaction(
             "robot_pose_reference": request_value["robot_pose_reference"],
         },
     )
+    intrinsic = factory_intrinsic_profile(run_root / "realsense_1")
+    if sdk_inverse_projection:
+        intrinsic["native"]["distortion_model"] = "inverse_brown_conrady"
+        intrinsic["source"]["sdk_distortion_model"] = "inverse_brown_conrady"
+    candidate_intrinsics = attempt_module._camera_intrinsics(intrinsic)
+    candidate = replace(
+        candidate,
+        intrinsics=candidate_intrinsics,
+        rectified_intrinsics=attempt_module.rectified_intrinsics_from_native(
+            candidate_intrinsics
+        ),
+        metadata={
+            **candidate.metadata,
+            "intrinsic_profile_id": intrinsic["profile_id"],
+        },
+    )
     candidate_evidence = _motion_balanced_candidate(candidate_id)
     candidate_evidence["synchronization"] = synchronization
     write_profile_collection([candidate], attempt_root / "candidate_profiles.json")
-    intrinsic = factory_intrinsic_profile(run_root / "realsense_1")
     write_intrinsic_profile_collection(
         [intrinsic], attempt_root / "intrinsic_calibration_profiles.json"
+    )
+    (attempt_root / attempt_module.INTRINSIC_COMPARISON).write_text(
+        json.dumps({"schema_version": "intrinsic_comparison.v1", "sensors": []})
+    )
+    (attempt_root / attempt_module.PNP_CANDIDATES_FILE).write_text(
+        json.dumps({"schema_version": "calibration_pnp_candidates.v1", "sensors": []})
     )
     unrelated_intrinsic = factory_intrinsic_profile(run_root / "luxonis_2")
     write_intrinsic_profile_collection(
@@ -1079,14 +1144,274 @@ def _exercise_promotion_transaction(
         candidate_id="old-oak",
         translation=(1.0, 2.0, 3.0),
         status=CalibrationStatus.VALID,
+        image_size=image_size,
     )
     write_profile_collection([unrelated], run_root / CALIBRATION_PROFILES)
-    create_promotion_request(
+    if tamper_mode == "review_input_missing_before_approval":
+        (attempt_root / attempt_module.CHECKS_FILE).unlink()
+        with pytest.raises(
+            ValueError,
+            match="promotion review input is missing: checks.json",
+        ):
+            create_promotion_request(
+                run_root,
+                attempt_id,
+                selections={"realsense_d435:1": candidate_id},
+                operator="test-operator",
+            )
+        assert not (attempt_root / attempt_module.PROMOTION_REQUEST_FILE).exists()
+        assert not (attempt_root / attempt_module.PROMOTION_FILE).exists()
+        return
+    if tamper_mode == "symlinked_attempt_root_before_approval":
+        outside_attempt = tmp_path / "outside-attempt"
+        attempt_root.rename(outside_attempt)
+        attempt_root.symlink_to(outside_attempt, target_is_directory=True)
+        with pytest.raises(ValueError, match="symlink ancestors"):
+            create_promotion_request(
+                run_root,
+                attempt_id,
+                selections={"realsense_d435:1": candidate_id},
+                operator="test-operator",
+            )
+        assert not (outside_attempt / attempt_module.PROMOTION_REQUEST_FILE).exists()
+        assert not (outside_attempt / attempt_module.PROMOTION_FILE).exists()
+        return
+    if tamper_mode == "approval_pair_interruption":
+        original_atomic_write_json = attempt_module.atomic_write_json
+
+        def fail_before_status_commit(path: Path, value: dict) -> None:
+            if (
+                Path(path) == attempt_root / attempt_module.PROMOTION_FILE
+                and value.get("status") == "approved"
+            ):
+                raise OSError("injected approval status failure")
+            original_atomic_write_json(path, value)
+
+        monkeypatch.setattr(
+            attempt_module,
+            "atomic_write_json",
+            fail_before_status_commit,
+        )
+        with pytest.raises(OSError, match="injected approval status failure"):
+            create_promotion_request(
+                run_root,
+                attempt_id,
+                selections={"realsense_d435:1": candidate_id},
+                operator="test-operator",
+            )
+        assert (attempt_root / attempt_module.PROMOTION_REQUEST_FILE).is_file()
+        assert not (attempt_root / attempt_module.PROMOTION_FILE).exists()
+        monkeypatch.setattr(
+            attempt_module,
+            "atomic_write_json",
+            original_atomic_write_json,
+        )
+    if tamper_mode == "concurrent_approval_requests":
+        original_atomic_write_json = attempt_module.atomic_write_json
+        request_committed = threading.Event()
+        release_first = threading.Event()
+        second_finished = threading.Event()
+        pause_once = True
+        results: list[dict] = []
+        errors: list[Exception] = []
+
+        def pause_after_request(path: Path, value: dict) -> None:
+            nonlocal pause_once
+            original_atomic_write_json(path, value)
+            if (
+                pause_once
+                and Path(path) == attempt_root / attempt_module.PROMOTION_REQUEST_FILE
+            ):
+                pause_once = False
+                request_committed.set()
+                assert release_first.wait(timeout=5.0)
+
+        def approve(*, second: bool) -> None:
+            try:
+                results.append(
+                    create_promotion_request(
+                        run_root,
+                        attempt_id,
+                        selections={"realsense_d435:1": candidate_id},
+                        operator="test-operator",
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - asserted below
+                errors.append(exc)
+            finally:
+                if second:
+                    second_finished.set()
+
+        monkeypatch.setattr(
+            attempt_module,
+            "atomic_write_json",
+            pause_after_request,
+        )
+        first = threading.Thread(target=approve, kwargs={"second": False})
+        first.start()
+        assert request_committed.wait(timeout=5.0)
+        second = threading.Thread(target=approve, kwargs={"second": True})
+        second.start()
+        assert not second_finished.wait(timeout=0.1)
+        release_first.set()
+        first.join(timeout=5.0)
+        second.join(timeout=5.0)
+        assert not first.is_alive() and not second.is_alive()
+        assert len(results) == 1
+        assert len(errors) == 1
+        assert "already has promotion evidence" in str(errors[0])
+        request = json.loads(
+            (attempt_root / attempt_module.PROMOTION_REQUEST_FILE).read_text()
+        )
+        status = json.loads((attempt_root / attempt_module.PROMOTION_FILE).read_text())
+        assert request["created_at"] == status["requested_at"]
+        assert status["status"] == "approved"
+        assert "job_id" not in status
+        return
+    promotion_request = create_promotion_request(
         run_root,
         attempt_id,
         selections={"realsense_d435:1": candidate_id},
         operator="test-operator",
     )
+    if tamper_mode == "unbound_approval":
+        with pytest.raises(ValueError, match="not an active approved request"):
+            promote_calibration_attempt(run_root, attempt_id)
+        unbound_status = json.loads(
+            (attempt_root / attempt_module.PROMOTION_FILE).read_text()
+        )
+        assert unbound_status["status"] == "approved"
+        assert "job_id" not in unbound_status
+        assert not (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).exists()
+        return
+    attempt_module.record_attempt_job(
+        run_root,
+        attempt_id,
+        job_id="promotion-test-job",
+        kind="promotion",
+    )
+    expected_review_inputs = [
+        "request.json",
+        "progress.json",
+        "sync_quality_report.json",
+        "time_offset_search.json",
+        "intrinsic_comparison.json",
+        "intrinsic_calibration_profiles.json",
+        "pnp_candidates.json",
+        "observations.json",
+        "extrinsic_candidates.json",
+        "ranking.json",
+        "checks.json",
+        "candidate_profiles.json",
+        "target_bundle",
+    ]
+    assert promotion_request["schema_version"] == "calibration_promotion_request.v2"
+    assert [
+        binding["path"] for binding in promotion_request["review_input_bindings"]
+    ] == expected_review_inputs
+    promotion_status_path = attempt_root / attempt_module.PROMOTION_FILE
+    promotion_status = json.loads(promotion_status_path.read_text())
+    assert (
+        promotion_status["review_input_bindings"]
+        == promotion_request["review_input_bindings"]
+    )
+    assert (
+        attempt_module.PROMOTION_REQUEST_FILE
+        in attempt_module.load_calibration_attempt(
+            run_root,
+            attempt_id,
+        )["artifacts"]
+    )
+
+    if tamper_mode in {
+        "review_input_changed",
+        "consumed_review_input_changed",
+        "target_bundle_review_input_changed",
+        "review_input_missing",
+    }:
+        queued_status = promotion_status_path.read_bytes()
+        if tamper_mode == "review_input_changed":
+            checks_path = attempt_root / attempt_module.CHECKS_FILE
+            checks_path.write_text(json.dumps({"checks": [{"status": "forged"}]}))
+            error = "review input changed after approval: checks.json"
+        elif tamper_mode == "consumed_review_input_changed":
+            timing_path = attempt_root / TIME_OFFSET_SEARCH
+            timing = json.loads(timing_path.read_text())
+            timing["post_approval_note"] = "forged"
+            timing_path.write_text(json.dumps(timing))
+            error = "review input changed after approval: time_offset_search.json"
+        elif tamper_mode == "target_bundle_review_input_changed":
+            target_member = next(
+                path
+                for path in sorted(
+                    (attempt_root / attempt_module.TARGET_BUNDLE_DIRECTORY).rglob("*")
+                )
+                if path.is_file()
+            )
+            target_member.write_bytes(target_member.read_bytes() + b"\n")
+            error = "review input changed after approval: target_bundle"
+        else:
+            checks_path = attempt_root / attempt_module.CHECKS_FILE
+            checks_path.unlink()
+            error = "review input is missing after approval: checks.json"
+        with pytest.raises(ValueError, match=error):
+            promote_calibration_attempt(run_root, attempt_id)
+        assert promotion_status_path.read_bytes() == queued_status
+        assert not (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).exists()
+        assert not list(run_root.glob(".calibration-promotion-*"))
+        assert {
+            profile.profile_id
+            for profile in load_profile_collection(run_root / CALIBRATION_PROFILES)
+        } == {"keep_oak_profile"}
+        return
+
+    if tamper_mode == "promotion_request_binding":
+        queued_status = promotion_status_path.read_bytes()
+        promotion_request_path = attempt_root / attempt_module.PROMOTION_REQUEST_FILE
+        tampered_request = json.loads(promotion_request_path.read_text())
+        tampered_request["review_input_bindings"][0]["sha256"] = "0" * 64
+        promotion_request_path.write_text(json.dumps(tampered_request))
+        with pytest.raises(ValueError, match="review-input bindings are inconsistent"):
+            promote_calibration_attempt(run_root, attempt_id)
+        assert promotion_status_path.read_bytes() == queued_status
+        assert not (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).exists()
+        assert not list(run_root.glob(".calibration-promotion-*"))
+        return
+
+    if tamper_mode == "legacy_promotion_request_schema":
+        queued_status = promotion_status_path.read_bytes()
+        promotion_request_path = attempt_root / attempt_module.PROMOTION_REQUEST_FILE
+        legacy_request = json.loads(promotion_request_path.read_text())
+        legacy_request["schema_version"] = "calibration_promotion_request.v1"
+        promotion_request_path.write_text(json.dumps(legacy_request))
+        with pytest.raises(
+            ValueError,
+            match="Unsupported calibration promotion request schema",
+        ):
+            promote_calibration_attempt(run_root, attempt_id)
+        assert promotion_status_path.read_bytes() == queued_status
+        assert not (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).exists()
+        assert not list(run_root.glob(".calibration-promotion-*"))
+        return
+
+    if tamper_mode in {
+        "promotion_request_operator",
+        "promotion_request_timestamp",
+    }:
+        queued_status = promotion_status_path.read_bytes()
+        promotion_request_path = attempt_root / attempt_module.PROMOTION_REQUEST_FILE
+        tampered_request = json.loads(promotion_request_path.read_text())
+        if tamper_mode == "promotion_request_operator":
+            tampered_request["operator"] = "forged-operator"
+        else:
+            tampered_request["created_at"] = "2099-01-01T00:00:00+00:00"
+        promotion_request_path.write_text(json.dumps(tampered_request))
+        with pytest.raises(ValueError, match="approval audit fields are inconsistent"):
+            promote_calibration_attempt(run_root, attempt_id)
+        assert promotion_status_path.read_bytes() == queued_status
+        assert not (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).exists()
+        assert not list(run_root.glob(".calibration-promotion-*"))
+        return
 
     if tamper_mode == "candidate_profile_binding":
         write_profile_collection(
@@ -1102,6 +1427,7 @@ def _exercise_promotion_transaction(
             ],
             attempt_root / "candidate_profiles.json",
         )
+        _rebind_promotion_review_inputs(attempt_root)
         with pytest.raises(ValueError, match="immutable robot-pose artifact binding"):
             promote_calibration_attempt(run_root, attempt_id)
         assert {
@@ -1122,7 +1448,25 @@ def _exercise_promotion_transaction(
             ],
             attempt_root / "candidate_profiles.json",
         )
+        _rebind_promotion_review_inputs(attempt_root)
         with pytest.raises(ValueError, match="ranked primary transform evidence"):
+            promote_calibration_attempt(run_root, attempt_id)
+        assert {
+            profile.profile_id
+            for profile in load_profile_collection(run_root / CALIBRATION_PROFILES)
+        } == {"keep_oak_profile"}
+        return
+
+    if tamper_mode == "candidate_intrinsic_binding":
+        intrinsic_path = attempt_root / attempt_module.INTRINSIC_CALIBRATION_PROFILES
+        tampered_intrinsics = load_intrinsic_profile_collection(intrinsic_path)
+        tampered_intrinsics[0]["native"]["cam_K"][2] += 1.0
+        write_intrinsic_profile_collection(tampered_intrinsics, intrinsic_path)
+        _rebind_promotion_review_inputs(attempt_root)
+        with pytest.raises(
+            ValueError,
+            match="inconsistent intrinsic profile evidence",
+        ):
             promote_calibration_attempt(run_root, attempt_id)
         assert {
             profile.profile_id
@@ -1163,6 +1507,7 @@ def _exercise_promotion_transaction(
         tampered_request = json.loads(request_path.read_text())
         tampered_request["robot_pose_reference"]["reason"] = "forged_reference_identity"
         request_path.write_text(json.dumps(tampered_request))
+        _rebind_promotion_review_inputs(attempt_root)
         with pytest.raises(
             ValueError,
             match="reference identity or pose counts",
@@ -1199,6 +1544,134 @@ def _exercise_promotion_transaction(
             profile.profile_id
             for profile in load_profile_collection(run_root / CALIBRATION_PROFILES)
         } == {"keep_oak_profile"}
+        return
+
+    if tamper_mode == "review_input_changed_during_promotion":
+        original_atomic_write_json = attempt_module.atomic_write_json
+        target_member = next(
+            path
+            for path in sorted(
+                (attempt_root / attempt_module.TARGET_BUNDLE_DIRECTORY).rglob("*")
+            )
+            if path.is_file()
+        )
+        mutated = False
+
+        def mutate_after_running_status(path: Path, value: dict) -> None:
+            nonlocal mutated
+            original_atomic_write_json(path, value)
+            if (
+                not mutated
+                and Path(path) == promotion_status_path
+                and value.get("status") == "running"
+            ):
+                target_member.write_bytes(target_member.read_bytes() + b"\n")
+                mutated = True
+
+        monkeypatch.setattr(
+            attempt_module,
+            "atomic_write_json",
+            mutate_after_running_status,
+        )
+        with pytest.raises(ValueError, match="approved staged target bundle"):
+            promote_calibration_attempt(run_root, attempt_id)
+        assert mutated is True
+        failed_status = json.loads(promotion_status_path.read_text())
+        assert failed_status["status"] == "failed"
+        assert not (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).exists()
+        assert not list(run_root.glob(".calibration-promotion-*"))
+        assert {
+            profile.profile_id
+            for profile in load_profile_collection(run_root / CALIBRATION_PROFILES)
+        } == {"keep_oak_profile"}
+        return
+
+    if tamper_mode == "review_input_changed_before_commit":
+        original_atomic_write_json = attempt_module.atomic_write_json
+        timing_path = attempt_root / TIME_OFFSET_SEARCH
+        mutated = False
+
+        def mutate_after_staging(path: Path, value: dict) -> None:
+            nonlocal mutated
+            original_atomic_write_json(path, value)
+            target = Path(path)
+            if (
+                not mutated
+                and target.name == attempt_module.PROMOTION_FILE
+                and target.parent.name.startswith(".calibration-promotion-")
+            ):
+                timing = json.loads(timing_path.read_text())
+                timing["post_staging_note"] = "forged"
+                timing_path.write_text(json.dumps(timing))
+                mutated = True
+
+        monkeypatch.setattr(
+            attempt_module,
+            "atomic_write_json",
+            mutate_after_staging,
+        )
+        with pytest.raises(
+            ValueError,
+            match="review input changed after approval: time_offset_search.json",
+        ):
+            promote_calibration_attempt(run_root, attempt_id)
+        assert mutated is True
+        failed_status = json.loads(promotion_status_path.read_text())
+        assert failed_status["status"] == "failed"
+        assert not (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).exists()
+        assert not list(run_root.glob(".calibration-promotion-*"))
+        assert {
+            profile.profile_id
+            for profile in load_profile_collection(run_root / CALIBRATION_PROFILES)
+        } == {"keep_oak_profile"}
+        return
+
+    if tamper_mode == "promotion_recovery_failure":
+        original_replace = attempt_module._replace_promotion_path
+        original_rollback = attempt_module._rollback_prepared_promotion_transaction
+        replacement_count = 0
+
+        def fail_after_first_install(source: Path, destination: Path) -> None:
+            nonlocal replacement_count
+            original_replace(source, destination)
+            replacement_count += 1
+            if replacement_count == 8:
+                raise OSError("injected promotion replacement failure")
+
+        def fail_recovery(*_args, **_kwargs) -> None:
+            raise OSError("injected promotion recovery failure")
+
+        monkeypatch.setattr(
+            attempt_module,
+            "_replace_promotion_path",
+            fail_after_first_install,
+        )
+        monkeypatch.setattr(
+            attempt_module,
+            "_rollback_prepared_promotion_transaction",
+            fail_recovery,
+        )
+        with pytest.raises(OSError, match="injected promotion recovery failure"):
+            promote_calibration_attempt(run_root, attempt_id)
+
+        journal_path = run_root / attempt_module.PROMOTION_TRANSACTION_FILE
+        assert journal_path.is_file()
+        assert list(run_root.glob(".calibration-promotion-*.tmp"))
+
+        monkeypatch.setattr(
+            attempt_module,
+            "_replace_promotion_path",
+            original_replace,
+        )
+        monkeypatch.setattr(
+            attempt_module,
+            "_rollback_prepared_promotion_transaction",
+            original_rollback,
+        )
+        recovered = promote_calibration_attempt(run_root, attempt_id)
+        assert recovered["status"] == "promoted"
+        assert not journal_path.exists()
+        assert not list(run_root.glob(".calibration-promotion-*"))
         return
 
     result = promote_calibration_attempt(run_root, attempt_id)
@@ -1275,6 +1748,7 @@ def prepare_promoted_calibration_for_workflow(
         monkeypatch,
         None,
         sdk_inverse_projection=False,
+        image_size=(1280, 720),
     )
     return tmp_path / "run"
 
@@ -1290,6 +1764,23 @@ def prepare_promoted_calibration_for_workflow(
         "request_robot_pose_reference",
         "target_selection",
         "legacy_target_selection",
+        "review_input_changed",
+        "consumed_review_input_changed",
+        "target_bundle_review_input_changed",
+        "review_input_missing",
+        "promotion_request_binding",
+        "legacy_promotion_request_schema",
+        "promotion_request_operator",
+        "promotion_request_timestamp",
+        "candidate_intrinsic_binding",
+        "review_input_missing_before_approval",
+        "symlinked_attempt_root_before_approval",
+        "approval_pair_interruption",
+        "concurrent_approval_requests",
+        "unbound_approval",
+        "review_input_changed_during_promotion",
+        "review_input_changed_before_commit",
+        "promotion_recovery_failure",
     ],
 )
 def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected_camera(
@@ -1298,3 +1789,566 @@ def test_promotion_transaction_preserves_unrelated_profiles_and_updates_selected
     tamper_mode: str | None,
 ) -> None:
     _exercise_promotion_transaction(tmp_path, monkeypatch, tamper_mode)
+
+
+class _SimulatedPromotionProcessLoss(BaseException):
+    pass
+
+
+def _promotion_recovery_fixture(
+    tmp_path: Path,
+) -> tuple[
+    Path,
+    str,
+    str,
+    str,
+    list[tuple[Path, Path]],
+    list[str],
+    list[str],
+]:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    attempt_id = "a" * 32
+    target_id = "11111111-1111-4111-8111-111111111111"
+    transaction_id = "b" * 32
+    targets = attempt_module._promotion_transaction_targets(
+        run_root,
+        attempt_id=attempt_id,
+        target_id=target_id,
+    )
+    staging_root, _backup_root = attempt_module._promotion_transaction_roots(
+        run_root,
+        attempt_id=attempt_id,
+        transaction_id=transaction_id,
+    )
+    staging_root.mkdir()
+    staged = attempt_module._promotion_staged_paths(staging_root, targets)
+    old_values: list[str] = []
+    new_values: list[str] = []
+    for index, (source, target) in enumerate(zip(staged, targets, strict=True)):
+        old_value = f"old-{index}"
+        new_value = f"new-{index}"
+        old_values.append(old_value)
+        new_values.append(new_value)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        if index == 5:
+            target.mkdir()
+            (target / "marker.txt").write_text(old_value)
+            source.mkdir()
+            (source / "marker.txt").write_text(new_value)
+        elif index == 6:
+            target.write_text(
+                json.dumps(
+                    {
+                        "schema_version": attempt_module.PROMOTION_SCHEMA_VERSION,
+                        "attempt_id": attempt_id,
+                        "status": "running",
+                        "marker": old_value,
+                    }
+                )
+            )
+            source.write_text(
+                json.dumps(
+                    {
+                        "schema_version": attempt_module.PROMOTION_SCHEMA_VERSION,
+                        "attempt_id": attempt_id,
+                        "status": "promoted",
+                        "marker": new_value,
+                    }
+                )
+            )
+        else:
+            target.write_text(old_value)
+            source.write_text(new_value)
+    return (
+        run_root,
+        attempt_id,
+        target_id,
+        transaction_id,
+        list(zip(staged, targets, strict=True)),
+        old_values,
+        new_values,
+    )
+
+
+def _promotion_recovery_values(targets: list[Path]) -> list[str]:
+    values = []
+    for index, target in enumerate(targets):
+        if index == 5:
+            values.append((target / "marker.txt").read_text())
+        elif index == 6:
+            values.append(json.loads(target.read_text())["marker"])
+        else:
+            values.append(target.read_text())
+    return values
+
+
+@pytest.mark.parametrize("crash_after_replace", range(1, 15))
+def test_prepared_promotion_recovers_every_replacement_interruption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_after_replace: int,
+) -> None:
+    (
+        run_root,
+        attempt_id,
+        target_id,
+        transaction_id,
+        promotions,
+        old_values,
+        _new_values,
+    ) = _promotion_recovery_fixture(tmp_path)
+    original_replace = attempt_module._replace_promotion_path
+    replacement_count = 0
+
+    def interrupt_after_replace(source: Path, destination: Path) -> None:
+        nonlocal replacement_count
+        original_replace(source, destination)
+        replacement_count += 1
+        if replacement_count == crash_after_replace:
+            raise _SimulatedPromotionProcessLoss
+
+    monkeypatch.setattr(
+        attempt_module, "_replace_promotion_path", interrupt_after_replace
+    )
+    with pytest.raises(_SimulatedPromotionProcessLoss):
+        attempt_module._transactional_replace(
+            run_root,
+            promotions,
+            attempt_id=attempt_id,
+            target_id=target_id,
+            transaction_id=transaction_id,
+        )
+    monkeypatch.setattr(attempt_module, "_replace_promotion_path", original_replace)
+
+    assert (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).is_file()
+    assert attempt_module.list_calibration_attempts(run_root) == []
+
+    targets = [target for _source, target in promotions]
+    assert _promotion_recovery_values(targets) == old_values
+    assert not (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).exists()
+    assert not list(run_root.glob(".calibration-promotion-*"))
+
+
+def test_committed_promotion_recovery_keeps_one_complete_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        run_root,
+        attempt_id,
+        target_id,
+        transaction_id,
+        promotions,
+        _old_values,
+        new_values,
+    ) = _promotion_recovery_fixture(tmp_path)
+    original_atomic_write = attempt_module.atomic_write_json
+
+    def interrupt_after_commit(path: str | Path, value, **kwargs):
+        result = original_atomic_write(path, value, **kwargs)
+        if (
+            Path(path) == run_root / attempt_module.PROMOTION_TRANSACTION_FILE
+            and value.get("phase") == "committed"
+        ):
+            raise _SimulatedPromotionProcessLoss
+        return result
+
+    monkeypatch.setattr(attempt_module, "atomic_write_json", interrupt_after_commit)
+    with pytest.raises(_SimulatedPromotionProcessLoss):
+        attempt_module._transactional_replace(
+            run_root,
+            promotions,
+            attempt_id=attempt_id,
+            target_id=target_id,
+            transaction_id=transaction_id,
+        )
+    monkeypatch.setattr(attempt_module, "atomic_write_json", original_atomic_write)
+
+    recovered = promote_calibration_attempt(run_root, attempt_id)
+
+    assert recovered is not None
+    assert recovered["status"] == "promoted"
+    targets = [target for _source, target in promotions]
+    assert _promotion_recovery_values(targets) == new_values
+    assert not (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).exists()
+    assert not list(run_root.glob(".calibration-promotion-*"))
+
+
+def test_promotion_os_error_rolls_back_before_returning_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        run_root,
+        attempt_id,
+        target_id,
+        transaction_id,
+        promotions,
+        old_values,
+        _new_values,
+    ) = _promotion_recovery_fixture(tmp_path)
+    original_replace = attempt_module._replace_promotion_path
+    replacement_count = 0
+
+    def fail_after_first_install(source: Path, destination: Path) -> None:
+        nonlocal replacement_count
+        original_replace(source, destination)
+        replacement_count += 1
+        if replacement_count == 8:
+            raise OSError("injected promotion replacement failure")
+
+    monkeypatch.setattr(
+        attempt_module, "_replace_promotion_path", fail_after_first_install
+    )
+    with pytest.raises(OSError, match="injected promotion replacement failure"):
+        attempt_module._transactional_replace(
+            run_root,
+            promotions,
+            attempt_id=attempt_id,
+            target_id=target_id,
+            transaction_id=transaction_id,
+        )
+
+    targets = [target for _source, target in promotions]
+    assert _promotion_recovery_values(targets) == old_values
+    assert not (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).exists()
+    assert not list(run_root.glob(".calibration-promotion-*"))
+
+
+def test_promotion_never_clobbers_a_target_that_appears_during_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        run_root,
+        attempt_id,
+        target_id,
+        transaction_id,
+        promotions,
+        _old_values,
+        _new_values,
+    ) = _promotion_recovery_fixture(tmp_path)
+    raced_source, raced_target = promotions[1]
+    raced_target.unlink()
+    original_replace = attempt_module._replace_promotion_path
+    injected = False
+
+    def occupy_target_before_install(source: Path, destination: Path) -> None:
+        nonlocal injected
+        if source == raced_source and destination == raced_target and not injected:
+            raced_target.write_text("unrelated-raced-generation")
+            injected = True
+        original_replace(source, destination)
+
+    monkeypatch.setattr(
+        attempt_module,
+        "_replace_promotion_path",
+        occupy_target_before_install,
+    )
+    with pytest.raises(ValueError, match="installed artifact changed"):
+        attempt_module._transactional_replace(
+            run_root,
+            promotions,
+            attempt_id=attempt_id,
+            target_id=target_id,
+            transaction_id=transaction_id,
+        )
+
+    assert injected is True
+    assert raced_target.read_text() == "unrelated-raced-generation"
+    assert (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).is_file()
+
+    monkeypatch.setattr(
+        attempt_module,
+        "_replace_promotion_path",
+        original_replace,
+    )
+    raced_target.unlink()
+    attempt_module._recover_pending_calibration_promotion(run_root)
+
+    assert not raced_target.exists()
+    assert not (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).exists()
+    assert not list(run_root.glob(".calibration-promotion-*"))
+
+
+def test_promotion_rollback_never_clobbers_a_target_that_reappears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        run_root,
+        attempt_id,
+        target_id,
+        transaction_id,
+        promotions,
+        _old_values,
+        _new_values,
+    ) = _promotion_recovery_fixture(tmp_path)
+    original_replace = attempt_module._replace_promotion_path
+    replacement_count = 0
+
+    def interrupt_after_first_install(source: Path, destination: Path) -> None:
+        nonlocal replacement_count
+        original_replace(source, destination)
+        replacement_count += 1
+        if replacement_count == 8:
+            raise _SimulatedPromotionProcessLoss
+
+    monkeypatch.setattr(
+        attempt_module,
+        "_replace_promotion_path",
+        interrupt_after_first_install,
+    )
+    with pytest.raises(_SimulatedPromotionProcessLoss):
+        attempt_module._transactional_replace(
+            run_root,
+            promotions,
+            attempt_id=attempt_id,
+            target_id=target_id,
+            transaction_id=transaction_id,
+        )
+
+    _staging_root, backup_root = attempt_module._promotion_transaction_roots(
+        run_root,
+        attempt_id=attempt_id,
+        transaction_id=transaction_id,
+    )
+    raced_target = promotions[0][1]
+    raced = False
+
+    def occupy_target_before_restore(source: Path, destination: Path) -> None:
+        nonlocal raced
+        if source == backup_root / "0" and destination == raced_target and not raced:
+            destination.write_text("unrelated-raced-generation")
+            raced = True
+        original_replace(source, destination)
+
+    monkeypatch.setattr(
+        attempt_module,
+        "_replace_promotion_path",
+        occupy_target_before_restore,
+    )
+    with pytest.raises(FileExistsError):
+        attempt_module._recover_pending_calibration_promotion(run_root)
+
+    assert raced is True
+    assert raced_target.read_text() == "unrelated-raced-generation"
+    assert (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).is_file()
+
+    raced_target.unlink()
+    monkeypatch.setattr(
+        attempt_module,
+        "_replace_promotion_path",
+        original_replace,
+    )
+    attempt_module._recover_pending_calibration_promotion(run_root)
+    assert not (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).exists()
+    assert not list(run_root.glob(".calibration-promotion-*"))
+
+
+def test_promotion_recovery_rejects_duplicate_journal_keys(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    journal_path = run_root / attempt_module.PROMOTION_TRANSACTION_FILE
+    journal_path.write_text(
+        "{"
+        '"schema_version":"calibration_promotion_transaction.v1",'
+        '"schema_version":"calibration_promotion_transaction.v1"'
+        "}"
+    )
+
+    with pytest.raises(ValueError, match="duplicate key 'schema_version'"):
+        attempt_module._recover_pending_calibration_promotion(run_root)
+
+    assert journal_path.is_file()
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
+def test_promotion_control_json_rejects_nonstandard_numbers(
+    tmp_path: Path,
+    token: str,
+) -> None:
+    control_path = tmp_path / "promotion.json"
+    control_path.write_text(f'{{"value":{token}}}')
+
+    with pytest.raises(ValueError, match=f"non-standard number {token}"):
+        attempt_module._read_promotion_control_json(control_path, label="status")
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
+def test_promotion_journal_rejects_nonstandard_numbers(
+    tmp_path: Path,
+    token: str,
+) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    journal_path = run_root / attempt_module.PROMOTION_TRANSACTION_FILE
+    journal_path.write_text(f'{{"schema_version":{token}}}')
+
+    with pytest.raises(ValueError, match=f"non-standard number {token}"):
+        attempt_module._recover_pending_calibration_promotion(run_root)
+
+    assert journal_path.is_file()
+
+
+def test_promotion_staging_is_fsynced_before_journal_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        run_root,
+        attempt_id,
+        target_id,
+        transaction_id,
+        promotions,
+        old_values,
+        _new_values,
+    ) = _promotion_recovery_fixture(tmp_path)
+
+    def fail_staging_fsync(_staging_root: Path) -> None:
+        raise OSError("injected staged-tree fsync failure")
+
+    monkeypatch.setattr(
+        attempt_module,
+        "_fsync_promotion_tree",
+        fail_staging_fsync,
+    )
+
+    with pytest.raises(OSError, match="injected staged-tree fsync failure"):
+        attempt_module._transactional_replace(
+            run_root,
+            promotions,
+            attempt_id=attempt_id,
+            target_id=target_id,
+            transaction_id=transaction_id,
+        )
+
+    targets = [target for _source, target in promotions]
+    assert _promotion_recovery_values(targets) == old_values
+    assert not (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).exists()
+    assert not list(run_root.glob(".calibration-promotion-*.bak"))
+
+
+def test_prepared_recovery_removes_new_artifacts_that_had_no_prior_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        run_root,
+        attempt_id,
+        target_id,
+        transaction_id,
+        promotions,
+        old_values,
+        _new_values,
+    ) = _promotion_recovery_fixture(tmp_path)
+    absent_indices = {1, 2}
+    for index in absent_indices:
+        promotions[index][1].unlink()
+    original_replace = attempt_module._replace_promotion_path
+    replacement_count = 0
+
+    def interrupt_after_all_installs(source: Path, destination: Path) -> None:
+        nonlocal replacement_count
+        original_replace(source, destination)
+        replacement_count += 1
+        if replacement_count == 12:
+            raise _SimulatedPromotionProcessLoss
+
+    monkeypatch.setattr(
+        attempt_module, "_replace_promotion_path", interrupt_after_all_installs
+    )
+    with pytest.raises(_SimulatedPromotionProcessLoss):
+        attempt_module._transactional_replace(
+            run_root,
+            promotions,
+            attempt_id=attempt_id,
+            target_id=target_id,
+            transaction_id=transaction_id,
+        )
+    monkeypatch.setattr(attempt_module, "_replace_promotion_path", original_replace)
+
+    attempt_module._recover_pending_calibration_promotion(run_root)
+
+    for index, (_source, target) in enumerate(promotions):
+        if index in absent_indices:
+            assert not target.exists()
+        elif index == 5:
+            assert (target / "marker.txt").read_text() == old_values[index]
+        elif index == 6:
+            assert json.loads(target.read_text())["marker"] == old_values[index]
+        else:
+            assert target.read_text() == old_values[index]
+    assert not (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).exists()
+    assert not list(run_root.glob(".calibration-promotion-*"))
+
+
+def test_promotion_recovery_fails_closed_before_mutation_on_changed_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        run_root,
+        attempt_id,
+        target_id,
+        transaction_id,
+        promotions,
+        _old_values,
+        _new_values,
+    ) = _promotion_recovery_fixture(tmp_path)
+    original_replace = attempt_module._replace_promotion_path
+    replacement_count = 0
+
+    def interrupt_after_first_install(source: Path, destination: Path) -> None:
+        nonlocal replacement_count
+        original_replace(source, destination)
+        replacement_count += 1
+        if replacement_count == 8:
+            raise _SimulatedPromotionProcessLoss
+
+    monkeypatch.setattr(
+        attempt_module,
+        "_replace_promotion_path",
+        interrupt_after_first_install,
+    )
+    with pytest.raises(_SimulatedPromotionProcessLoss):
+        attempt_module._transactional_replace(
+            run_root,
+            promotions,
+            attempt_id=attempt_id,
+            target_id=target_id,
+            transaction_id=transaction_id,
+        )
+    monkeypatch.setattr(attempt_module, "_replace_promotion_path", original_replace)
+    _staging_root, backup_root = attempt_module._promotion_transaction_roots(
+        run_root,
+        attempt_id=attempt_id,
+        transaction_id=transaction_id,
+    )
+    (backup_root / "1").write_text("tampered")
+    before = [
+        attempt_module._promotion_path_evidence(path)
+        if attempt_module._promotion_path_exists(path)
+        else None
+        for path in [
+            *[target for _source, target in promotions],
+            *[backup_root / str(index) for index in range(len(promotions))],
+        ]
+    ]
+
+    with pytest.raises(ValueError, match="backup artifact changed"):
+        attempt_module._recover_pending_calibration_promotion(run_root)
+
+    after = [
+        attempt_module._promotion_path_evidence(path)
+        if attempt_module._promotion_path_exists(path)
+        else None
+        for path in [
+            *[target for _source, target in promotions],
+            *[backup_root / str(index) for index in range(len(promotions))],
+        ]
+    ]
+    assert after == before
+    assert (run_root / attempt_module.PROMOTION_TRANSACTION_FILE).is_file()

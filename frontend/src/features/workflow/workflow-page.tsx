@@ -268,12 +268,20 @@ export function WorkflowPage() {
         : "The calibration snapshot is selected, but its saved automatic timing policy is not configured."
   const bopComplete = artifactComplete(overview.data, "bop/bop_export_manifest.json")
   const requestedAnnotationMode = runConfig?.bop.annotation_mode
-  const annotationComplete = requestedAnnotationMode === "none"
-    ? bopComplete
-    : Boolean(
-      annotationSetup.data?.current_output?.verified
-      && annotationSetup.data.current_output.mode === requestedAnnotationMode,
-    )
+  const requestedAnnotationModeSupported = requestedAnnotationMode === "none"
+    || requestedAnnotationMode === "pose"
+    || requestedAnnotationMode === "pose_and_masks"
+  const currentAnnotationOutput = annotationSetup.data?.current_output
+  const annotationComplete = requestedAnnotationModeSupported && (
+    requestedAnnotationMode === "none"
+      ? bopComplete
+      : Boolean(
+        annotationSetup.data?.configured_mode === requestedAnnotationMode
+        && currentAnnotationOutput?.verified === true
+        && currentAnnotationOutput.mode === requestedAnnotationMode
+        && (requestedAnnotationMode !== "pose_and_masks" || currentAnnotationOutput.evaluation_ready === true),
+      )
+  )
 
   const calibrationRequirements: WorkflowRequirement[] = [
     { id: "config", label: "Run configuration", description: configSaved ? "The run configuration is saved." : "Save the run and camera configuration first.", status: configSaved ? "met" : "missing", onFix: () => selectStep("configure"), fixLabel: "Open step 1" },
@@ -302,7 +310,7 @@ export function WorkflowPage() {
   if (["queued", "running", "canceling"].includes(datasetProcessingJobStatus ?? "")) datasetStatuses[4] = "running"
   if (["failed", "canceled", "cancelled"].includes(datasetProcessingJobStatus ?? "") && !bopComplete) datasetStatuses[4] = "blocked"
   const datasetSteps: WorkflowStepDefinition[] = datasetOutline.map((title, index) => ({
-    id: ["configure", "template", "readiness", "capture", "sync", "export"][index], number: index + 1, title, summary: ["Reuse calibration that matches the selected cameras.", "Bind known object poses to the physical scene.", "Resolve all blockers in one place.", "Open cameras and authorize supervised robot motion.", "Synchronize, verify, rectify, and write the base BOP dataset.", "Optionally add pose or pose-and-mask annotations."][index], status: datasetStatuses[index], required: index < 5,
+    id: ["configure", "template", "readiness", "capture", "sync", "export"][index], number: index + 1, title, summary: ["Reuse calibration that matches the selected cameras.", "Bind known object poses to the physical scene.", "Resolve all blockers in one place.", "Open cameras and authorize supervised robot motion.", "Synchronize, verify, rectify, and write the base BOP dataset.", "Review or complete the annotation outcome configured in step 1."][index], status: datasetStatuses[index], required: index < 5,
   }))
 
   if (page === "calibration") return <JourneyShell journey="calibration" steps={calibrationSteps} selectedStep={selectedStep} onSelectStep={selectStep}>
@@ -359,8 +367,8 @@ export function WorkflowPage() {
         <DatasetProcessing runRoot={selectedRun} ready={datasetReady} captureComplete={captureComplete} syncComplete={syncComplete} syncQualityComplete={syncQualityComplete} calibrationComplete={rectificationComplete} exportComplete={bopComplete} onReviewReadiness={() => selectStep("readiness")} onJobStatusChange={setDatasetProcessingJobStatus} />
       </WorkflowStepCard>
 
-      <WorkflowStepCard id="export" number={6} title="Add optional BOP ground-truth evidence" description="After the base image/model export is verified, optionally add pose-only or rendered pose-and-mask annotations for this run." status={datasetStatuses[5]} required={false} help="The base BOP export is already a portable pose-estimation input. Pose + masks is optional and enables the Inspect page to evaluate an already compatible BOP19 result CSV.">
-        <Card className={bopComplete ? "border-success/35 bg-success/5" : "border-dashed"}><CardContent className="flex flex-col gap-4 py-5 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">{bopComplete ? "BOP image/model export is ready" : "BOP export has not completed"}</div><p className="mt-1 text-xs text-muted-foreground">{bopComplete ? "The base export has populated calibrated scenes, models, and object targets. You can finish here, add pose-only ground truth, or add rendered poses and masks for Inspect metrics." : "Use the processing job in step 5. It validates calibration, rectifies frames, copies models, and writes the base BOP scenes before optional ground-truth generation."}</p></div>{bopComplete ? <Button asChild variant="outline"><Link to="/cell">Review dataset in Cell View<ArrowRight aria-hidden="true" /></Link></Button> : <Button type="button" variant="outline" onClick={() => selectStep("sync")}>Open processing step</Button>}</CardContent></Card>
+      <WorkflowStepCard id="export" number={6} title="Add optional BOP ground-truth evidence" description="After the base image/model export is verified, review or complete the annotation outcome already configured in step 1." status={datasetStatuses[5]} required={false} help="The base BOP export is a complete acquisition outcome. Only the verified pose_and_masks product enables Inspect evaluation of an immutable compatible BOP19 result CSV.">
+        <Card className={bopComplete ? "border-success/35 bg-success/5" : "border-dashed"}><CardContent className="flex flex-col gap-4 py-5 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">{bopComplete ? "BOP image/model export is ready" : "BOP export has not completed"}</div><p className="mt-1 text-xs text-muted-foreground">{bopComplete ? "The base export has populated calibrated scenes, models, and object targets. The run-owned annotation outcome configured in step 1 is shown below and is now read-only for this acquired run; start a fresh run if a different outcome is required. Any generation request revalidates the exact configured mode." : "Use the processing job in step 5. It validates calibration, rectifies frames, copies models, and writes the base BOP scenes before optional ground-truth generation."}</p></div>{bopComplete ? <Button asChild variant="outline"><Link to="/cell">Review dataset in Cell View<ArrowRight aria-hidden="true" /></Link></Button> : <Button type="button" variant="outline" onClick={() => selectStep("sync")}>Open processing step</Button>}</CardContent></Card>
         <BopGroundTruthGeneration runRoot={selectedRun} bopExportComplete={bopComplete} />
       </WorkflowStepCard>
     </JourneyShell>

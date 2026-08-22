@@ -902,7 +902,7 @@ def estimate_sensor_time_offset(
     boundary_hit = any(
         math.isclose(value, min(values), abs_tol=1e-9)
         or math.isclose(value, max(values), abs_tol=1e-9)
-        for value in fold_candidate_offsets
+        for value in [candidate_offset_ms, *fold_candidate_offsets]
     )
     tuning_improvement = _improvement(zero, best)
     fold_selected_records = [

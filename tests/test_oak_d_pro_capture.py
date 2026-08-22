@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import signal
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
+
+import scripts.capture_luxonis_720p as oak_capture_cli
 
 from posetestbot.io.artifacts import DEPTH_DIR, FRAME_METADATA_JSONL, RGB_DIR
 from posetestbot.sensors.oak_d_pro import (
     OAKDProPreviewStream,
     OAKDProCaptureError,
     TIMESTAMP_SOURCE,
+    _next_sync_message,
     camera_intrinsics_from_matrix,
     capture_oak_d_pro_rgbd,
     dai_timestamp_ns,
@@ -179,6 +184,76 @@ def test_capture_wraps_depthai_device_open_failures(tmp_path: Path) -> None:
         assert "No available devices" in str(exc)
     else:
         raise AssertionError("device-open failure was not wrapped")
+
+
+def test_supervised_oak_queue_poll_stops_without_blocking_get() -> None:
+    class Queue:
+        def __init__(self) -> None:
+            self.try_calls = 0
+            self.get_calls = 0
+
+        def tryGet(self):
+            self.try_calls += 1
+            return None
+
+        def get(self):
+            self.get_calls += 1
+            raise AssertionError("supervised capture must not enter blocking get")
+
+    queue = Queue()
+    stop_checks = 0
+
+    def stop_requested() -> bool:
+        nonlocal stop_checks
+        stop_checks += 1
+        return stop_checks >= 2
+
+    message = _next_sync_message(
+        queue,
+        stop_requested=stop_requested,
+        pipeline_running=lambda: True,
+    )
+
+    assert message is None
+    assert queue.try_calls == 1
+    assert queue.get_calls == 0
+
+
+def test_oak_cli_sigterm_handler_sets_adapter_stop_callback(monkeypatch) -> None:
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def fake_capture(_output_path, **kwargs):
+        handler = signal.getsignal(signal.SIGTERM)
+        assert callable(handler)
+        handler(signal.SIGTERM, None)
+        assert kwargs["stop_requested"]() is True
+        return {
+            "status": "succeeded",
+            "sensor_id": "oak-1",
+            "frame_count": 0,
+            "rejected_pairs": 0,
+            "preview": False,
+        }
+
+    monkeypatch.setattr(
+        oak_capture_cli,
+        "parse_args",
+        lambda: SimpleNamespace(
+            test=False,
+            output_path="unused",
+            device="oak-1",
+            fps=6,
+            max_frames=0,
+            warmup_frames=0,
+            preview=False,
+            max_rgb_depth_delta_ms=30.0,
+            print_json=False,
+        ),
+    )
+    monkeypatch.setattr(oak_capture_cli, "capture_oak_d_pro_rgbd", fake_capture)
+
+    assert oak_capture_cli.main() == 0
+    assert signal.getsignal(signal.SIGTERM) == previous_sigterm
 
 
 def test_oak_preview_uses_nonblocking_latest_frame_queue_and_closes() -> None:

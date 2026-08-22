@@ -1,5 +1,7 @@
 import argparse
+import signal
 import sys
+import threading
 
 from posetestbot.sensors.oak_d_pro import (
     DEFAULT_RGB_DEPTH_DELTA_NS,
@@ -80,20 +82,31 @@ def main() -> int:
         )
         return 2
 
+    stop_requested = threading.Event()
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def request_graceful_stop(_signum, _frame) -> None:
+        stop_requested.set()
+
+    signal.signal(signal.SIGTERM, request_graceful_stop)
     try:
-        summary = capture_oak_d_pro_rgbd(
-            args.output_path,
-            device_id=args.device,
-            fps=args.fps,
-            max_frames=args.max_frames,
-            warmup_frames=args.warmup_frames,
-            preview=args.preview,
-            record=not args.test,
-            max_rgb_depth_delta_ns=int(args.max_rgb_depth_delta_ms * 1_000_000),
-        )
-    except (OAKDProCaptureError, ValueError) as exc:
-        print(f"capture_luxonis_720p.py: {exc}", file=sys.stderr)
-        return 2
+        try:
+            summary = capture_oak_d_pro_rgbd(
+                args.output_path,
+                device_id=args.device,
+                fps=args.fps,
+                max_frames=args.max_frames,
+                warmup_frames=args.warmup_frames,
+                preview=args.preview,
+                record=not args.test,
+                max_rgb_depth_delta_ns=int(args.max_rgb_depth_delta_ms * 1_000_000),
+                stop_requested=stop_requested.is_set,
+            )
+        except (OAKDProCaptureError, ValueError) as exc:
+            print(f"capture_luxonis_720p.py: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
     print(
         "OAK-D Pro capture: "

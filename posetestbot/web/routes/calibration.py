@@ -17,6 +17,7 @@ from posetestbot.calibration.attempts import (
     record_attempt_job_submission_failure,
 )
 from posetestbot.jobs.runner import ResourceBusyError
+from posetestbot.pipeline.run_config import run_config_lock
 from posetestbot.web.paths import APP_ROOT
 from posetestbot.web.runtime import job_runner
 
@@ -101,9 +102,7 @@ def calibration_attempt_create_endpoint():
                     "mode": attempt["mode"],
                     "sensor_keys": list(attempt["sensor_keys"]),
                     "target_id": attempt["target_id"],
-                    "synchronization_policy": attempt[
-                        "synchronization_policy"
-                    ],
+                    "synchronization_policy": attempt["synchronization_policy"],
                 },
             )
         except ResourceBusyError as exc:
@@ -153,10 +152,9 @@ def calibration_attempt_endpoint(attempt_id: str):
                 job = None
             if job is not None:
                 payload["job"] = job.to_dict()
-                if (
-                    job.status in {"failed", "canceled"}
-                    and payload["progress"].get("status") in {"queued", "running"}
-                ):
+                if job.status in {"failed", "canceled"} and payload["progress"].get(
+                    "status"
+                ) in {"queued", "running"}:
                     payload["progress"] = {
                         **payload["progress"],
                         "status": "failed",
@@ -173,10 +171,9 @@ def calibration_attempt_endpoint(attempt_id: str):
                 promotion_job = None
             if promotion_job is not None:
                 payload["promotion_job"] = promotion_job.to_dict()
-                if (
-                    promotion_job.status in {"failed", "canceled"}
-                    and promotion.get("status") in {"queued", "running"}
-                ):
+                if promotion_job.status in {"failed", "canceled"} and promotion.get(
+                    "status"
+                ) in {"queued", "running"}:
                     payload["promotion"] = {
                         **promotion,
                         "status": "failed",
@@ -200,81 +197,137 @@ def calibration_attempt_promote_endpoint(attempt_id: str):
         selections = value.get("candidate_ids", value.get("selections"))
         if selections is not None and not isinstance(selections, dict):
             raise ValueError("candidate_ids must be a sensor-key mapping")
-        existing_attempt = load_calibration_attempt(run_root, attempt_id)
-        existing_promotion = existing_attempt.get("promotion")
-        existing_job_id = (
-            existing_promotion.get("job_id")
-            if isinstance(existing_promotion, dict)
-            else None
-        )
-        if (
-            existing_job_id
-            and existing_promotion.get("status") in {"queued", "running"}
-        ):
-            try:
-                existing_job = job_runner.get(str(existing_job_id))
-            except (AttributeError, KeyError):
-                existing_job = None
-            if existing_job is not None and existing_job.status in {
-                "failed",
-                "canceled",
+        # Keep approval creation, queue submission, and durable job binding on
+        # one run lock. The worker may start immediately, but its promotion
+        # process blocks on this same lock until promotion.json names the job.
+        with run_config_lock(run_root) as locked_root:
+            existing_attempt = load_calibration_attempt(locked_root, attempt_id)
+            existing_promotion = existing_attempt.get("promotion")
+            existing_job_id = (
+                existing_promotion.get("job_id")
+                if isinstance(existing_promotion, dict)
+                else None
+            )
+            if existing_job_id and existing_promotion.get("status") in {
+                "queued",
+                "running",
             }:
+                try:
+                    existing_job = job_runner.get(str(existing_job_id))
+                except (AttributeError, KeyError):
+                    existing_job = None
+                if existing_job is not None and existing_job.status in {
+                    "failed",
+                    "canceled",
+                }:
+                    record_attempt_job_submission_failure(
+                        locked_root,
+                        attempt_id,
+                        kind="promotion",
+                        error=RuntimeError(
+                            existing_job.message
+                            or f"Promotion job {existing_job.status}."
+                        ),
+                    )
+            promotion = create_promotion_request(
+                locked_root,
+                attempt_id,
+                selections=selections,
+                operator=value.get("operator"),
+            )
+            try:
+                job = job_runner.submit(
+                    name=f"Promote calibration attempt {attempt_id}",
+                    command=[
+                        "uv",
+                        "run",
+                        "python",
+                        "scripts/run_calibration_attempt.py",
+                        locked_root.as_posix(),
+                        "--attempt-id",
+                        attempt_id,
+                        "--promote",
+                    ],
+                    cwd=APP_ROOT,
+                    resources=["cpu", "disk_io"],
+                    scope_kind="run",
+                    run_root=locked_root,
+                    parameters={
+                        "calibration_attempt_promotion": attempt_id,
+                        "run_root": locked_root.as_posix(),
+                        "selections": dict(promotion["selections"]),
+                    },
+                )
+            except (OSError, ResourceBusyError, RuntimeError, ValueError) as exc:
                 record_attempt_job_submission_failure(
-                    run_root,
+                    locked_root,
                     attempt_id,
                     kind="promotion",
-                    error=RuntimeError(
-                        existing_job.message
-                        or f"Promotion job {existing_job.status}."
-                    ),
+                    error=exc,
                 )
-        promotion = create_promotion_request(
-            run_root,
-            attempt_id,
-            selections=selections,
-            operator=value.get("operator"),
-        )
-        try:
-            job = job_runner.submit(
-                name=f"Promote calibration attempt {attempt_id}",
-                command=[
-                    "uv",
-                    "run",
-                    "python",
-                    "scripts/run_calibration_attempt.py",
-                    str(run_root),
-                    "--attempt-id",
+                raise
+            try:
+                record_attempt_job(
+                    locked_root,
                     attempt_id,
-                    "--promote",
-                ],
-                cwd=APP_ROOT,
-                resources=["cpu", "disk_io"],
-                scope_kind="run",
-                run_root=run_root,
-                parameters={
-                    "calibration_attempt_promotion": attempt_id,
-                    "run_root": str(run_root),
-                    "selections": dict(promotion["selections"]),
-                },
-            )
-        except ResourceBusyError as exc:
-            record_attempt_job_submission_failure(
-                run_root,
-                attempt_id,
-                kind="promotion",
-                error=exc,
-            )
-            raise
-        record_attempt_job(
-            run_root,
-            attempt_id,
-            job_id=job.id,
-            kind="promotion",
-        )
+                    job_id=job.id,
+                    kind="promotion",
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                failure_recorded = False
+                cancellation_terminal = False
+                secondary_errors: list[str] = []
+                try:
+                    record_attempt_job_submission_failure(
+                        locked_root,
+                        attempt_id,
+                        kind="promotion",
+                        error=exc,
+                    )
+                    failure_recorded = True
+                except (OSError, RuntimeError, ValueError) as record_error:
+                    secondary_errors.append(
+                        "promotion failure evidence could not be written: "
+                        f"{type(record_error).__name__}: {record_error}"
+                    )
+                try:
+                    canceled = job_runner.cancel(job.id)
+                    cancellation_terminal = canceled.status in {
+                        "failed",
+                        "canceled",
+                    }
+                    if not cancellation_terminal:
+                        secondary_errors.append(
+                            "submitted job did not reach a terminal state: "
+                            f"{canceled.status}"
+                        )
+                except (
+                    AttributeError,
+                    KeyError,
+                    OSError,
+                    RuntimeError,
+                    ValueError,
+                ) as cancel_error:
+                    secondary_errors.append(
+                        "submitted job could not be canceled: "
+                        f"{type(cancel_error).__name__}: {cancel_error}"
+                    )
+                detail = f"{type(exc).__name__}: {exc}"
+                if secondary_errors:
+                    detail += "; " + "; ".join(secondary_errors)
+                if not failure_recorded and not cancellation_terminal:
+                    raise RuntimeError(
+                        "Promotion job binding failed and neither durable failure "
+                        f"evidence nor terminal cancellation was confirmed: {detail}"
+                    ) from exc
+                raise RuntimeError(
+                    f"Promotion job binding failed; promotion was stopped: {detail}"
+                ) from exc
     except (
         FileNotFoundError,
         OSError,
         ResourceBusyError,
+        RuntimeError,
         ValueError,
     ) as exc:
         return _error_response(exc)

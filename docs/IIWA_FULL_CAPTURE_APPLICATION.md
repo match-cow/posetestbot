@@ -108,10 +108,11 @@ bounded by that A1 limit.
 
 Calibration capture is capped at 0.03 m/s. Object-dataset configuration is
 bounded at 1.00 m/s by the current plan and receiver. The separately
-acknowledged Dashboard manual motion-test request is also structured and uses
-the fixed reviewed test velocity. These software limits are not safety-rated.
-Record the exact installed model and verify the actual speed in Workbench/T1.
-The product values are
+acknowledged commissioning-only `POST /robot/commands` motion-test request is
+also structured and uses the fixed reviewed test velocity; it is not exposed as
+a Dashboard quick control. These software limits are not safety-rated. Record
+the exact installed model and verify the actual speed in Workbench/T1. The
+product values are
 available in KUKA's official
 [LBR iiwa 7 R800 data sheet](https://www.kuka.com/-/media/kuka-downloads/imported/8350ff3ca11642998dbdc81dcc2ed44c/0000246832_pl.pdf)
 and

@@ -14,6 +14,8 @@ from posetestbot.calibration.profiles import (
     TransformFrame,
     blenderproc_camera_transform_map_from_profiles,
     load_profile,
+    profile_from_dict,
+    profile_to_dict,
     rectified_intrinsics_from_native,
     write_profile,
     write_profile_collection,
@@ -105,6 +107,48 @@ def test_calibration_profile_round_trips_with_baseline_json_keys(
     assert loaded.rectified_valid_roi == tuple(
         value["intrinsics"]["rectified"]["valid_roi"]
     )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda value: value["quality"].__setitem__("num_observations", True),
+            "quality.num_observations must be an integer",
+        ),
+        (
+            lambda value: value["quality"].__setitem__("num_inliers", "11"),
+            "quality.num_inliers must be an integer",
+        ),
+        (
+            lambda value: value["intrinsics"]["native"].__setitem__(
+                "distortion", [0.1]
+            ),
+            "distortion must contain exactly 5 numbers",
+        ),
+        (
+            lambda value: value["intrinsics"]["native"]["cam_K"].__setitem__(0, "1.0"),
+            r"cam_K\[0\] must be a number",
+        ),
+        (
+            lambda value: value["intrinsics"]["native"].pop("width"),
+            "intrinsics.native fields are invalid",
+        ),
+        (
+            lambda value: value.__setitem__("profile_id", 123),
+            "profile_id must be a string",
+        ),
+    ],
+)
+def test_current_profile_reader_rejects_coerced_or_incomplete_json(
+    mutate,
+    message: str,
+) -> None:
+    value = profile_to_dict(static_profile())
+    mutate(value)
+
+    with pytest.raises(ValueError, match=message):
+        profile_from_dict(value)
 
 
 def test_nonzero_inverse_sdk_distortion_round_trips_without_opencv_rectification(
@@ -242,6 +286,40 @@ def test_blenderproc_transform_map_requires_complete_run_mount_mapping() -> None
                 ),
             ),
             "depth_scale_to_mm",
+        ),
+        (
+            replace(
+                static_profile(),
+                rectified_intrinsics=replace(
+                    static_profile().rectified_intrinsics,
+                    cam_k=(-1.0, 0.0, 2.0, 0.0, 3.1, 4.0, 0.0, 0.0, 1.0),
+                ),
+            ),
+            "focal lengths",
+        ),
+        (
+            replace(
+                static_profile(),
+                rectified_intrinsics=replace(
+                    static_profile().rectified_intrinsics,
+                    cam_k=(1.1, 0.0, 2.0, 0.0, 3.1, 4.0, 0.0, 0.0, 2.0),
+                ),
+            ),
+            "bottom row",
+        ),
+        (
+            replace(
+                static_profile(),
+                rectified_intrinsics=replace(
+                    static_profile().rectified_intrinsics,
+                    depth_scale_to_mm=2.0,
+                ),
+            ),
+            "preserve native depth scale",
+        ),
+        (
+            replace(static_profile(), rectified_valid_roi=(0, 0, 0, 100)),
+            "width and height must be positive",
         ),
         (
             replace(

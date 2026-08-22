@@ -15,7 +15,13 @@ from posetestbot.calibration.rectification import (
     rectify_run,
     validate_rectification_provenance,
 )
-from posetestbot.io.artifacts import CAMERA_RECTIFICATION_REPORT, MATCH_ROBOT_EE_POSES
+from posetestbot.io.artifacts import (
+    CAMERA_RECTIFICATION_REPORT,
+    DEPTH_DIR,
+    FRAME_METADATA_JSONL,
+    MATCH_ROBOT_EE_POSES,
+    RGB_DIR,
+)
 from posetestbot.pipeline.run_config import (
     SensorRunConfig,
     create_run_config,
@@ -105,6 +111,7 @@ def test_rectification_is_transactional_non_destructive_and_depth_nearest(
     report_path, report = rectify_run(run_root, [profile])
 
     assert report_path == run_root / CAMERA_RECTIFICATION_REPORT
+    assert report["mode"] == "managed_canonical"
     assert report["sensor_count"] == 1
     assert digest_tree(sensor) == before
     output = run_root / "processed" / "rectified" / sensor.name
@@ -112,10 +119,17 @@ def test_rectification_is_transactional_non_destructive_and_depth_nearest(
         (output / "depth" / "000000.png").as_posix(), cv2.IMREAD_UNCHANGED
     )
     assert set(np.unique(output_depth)).issubset({*np.unique(source_depth), 0})
-    assert json.loads((output / MATCH_ROBOT_EE_POSES).read_text()) == json.loads(
-        (sensor / MATCH_ROBOT_EE_POSES).read_text()
-    )
+    assert (output / MATCH_ROBOT_EE_POSES).read_bytes() == (
+        sensor / MATCH_ROBOT_EE_POSES
+    ).read_bytes()
     metadata = json.loads((output / "frame_metadata.jsonl").read_text())
+    source_metadata = json.loads((sensor / "frame_metadata.jsonl").read_text())
+    assert {key: value for key, value in metadata.items() if key != "derivation"} == (
+        source_metadata
+    )
+    assert metadata["frame_id"] == "000000.png"
+    assert metadata["rgb_path"] == "rgb/000000.png"
+    assert metadata["depth_path"] == "depth/000000.png"
     assert metadata["host_received_timestamp_ns"] == 123
     assert metadata["sensor_timestamp_ns"] == 100
     assert metadata["derivation"]["depth_interpolation"] == "nearest"
@@ -133,6 +147,72 @@ def test_rectification_is_transactional_non_destructive_and_depth_nearest(
     assert (
         provenance["output_fingerprint"] == report["sensors"][0]["output_fingerprint"]
     )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("grayscale_rgb", r"shape \(height, width, 3\|4\)"),
+        ("uint16_rgb", "rgb_image must use uint8"),
+        ("uint8_depth", "depth_image must use uint16"),
+        ("multichannel_depth", "depth_image must have shape"),
+    ],
+)
+def test_rectification_rejects_invalid_rgbd_pixel_contract_before_remap(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    run_root = tmp_path / "run"
+    sensor, profile = rectification_fixture(run_root)
+    rgb_path = sensor / RGB_DIR / "000000.png"
+    depth_path = sensor / DEPTH_DIR / "000000.png"
+    if mutation == "grayscale_rgb":
+        replacement = np.zeros((16, 20), dtype=np.uint8)
+        assert cv2.imwrite(rgb_path.as_posix(), replacement)
+    elif mutation == "uint16_rgb":
+        replacement = np.zeros((16, 20, 3), dtype=np.uint16)
+        assert cv2.imwrite(rgb_path.as_posix(), replacement)
+    elif mutation == "uint8_depth":
+        replacement = np.zeros((16, 20), dtype=np.uint8)
+        assert cv2.imwrite(depth_path.as_posix(), replacement)
+    else:
+        replacement = np.zeros((16, 20, 3), dtype=np.uint16)
+        assert cv2.imwrite(depth_path.as_posix(), replacement)
+
+    with pytest.raises(ValueError, match=message):
+        rectify_run(run_root, [profile])
+
+    assert not (run_root / "processed" / "rectified").exists()
+    assert not (run_root / CAMERA_RECTIFICATION_REPORT).exists()
+
+
+def test_rectification_rejects_corrupt_staged_png_after_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    _sensor, profile = rectification_fixture(run_root)
+    original_imwrite = cv2.imwrite
+    corrupted = False
+
+    def corrupt_first_staged_rgb(path: str, image: np.ndarray) -> bool:
+        nonlocal corrupted
+        result = original_imwrite(path, image)
+        output = Path(path)
+        if not corrupted and output.parent.name == RGB_DIR:
+            output.write_bytes(b"not-a-png")
+            corrupted = True
+        return result
+
+    monkeypatch.setattr(cv2, "imwrite", corrupt_first_staged_rgb)
+
+    with pytest.raises(ValueError, match="Unreadable RGB-D frame pair"):
+        rectify_run(run_root, [profile])
+
+    assert corrupted is True
+    assert not (run_root / "processed" / "rectified").exists()
+    assert not (run_root / CAMERA_RECTIFICATION_REPORT).exists()
 
 
 @pytest.mark.parametrize(
@@ -171,6 +251,213 @@ def test_rectification_refuses_profile_orientation_mismatch(tmp_path: Path) -> N
         rectify_run(run_root, [profile])
 
     assert not (run_root / "processed" / "rectified").exists()
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [FRAME_METADATA_JSONL, MATCH_ROBOT_EE_POSES],
+)
+def test_rectification_requires_synchronized_frame_binding_sidecars(
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    run_root = tmp_path / "run"
+    sensor, profile = rectification_fixture(run_root)
+    (sensor / artifact).unlink()
+
+    with pytest.raises(ValueError, match="Camera artifact must be a regular file"):
+        rectify_run(run_root, [profile])
+
+    assert not (run_root / "processed" / "rectified").exists()
+    assert not (run_root / CAMERA_RECTIFICATION_REPORT).exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("rgb_path", "rgb/not-the-frame.png", "rgb_path must be"),
+        ("depth_path", "depth/not-the-frame.png", "depth_path must be"),
+    ],
+)
+def test_rectification_rejects_frame_metadata_not_bound_to_rgbd(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    run_root = tmp_path / "run"
+    sensor, profile = rectification_fixture(run_root)
+    metadata_path = sensor / FRAME_METADATA_JSONL
+    metadata = json.loads(metadata_path.read_text())
+    metadata[field] = value
+    metadata_path.write_text(json.dumps(metadata) + "\n")
+
+    with pytest.raises(ValueError, match=message):
+        rectify_run(run_root, [profile])
+
+    assert not (run_root / "processed" / "rectified").exists()
+
+
+def test_rectification_rejects_frame_metadata_with_extra_frame_binding(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    sensor, profile = rectification_fixture(run_root)
+    metadata_path = sensor / FRAME_METADATA_JSONL
+    metadata = json.loads(metadata_path.read_text())
+    metadata.update(
+        {
+            "frame_id": "999999.png",
+            "rgb_path": "rgb/999999.png",
+            "depth_path": "depth/999999.png",
+        }
+    )
+    metadata_path.write_text(json.dumps(metadata) + "\n")
+
+    with pytest.raises(ValueError, match="must cover exactly"):
+        rectify_run(run_root, [profile])
+
+    assert not (run_root / "processed" / "rectified").exists()
+
+
+@pytest.mark.parametrize("mutation", ["coverage", "pose"])
+def test_rectification_rejects_invalid_matched_robot_pose_bindings(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    run_root = tmp_path / "run"
+    sensor, profile = rectification_fixture(run_root)
+    matched_path = sensor / MATCH_ROBOT_EE_POSES
+    matched = json.loads(matched_path.read_text())
+    if mutation == "coverage":
+        matched["999999.png"] = matched["000000.png"]
+        message = "must cover exactly"
+    else:
+        matched["000000.png"]["robot_ee_pose"]["C"] = None
+        message = "field C must be finite"
+    matched_path.write_text(json.dumps(matched))
+
+    with pytest.raises(ValueError, match=message):
+        rectify_run(run_root, [profile])
+
+    assert not (run_root / "processed" / "rectified").exists()
+
+
+def test_rectification_requires_every_enabled_sensor_folder(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    _sensor, profile = rectification_fixture(run_root)
+    write_run_config(
+        run_root,
+        create_run_config(
+            run_root=run_root,
+            capture_intent="dataset",
+            bop_annotation_mode="none",
+            sensors=(
+                SensorRunConfig("realsense_d435", "SERIAL-1", "Present"),
+                SensorRunConfig("oak_d_pro", "SERIAL-2", "Missing"),
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        FileNotFoundError,
+        match="luxonis_SERIAL-2",
+    ):
+        rectify_run(run_root, [profile])
+
+    assert not (run_root / "processed" / "rectified").exists()
+
+
+def test_custom_rectification_roots_are_explicitly_unmanaged_and_isolated(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    sensor, profile = rectification_fixture(run_root)
+    diagnostic_output = run_root / "processed" / "diagnostics" / "rectified"
+
+    with pytest.raises(ValueError, match="diagnostic-only"):
+        rectify_run(
+            run_root,
+            [profile],
+            input_root=sensor.parent,
+            output_root=diagnostic_output,
+        )
+    with pytest.raises(ValueError, match="must not write the canonical"):
+        rectify_run(
+            run_root,
+            [profile],
+            input_root=sensor.parent,
+            output_root=run_root / "processed" / "rectified",
+            diagnostic_unmanaged=True,
+        )
+
+    report_path, report = rectify_run(
+        run_root,
+        [profile],
+        input_root=sensor.parent,
+        output_root=diagnostic_output,
+        diagnostic_unmanaged=True,
+    )
+
+    assert report["mode"] == "diagnostic_unmanaged"
+    assert report_path == diagnostic_output / CAMERA_RECTIFICATION_REPORT
+    assert not (run_root / CAMERA_RECTIFICATION_REPORT).exists()
+    assert not (run_root / "processed" / "rectified").exists()
+
+
+@pytest.mark.parametrize(
+    "output_factory",
+    [
+        lambda run_root, _sensor: run_root,
+        lambda _run_root, sensor: sensor.parent,
+        lambda _run_root, sensor: sensor / "derived",
+    ],
+)
+def test_diagnostic_rectification_rejects_destructive_path_overlap(
+    tmp_path: Path,
+    output_factory,
+) -> None:
+    run_root = tmp_path / "run"
+    sensor, profile = rectification_fixture(run_root)
+    raw_sentinel = sensor / RGB_DIR / "000000.png"
+    raw_before = raw_sentinel.read_bytes()
+    output_root = output_factory(run_root, sensor)
+
+    with pytest.raises(ValueError, match="different|overlap|contain the run root"):
+        rectify_run(
+            run_root,
+            [profile],
+            input_root=sensor.parent,
+            output_root=output_root,
+            diagnostic_unmanaged=True,
+            overwrite=True,
+        )
+
+    assert raw_sentinel.read_bytes() == raw_before
+    assert (run_root / "run_config.json").is_file()
+
+
+def test_diagnostic_rectification_never_overwrites_existing_output(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    sensor, profile = rectification_fixture(run_root)
+    output_root = run_root / "processed" / "diagnostics" / "rectified"
+    output_root.mkdir(parents=True)
+    sentinel = output_root / "diagnostic-sentinel.txt"
+    sentinel.write_text("preserve me\n")
+
+    with pytest.raises(ValueError, match="does not overwrite"):
+        rectify_run(
+            run_root,
+            [profile],
+            input_root=sensor.parent,
+            output_root=output_root,
+            diagnostic_unmanaged=True,
+            overwrite=True,
+        )
+
+    assert sentinel.read_text() == "preserve me\n"
 
 
 def test_rectification_refuses_unavailable_forward_projection(

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import signal
 from types import SimpleNamespace
 
 import cv2
 import numpy as np
 import pytest
+
+import scripts.capture_zed_2i as zed_capture_cli
 
 from posetestbot.io.artifacts import CAMERA_JSON, DEPTH_DIR, FRAME_METADATA_JSONL, RGB_DIR
 from posetestbot.sensors.zed_2i import ZED2iCaptureError, capture_zed_2i_rgbd
@@ -177,3 +180,55 @@ def test_zed_capture_wraps_open_error_and_closes_camera(tmp_path) -> None:
 
     assert camera.closed is True
     assert not (tmp_path / RGB_DIR).exists()
+
+
+def test_zed_capture_honors_supervisor_stop_callback(tmp_path) -> None:
+    camera = FakeZEDCamera()
+
+    summary = capture_zed_2i_rgbd(
+        tmp_path,
+        max_frames=0,
+        sl_module=FakeSL(camera),
+        cv2_module=cv2,
+        stop_requested=lambda: camera.grab_index >= 2,
+    )
+
+    assert summary["frame_count"] == 1
+    assert camera.grab_index == 2
+    assert camera.closed is True
+
+
+def test_zed_cli_sigterm_handler_sets_adapter_stop_callback(monkeypatch) -> None:
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def fake_capture(_output_path, **kwargs):
+        handler = signal.getsignal(signal.SIGTERM)
+        assert callable(handler)
+        handler(signal.SIGTERM, None)
+        assert kwargs["stop_requested"]() is True
+        return {
+            "status": "succeeded",
+            "sensor_id": "zed-1",
+            "frame_count": 0,
+            "preview": False,
+        }
+
+    monkeypatch.setattr(
+        zed_capture_cli,
+        "parse_args",
+        lambda: SimpleNamespace(
+            output_path="unused",
+            test=False,
+            device="123",
+            fps=30,
+            max_frames=0,
+            warmup_frames=0,
+            resolution="720p",
+            preview=False,
+            print_json=False,
+        ),
+    )
+    monkeypatch.setattr(zed_capture_cli, "capture_zed_2i_rgbd", fake_capture)
+
+    assert zed_capture_cli.main() == 0
+    assert signal.getsignal(signal.SIGTERM) == previous_sigterm

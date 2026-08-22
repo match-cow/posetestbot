@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import uuid
 from pathlib import Path
 
 import pytest
 
+import posetestbot.pipeline.run_config as run_config_module
 from posetestbot.config import DEFAULT_CAPTURE_VELOCITY_M_S
 from posetestbot.io.artifacts import DATASET_MANIFEST, RUN_CONFIG
 from posetestbot.pipeline.run_config import (
@@ -16,6 +18,7 @@ from posetestbot.pipeline.run_config import (
     SensorRunConfig,
     create_run_config,
     load_run_config_for_run_root,
+    run_config_lock,
     sensor_config_from_mapping,
     sensor_config_from_token,
     sensor_configs_from_status,
@@ -32,6 +35,65 @@ def _create(run_root: Path, **overrides):
         bop_annotation_mode=overrides.pop("bop_annotation_mode", "none"),
         **overrides,
     )
+
+
+@pytest.mark.parametrize("replacement", ["lock", "run_root"])
+def test_run_config_lock_rejects_replaced_lock_or_run_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    original_flock = run_config_module.fcntl.flock
+    replaced = False
+
+    def replace_after_lock(descriptor: int, operation: int) -> None:
+        nonlocal replaced
+        original_flock(descriptor, operation)
+        if operation != run_config_module.fcntl.LOCK_EX or replaced:
+            return
+        replaced = True
+        if replacement == "lock":
+            (run_root / run_config_module.RUN_CONFIG_LOCK).unlink()
+            (run_root / run_config_module.RUN_CONFIG_LOCK).write_text("replacement")
+            return
+        moved = tmp_path / "original-run"
+        run_root.rename(moved)
+        run_root.mkdir()
+        (run_root / run_config_module.RUN_CONFIG_LOCK).write_text("replacement")
+
+    monkeypatch.setattr(run_config_module.fcntl, "flock", replace_after_lock)
+
+    with pytest.raises(RuntimeError, match="changed while acquiring"):
+        with run_config_lock(run_root):
+            pytest.fail("a replaced lock identity must never be yielded")
+
+    assert replaced is True
+    assert os.path.isdir(run_root)
+
+
+def test_run_config_lock_is_reentrant_without_reacquiring_file_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    exclusive_acquisitions = 0
+    original_flock = run_config_module.fcntl.flock
+
+    def count_flock(descriptor: int, operation: int) -> None:
+        nonlocal exclusive_acquisitions
+        if operation == run_config_module.fcntl.LOCK_EX:
+            exclusive_acquisitions += 1
+        original_flock(descriptor, operation)
+
+    monkeypatch.setattr(run_config_module.fcntl, "flock", count_flock)
+
+    with run_config_lock(run_root) as outer_root:
+        with run_config_lock(run_root) as inner_root:
+            assert inner_root == outer_root == run_root.resolve()
+
+    assert exclusive_acquisitions == 1
 
 
 def test_v4_config_is_explicit_and_has_no_generic_pipeline(tmp_path: Path) -> None:

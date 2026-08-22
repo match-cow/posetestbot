@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from posetestbot.bop.evaluation import (
     create_evaluation_request,
@@ -22,6 +23,7 @@ from posetestbot.pipeline.capture_completion import build_capture_completion
 from posetestbot.pipeline.run_config import (
     create_run_config,
     load_run_config_for_run_root,
+    run_config_sha256,
     sensor_config_from_token,
     write_run_config_with_manifest,
 )
@@ -35,15 +37,16 @@ from tests.test_calibration_attempt_promotion import (
 
 
 def _write_current_capture(run_root: Path, run_id: str) -> None:
+    width, height = 1280, 720
     sensor_root = run_root / "realsense_1"
     (sensor_root / "rgb").mkdir(parents=True)
     (sensor_root / "depth").mkdir()
     write_camera_sidecars(
         sensor_root,
         CameraIntrinsics(
-            cam_k=(100.0, 0.0, 4.0, 0.0, 100.0, 4.0, 0.0, 0.0, 1.0),
-            width=8,
-            height=8,
+            cam_k=(1000.0, 0.0, 640.0, 0.0, 1000.0, 360.0, 0.0, 0.0, 1.0),
+            width=width,
+            height=height,
             distortion=(0.0, 0.0, 0.0, 0.0, 0.0),
             depth_scale_to_mm=1.0,
         ),
@@ -53,8 +56,12 @@ def _write_current_capture(run_root: Path, run_id: str) -> None:
     poses = {}
     for index in range(2):
         frame_id = f"{1000 + index * 50}.png"
-        (sensor_root / "rgb" / frame_id).write_bytes(b"rgb")
-        (sensor_root / "depth" / frame_id).write_bytes(b"depth")
+        Image.new("RGB", (width, height), color=(index, 0, 0)).save(
+            sensor_root / "rgb" / frame_id
+        )
+        Image.new("I;16", (width, height), color=index + 1).save(
+            sensor_root / "depth" / frame_id
+        )
         host_received_ns = 1_000_000_000 + index * 50_000_000
         host_wall_ns = 10_000_000_000 + index * 50_000_000
         metadata.append(
@@ -100,6 +107,19 @@ def _write_current_capture(run_root: Path, run_id: str) -> None:
                 "estimated_packets_lost": 0,
             },
         }
+    poses[str(len(poses) - 1)]["stream_end_source_packet"] = {
+        "schema_version": "robot_pose.v1",
+        "packet_kind": "end",
+        "sequence": len(poses),
+        "sender_monotonic_ns": host_received_ns + 1,
+        "sender_wall_timestamp_ms": host_wall_ns // 1_000_000 + 1,
+        "run_id": run_id,
+        "from_frame": "robot_flange",
+        "to_frame": "template_base",
+        "sunrise_reference_frame_path": POSE_TEMPLATE_BASE_SUNRISE_PATH,
+        "sequence_delta": 1,
+        "estimated_packets_lost": 0,
+    }
     (sensor_root / "frame_metadata.jsonl").write_text(
         "".join(json.dumps(record) + "\n" for record in metadata)
     )
@@ -129,19 +149,14 @@ def test_simulated_current_workflows_handoff_from_empty_roots(
 ) -> None:
     """Exercise both guided outcomes without opening hardware or running tools."""
 
-    calibration_root = prepare_promoted_calibration_for_workflow(
-        tmp_path, monkeypatch
-    )
+    calibration_root = prepare_promoted_calibration_for_workflow(tmp_path, monkeypatch)
     assert load_run_config_for_run_root(calibration_root)["schema_version"] == (
         "run_config.v4"
     )
 
     dataset_root = tmp_path / "dataset"
     assert not dataset_root.exists()
-    sensor = sensor_config_from_token(
-        "realsense_d435:1:eye_in_hand:Workflow D435"
-    )
-    sensor = replace(sensor, metadata={"image_size": [8, 8]})
+    sensor = sensor_config_from_token("realsense_d435:1:eye_in_hand:Workflow D435")
     initial = create_run_config(
         run_root=dataset_root,
         capture_intent="dataset",
@@ -196,6 +211,42 @@ def test_simulated_current_workflows_handoff_from_empty_roots(
         _completed_processes(),
     )
     assert completion["status"] == "ok"
+    execution_id = "1" * 32
+    archive_relative = f"capture_execution_logs/{execution_id}"
+    config_digest = run_config_sha256(configured.to_dict())
+    capture_execution_plan = {
+        "schema_version": "capture_execution_plan.v2",
+        "execution_id": execution_id,
+        "execution_archive": archive_relative,
+        "run_config_sha256": config_digest,
+        "preflight_report": {"config": configured.to_dict()},
+    }
+    capture_execution_report = {
+        "schema_version": "capture_execution_report.v2",
+        "execution_id": execution_id,
+        "execution_archive": archive_relative,
+        "run_config_sha256": config_digest,
+        "status": "succeeded",
+        "capture_execution_plan": capture_execution_plan,
+        "processes": _completed_processes(),
+        "completion": completion,
+    }
+    capture_execution_status = {
+        "schema_version": "capture_execution_status.v2",
+        "execution_id": execution_id,
+        "execution_archive": archive_relative,
+        "run_config_sha256": config_digest,
+        "status": "succeeded",
+    }
+    archive_root = dataset_root / archive_relative
+    archive_root.mkdir(parents=True)
+    for filename, value in (
+        ("capture_execution_plan.json", capture_execution_plan),
+        ("capture_execution_report.json", capture_execution_report),
+        ("capture_execution_status.json", capture_execution_status),
+    ):
+        (archive_root / filename).write_text(json.dumps(value))
+        (dataset_root / filename).write_text(json.dumps(value))
 
     expected_commands = orchestration.dataset_processing_commands(dataset_root)
     invoked: list[tuple[str, ...]] = []

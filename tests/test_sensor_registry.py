@@ -9,10 +9,18 @@ import pytest
 from posetestbot.sensors.contracts import SensorType
 from posetestbot.sensors.registry import (
     build_sensor_capture_command,
+    capture_resolution_image_size,
     capture_script_for_sensor,
     list_sensor_adapters,
     sensor_folder_name,
 )
+
+
+def test_capture_resolution_tokens_have_authoritative_pixel_dimensions() -> None:
+    assert capture_resolution_image_size("720p") == (1280, 720)
+    assert capture_resolution_image_size("360p") == (672, 376)
+    with pytest.raises(ValueError, match="Unsupported capture resolution"):
+        capture_resolution_image_size("1080p")
 
 
 def test_sensor_adapter_registry_lists_supported_capture_scripts() -> None:

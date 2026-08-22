@@ -540,16 +540,19 @@ def validate_intrinsic_profile(profile: Mapping[str, Any]) -> None:
     if profile.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"Intrinsic schema must be {SCHEMA_VERSION!r}")
     resolution = profile.get("resolution")
-    if (
-        not isinstance(resolution, list)
-        or len(resolution) != 2
-        or any(int(item) <= 0 for item in resolution)
+    if not isinstance(resolution, list) or len(resolution) != 2 or any(
+        isinstance(item, bool) or not isinstance(item, int) or item <= 0
+        for item in resolution
     ):
         raise ValueError("Intrinsic resolution must be [width, height]")
     if profile.get("orientation") not in {"normal", "inverted"}:
         raise ValueError("Intrinsic orientation must be normal or inverted")
-    for projection_name in ("native",):
-        projection = profile.get(projection_name)
+    def validate_projection(
+        projection: object,
+        projection_name: str,
+        *,
+        require_zero_distortion: bool,
+    ) -> None:
         if not isinstance(projection, Mapping):
             raise ValueError(f"Intrinsic {projection_name} projection is required")
         matrix = projection.get("cam_K")
@@ -561,6 +564,34 @@ def validate_intrinsic_profile(profile: Mapping[str, Any]) -> None:
             raise ValueError(
                 f"Intrinsic {projection_name}.cam_K must contain 9 finite values"
             )
+        numeric_matrix = [float(item) for item in matrix]
+        if numeric_matrix[0] <= 0.0 or numeric_matrix[4] <= 0.0:
+            raise ValueError(
+                f"Intrinsic {projection_name}.cam_K focal lengths must be positive"
+            )
+        if not all(
+            math.isclose(value, expected, abs_tol=1e-9)
+            for value, expected in zip(
+                numeric_matrix[6:9],
+                (0.0, 0.0, 1.0),
+                strict=True,
+            )
+        ):
+            raise ValueError(
+                f"Intrinsic {projection_name}.cam_K bottom row must be [0, 0, 1]"
+            )
+        if (
+            projection.get("width") != resolution[0]
+            or projection.get("height") != resolution[1]
+        ):
+            raise ValueError(
+                f"Intrinsic {projection_name} dimensions must match resolution"
+            )
+        distortion_model = projection.get("distortion_model")
+        if not isinstance(distortion_model, str) or not distortion_model.strip():
+            raise ValueError(
+                f"Intrinsic {projection_name}.distortion_model is required"
+            )
         distortion = projection.get("distortion")
         if (
             not isinstance(distortion, list)
@@ -570,6 +601,25 @@ def validate_intrinsic_profile(profile: Mapping[str, Any]) -> None:
             raise ValueError(
                 f"Intrinsic {projection_name}.distortion must contain 5 finite values"
             )
+        if require_zero_distortion and any(float(item) != 0.0 for item in distortion):
+            raise ValueError("Rectified distortion must be zero")
+
+    validate_projection(
+        profile.get("native"),
+        "native",
+        require_zero_distortion=False,
+    )
+    depth = profile.get("depth")
+    if not isinstance(depth, Mapping):
+        raise ValueError("Intrinsic depth evidence is required")
+    depth_scale = depth.get("scale_to_mm")
+    if (
+        isinstance(depth_scale, bool)
+        or not isinstance(depth_scale, (int, float))
+        or not math.isfinite(float(depth_scale))
+        or float(depth_scale) <= 0.0
+    ):
+        raise ValueError("Intrinsic depth.scale_to_mm must be finite and positive")
     rectified = profile.get("rectified")
     if rectified is None:
         source = profile.get("source")
@@ -583,26 +633,17 @@ def validate_intrinsic_profile(profile: Mapping[str, Any]) -> None:
         return
     if not isinstance(rectified, Mapping):
         raise ValueError("Intrinsic rectified projection must be an object or null")
-    matrix = rectified.get("cam_K")
-    if (
-        not isinstance(matrix, list)
-        or len(matrix) != 9
-        or not all(math.isfinite(float(item)) for item in matrix)
-    ):
-        raise ValueError("Intrinsic rectified.cam_K must contain 9 finite values")
-    distortion = rectified.get("distortion")
-    if (
-        not isinstance(distortion, list)
-        or len(distortion) != 5
-        or not all(math.isfinite(float(item)) for item in distortion)
-    ):
-        raise ValueError("Intrinsic rectified.distortion must contain 5 finite values")
-    if any(float(item) != 0.0 for item in distortion):
-        raise ValueError("Rectified distortion must be zero")
+    validate_projection(
+        rectified,
+        "rectified",
+        require_zero_distortion=True,
+    )
     roi = rectified.get("valid_roi")
     if not isinstance(roi, list) or len(roi) != 4 or any(int(item) < 0 for item in roi):
         raise ValueError("Rectified valid_roi must contain four nonnegative integers")
     x, y, width, height = (int(item) for item in roi)
+    if width <= 0 or height <= 0:
+        raise ValueError("Rectified valid_roi width and height must be positive")
     if x + width > int(resolution[0]) or y + height > int(resolution[1]):
         raise ValueError("Rectified valid_roi must fit output resolution")
 

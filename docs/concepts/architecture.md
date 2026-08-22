@@ -52,8 +52,11 @@ Long-running, CPU/disk-heavy, or hardware-touching work is submitted to
 `202` and includes `job_id` plus a job snapshot.
 
 Resource declarations serialize incompatible work. Camera jobs claim camera
-resources; physical capture also claims robot and disk resources. A browser
-navigation does not cancel submitted work.
+resources; physical capture also claims robot and disk resources. Claims are
+serialized against persisted jobs under an interprocess lock, including
+hierarchical parent/child conflicts, so overlapping service processes cannot
+double-allocate physical resources. A browser navigation does not cancel
+submitted work.
 
 ## Filesystem boundary
 
@@ -70,6 +73,17 @@ Relative paths are resolved by their declared scope before containment is
 checked. API clients must not rely on `..`, symlinks, or absolute paths to
 escape these roots.
 
+Complete derived directory generations are published through a durable
+rollback journal. Replacements are limited to real sibling directories,
+overlapping parent directories are locked across processes, and every
+participating parent receives the same transaction record before the first
+destination is moved. Recovery on the next replacement restores the complete
+prior generation unless every new directory was installed and the commit
+decision was made durable; after that decision it retains the complete new
+generation. Journal entries bind the exact parent and old/new directory
+identities, so a symlink or unrelated directory appearing at a staging,
+destination, or backup path fails closed instead of being moved or deleted.
+
 ## Acquisition boundary
 
 The acquisition boundary ends at a validated BOP dataset. The following do not belong in
@@ -81,6 +95,11 @@ this repository:
 - a general evaluation stage; or
 - cluster secrets and remote filesystem configuration.
 
-The narrow exception is Inspect-only official BOP19 evaluation of an already
-exported annotation-bearing dataset and immutable compatible result. It writes
-derived evidence only below `processed/bop_evaluation/`.
+The narrow exception is Inspect-only official BOP19 evaluation of an immutable
+compatible result against a verified `pose_and_masks` export. That export must
+declare complete BlenderProc annotations and BOP19 evaluation capability in
+`bop_export_manifest.v5`, with matching per-scene `scene_gt.json`,
+`scene_gt_info.json`, and complete full/visible instance-mask evidence below
+`mask/` and `mask_visib/`. Pose-only ground truth is not evaluation-ready.
+Evaluation writes derived evidence only below
+`processed/bop_evaluation/`.

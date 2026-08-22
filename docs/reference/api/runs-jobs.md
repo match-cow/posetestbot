@@ -1,7 +1,7 @@
 # Runs and jobs API
 
 Run endpoints discover approved filesystem-backed runs. Job endpoints expose
-durable in-process work submitted through `LocalJobRunner`.
+durable local process-backed work submitted through `LocalJobRunner`.
 
 ## UI bootstrap and run data
 
@@ -66,6 +66,44 @@ was recorded; clients should poll until terminal. Committed storage operations
 may deliberately set `cancelable: false` and return `409` rather than risk a
 half-applied filesystem mutation.
 
-Robot Start/Stop uses the purpose-specific `POST /robot/commands` contract.
-The local runner is not a general remote scheduler. External archive and
-estimator jobs are exposed through the narrow [cluster API](bop-cluster.md).
+Declared resource ownership is shared across every runner instance using the
+same job root. Submission takes an interprocess transaction, reloads persisted
+active owners, applies hierarchical conflicts such as `camera` versus
+`camera:oak_d_pro`, and publishes the new queued record before releasing the
+claim lock. PID/start-time identity permits a later runner to reclaim an owner
+that actually exited; two service processes cannot both accept the same camera
+or robot resource. Malformed, symlinked, identity-mismatched, or path-escaping
+persisted active-claim evidence blocks new resource allocation instead of being
+silently ignored. The root claim lock and per-job state locks bind the opened
+directory and lock-file inodes again after acquisition, so replacing a pathname
+while a process waits for the lock fails closed.
+
+Cancellation writes a durable `cancel_request.json` under the job directory.
+The supervisor observes that request before workload launch and while the
+workload runs; per-job interprocess state serialization makes cancellation a
+monotonic transition that another runner cannot overwrite with a later
+`running`, `succeeded`, or `failed` update. Failure to start the local worker
+thread is persisted as a terminal job before the resource is released. An
+unexpected runner fault after the supervisor starts first verifies that the
+supervisor and workload groups stopped, then persists a terminal failure and
+releases the claim. If process termination or authoritative terminal
+persistence cannot be verified, the active claim remains fail-closed and is
+retried by subsequent runner operations. `job.json` is authoritative; the
+SQLite history index is a rebuildable view, so an index-write fault cannot
+change a completed command's outcome or retain its resource claim.
+
+`POST /dataset-processing/jobs` is stricter than this generic response shape:
+before accepting the job, it revalidates a succeeded
+`capture_execution_report.v2`, its exact run-configuration and per-execution
+archive bindings, and its embedded `capture_completion.v1` with `status: ok`.
+This request-time gate stays bounded and does not decode the run's image set.
+The queued worker repeats the provenance gate and rebuilds the complete capture
+result against current raw evidence, including every RGB/depth PNG, before any
+derived stage begins.
+
+Manual robot motion-start and idle-program-exit requests use the purpose-specific
+`POST /robot/commands` contract. They are not exposed as Dashboard quick
+controls and are not the canonical supervised-capture path; the idle-program
+exit cannot stop motion. The local runner is not a general remote scheduler.
+External archive and estimator jobs are exposed through the narrow [cluster
+API](bop-cluster.md).

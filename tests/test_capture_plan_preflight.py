@@ -41,6 +41,7 @@ def fake_sensor_status() -> dict:
                         "device_id": "123",
                         "display_name": "RealSense 123",
                         "connected": True,
+                        "capture_ready": True,
                         "metadata": {},
                     }
                 ],
@@ -57,6 +58,7 @@ def fake_sensor_status() -> dict:
                         "device_id": "mxid-1",
                         "display_name": "OAK-D Pro",
                         "connected": True,
+                        "capture_ready": True,
                         "metadata": {},
                     }
                 ],
@@ -106,6 +108,68 @@ def test_capture_plan_preflight_reports_ok_for_mocked_connected_sensors(
     assert checks["sensor:oak_d_pro:auto"]["status"] == "ok"
     assert checks["capture_plan_build"]["status"] == "ok"
     assert report["capture_plan"]["schema_version"] == "capture_plan.v1"
+
+
+@pytest.mark.parametrize("missing_field", ("connected", "capture_ready"))
+def test_capture_plan_preflight_requires_explicit_current_readiness_flags(
+    tmp_path: Path,
+    missing_field: str,
+) -> None:
+    run_root = tmp_path / f"missing-{missing_field}"
+    config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
+        run_root=run_root,
+        sensors=(
+            sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),
+        ),
+    )
+    write_run_config(run_root, config)
+    write_capture_plan_with_manifest(run_root, config.to_dict())
+    status = fake_sensor_status()
+    status["families"][0]["devices"][0].pop(missing_field)
+
+    report = build_capture_plan_preflight(
+        run_root,
+        allow_real_robot=True,
+        collect_sensors=lambda: status,
+    )
+
+    check = next(
+        item for item in report["checks"] if item["name"] == "sensor:realsense_d435:123"
+    )
+    assert report["overall_status"] == "error"
+    assert check["status"] == "error"
+    assert check["details"]["connected_devices"] == []
+
+
+def test_capture_plan_preflight_rejects_retired_sensor_status_schema(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "retired-sensor-status"
+    config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
+        run_root=run_root,
+        sensors=(
+            sensor_config_from_token("realsense_d435:123:static:Cell RealSense"),
+        ),
+    )
+    write_run_config(run_root, config)
+    write_capture_plan_with_manifest(run_root, config.to_dict())
+    status = fake_sensor_status()
+    status["schema_version"] = "sensor_status.v0"
+
+    report = build_capture_plan_preflight(
+        run_root,
+        allow_real_robot=True,
+        collect_sensors=lambda: status,
+    )
+
+    check = next(item for item in report["checks"] if item["name"] == "sensor_status")
+    assert report["overall_status"] == "error"
+    assert check["status"] == "error"
+    assert check["details"]["schema_version"] == "sensor_status.v0"
 
 
 def test_capture_plan_preflight_includes_sensor_diagnostics_on_failures(

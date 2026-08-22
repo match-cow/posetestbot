@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -197,6 +198,59 @@ def test_frame_writer_refuses_collision_and_invalid_rgbd(tmp_path: Path) -> None
         write_rgbd_frame(tmp_path, **invalid)
 
 
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    (
+        ({"frame_index": True}, "frame_index must be a non-negative integer"),
+        ({"sensor_id": "  "}, "sensor_id must be a trimmed non-empty string"),
+        (
+            {"host_received_timestamp_ns": 0},
+            "host_received_timestamp_ns must be a positive integer",
+        ),
+        (
+            {"host_wall_timestamp_ns": True},
+            "host_wall_timestamp_ns must be a positive integer",
+        ),
+        (
+            {"sensor_timestamp_ns": -1},
+            "sensor_timestamp_ns must be null or a positive integer",
+        ),
+        (
+            {"depth_sensor_timestamp_ns": 0},
+            "depth_sensor_timestamp_ns must be null or a positive integer",
+        ),
+        ({"frame_stem": 123}, "frame_stem must contain only ASCII digits"),
+        (
+            {"extra_metadata": {"invalid": float("nan")}},
+            "Frame metadata must be finite JSON data",
+        ),
+    ),
+)
+def test_frame_writer_rejects_invalid_metadata_before_creating_output(
+    tmp_path: Path,
+    changes: dict[str, object],
+    error: str,
+) -> None:
+    output = tmp_path / "invalid"
+    kwargs = {
+        "rgb_image": np.zeros((2, 3, 3), dtype=np.uint8),
+        "depth_image": np.zeros((2, 3), dtype=np.uint16),
+        "sensor_type": SensorType.REALSENSE_D435,
+        "sensor_id": "123",
+        "frame_index": 0,
+        "sensor_timestamp_ns": 1,
+        "host_received_timestamp_ns": 2,
+        "host_wall_timestamp_ns": 3_000_000,
+        "frame_stem": "000000",
+    }
+    kwargs.update(changes)
+
+    with pytest.raises(ValueError, match=error):
+        write_rgbd_frame(output, **kwargs)
+
+    assert not output.exists()
+
+
 def test_frame_writer_rolls_back_committed_files_on_control_flow_exception(
     tmp_path: Path,
     monkeypatch,
@@ -235,3 +289,34 @@ def test_camera_sidecars_refuse_overwrite(tmp_path: Path) -> None:
 
     with pytest.raises(FileExistsError, match="camera sidecar"):
         write_camera_sidecars(tmp_path, intrinsics)
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        ({"distortion": (0.0,) * 6}, "Camera distortion must contain"),
+        (
+            {"distortion": (0.0, 0.0, float("nan"), 0.0, 0.0)},
+            "Camera distortion must contain",
+        ),
+        ({"depth_scale_to_mm": True}, "Camera depth scale must be finite and positive"),
+        ({"width": True}, "width and height must be positive integers"),
+    ],
+)
+def test_camera_sidecars_reject_unreadable_intrinsic_contract_before_writing(
+    tmp_path: Path,
+    changes: dict[str, object],
+    error: str,
+) -> None:
+    intrinsics = CameraIntrinsics(
+        cam_k=(100.0, 0.0, 50.0, 0.0, 101.0, 51.0, 0.0, 0.0, 1.0),
+        width=1280,
+        height=720,
+        distortion=(0.0,) * 5,
+        depth_scale_to_mm=1.0,
+    )
+
+    with pytest.raises(ValueError, match=error):
+        write_camera_sidecars(tmp_path / "invalid", replace(intrinsics, **changes))
+
+    assert not (tmp_path / "invalid").exists()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import numpy as np
 
@@ -145,6 +145,7 @@ def capture_zed_2i_rgbd(
     record: bool = True,
     sl_module: Any | None = None,
     cv2_module: Any | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Capture left RGB and aligned millimetre depth through shared writers."""
 
@@ -209,10 +210,14 @@ def capture_zed_2i_rgbd(
         runtime_parameters = sl.RuntimeParameters()
         image = sl.Mat()
         depth = sl.Mat()
-        while max_frames <= 0 or captured_frames < max_frames:
+        while (max_frames <= 0 or captured_frames < max_frames) and not (
+            stop_requested and stop_requested()
+        ):
             if zed.grab(runtime_parameters) != sl.ERROR_CODE.SUCCESS:
                 grab_failures += 1
                 continue
+            if stop_requested and stop_requested():
+                break
             host_wall_timestamp_ns = time.time_ns()
             host_received_timestamp_ns = time.monotonic_ns()
             zed.retrieve_image(image, sl.VIEW.LEFT)

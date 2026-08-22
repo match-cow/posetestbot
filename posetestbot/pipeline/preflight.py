@@ -36,6 +36,47 @@ from posetestbot.sensors.status import collect_sensor_status
 
 
 SCHEMA_VERSION = "run_preflight.v2"
+PREFLIGHT_STATUSES = frozenset({"ok", "warning", "error"})
+
+
+def _validate_run_preflight_report_shape(report: Mapping[str, Any]) -> None:
+    status = report.get("overall_status")
+    if not isinstance(status, str) or status not in PREFLIGHT_STATUSES:
+        raise ValueError(
+            f"{RUN_PREFLIGHT_REPORT} overall_status must be one of: "
+            + ", ".join(sorted(PREFLIGHT_STATUSES))
+        )
+    if not isinstance(report.get("config"), Mapping):
+        raise ValueError(f"{RUN_PREFLIGHT_REPORT} config must be an object")
+
+    checks = report.get("checks")
+    if not isinstance(checks, list) or not checks:
+        raise ValueError(f"{RUN_PREFLIGHT_REPORT} checks must be a nonempty list")
+    for index, check in enumerate(checks):
+        if not isinstance(check, Mapping):
+            raise ValueError(
+                f"{RUN_PREFLIGHT_REPORT} check {index} must be an object"
+            )
+        if not isinstance(check.get("name"), str) or not check["name"]:
+            raise ValueError(
+                f"{RUN_PREFLIGHT_REPORT} check {index} requires a nonempty name"
+            )
+        check_status = check.get("status")
+        if not isinstance(check_status, str) or check_status not in PREFLIGHT_STATUSES:
+            raise ValueError(
+                f"{RUN_PREFLIGHT_REPORT} check {index} has invalid status"
+            )
+        if not isinstance(check.get("message"), str) or not check["message"]:
+            raise ValueError(
+                f"{RUN_PREFLIGHT_REPORT} check {index} requires a nonempty message"
+            )
+
+    derived_status = _overall_status(checks)
+    if status != derived_status:
+        raise ValueError(
+            f"{RUN_PREFLIGHT_REPORT} overall_status {status!r} does not match "
+            f"its checks ({derived_status!r})"
+        )
 
 
 def load_run_preflight_report(run_root: str | Path) -> dict[str, Any] | None:
@@ -50,6 +91,7 @@ def load_run_preflight_report(run_root: str | Path) -> dict[str, Any] | None:
         raise ValueError(
             f"{RUN_PREFLIGHT_REPORT} schema_version must be {SCHEMA_VERSION}"
         )
+    _validate_run_preflight_report_shape(report)
     return report
 
 
@@ -330,6 +372,24 @@ def _validate_dataset_intent(
                 )
             )
     return checks
+
+
+def current_intent_preflight_checks(
+    run_root: str | Path,
+    config: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Rebuild current hash-bound, intent-specific capture prerequisites."""
+
+    capture = config.get("capture")
+    if not isinstance(capture, Mapping):
+        raise ValueError("Run configuration capture must be an object")
+    intent = capture.get("intent")
+    root = Path(run_root)
+    if intent == "calibration":
+        return _validate_calibration_intent(config, root)
+    if intent == "dataset":
+        return _validate_dataset_intent(config, root)
+    raise ValueError(f"Unsupported capture intent for preflight refresh: {intent!r}")
 
 
 def build_run_preflight(

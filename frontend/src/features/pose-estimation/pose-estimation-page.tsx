@@ -138,7 +138,33 @@ export function PoseEstimationPage() {
   }, [currentJob, importResult, imported])
 
   const selectedProfile = enabledProfiles.find((profile) => profile.profile_id === effectiveProfileId)
-  const canSubmit = Boolean(setup.data?.ready && effectiveEstimatorId && effectiveProfileId && operator.trim().length >= 2 && !submit.isPending)
+  const rawSetupBlockers = setup.data?.blockers
+  const setupBlockerMessages = Array.isArray(rawSetupBlockers)
+    ? rawSetupBlockers.flatMap((blocker) => typeof blocker?.message === "string" ? [blocker.message] : [])
+    : []
+  const setupBlockerContractValid = Array.isArray(rawSetupBlockers)
+    && setupBlockerMessages.length === rawSetupBlockers.length
+  const setupReady = setup.data?.ready === true
+    && setupBlockerContractValid
+    && setupBlockerMessages.length === 0
+  const setupStatusLabel = setupReady
+    ? "Ready to submit"
+    : setupBlockerMessages.length > 0
+      ? `${setupBlockerMessages.length} blocker${setupBlockerMessages.length === 1 ? "" : "s"}`
+      : setupBlockerContractValid
+        ? "Not ready"
+        : "Readiness invalid"
+  const submissionBlockers = Array.from(new Set([
+    ...(!setupReady
+      ? setupBlockerMessages.length > 0
+        ? setupBlockerMessages
+        : ["Controller and dataset setup is not ready for submission."]
+      : []),
+    ...(!effectiveEstimatorId ? ["Choose an advertised estimator method."] : []),
+    ...(!effectiveProfileId ? ["No qualified server-owned resource profile is available for the selected estimator."] : []),
+    ...(operator.trim().length === 0 ? ["Enter the operator or submitter recorded with this cluster job."] : []),
+  ]))
+  const canSubmit = setupReady && submissionBlockers.length === 0 && !submit.isPending
   const runtime = setup.data?.runtime
 
   return <div className="space-y-6" data-testid="pose-estimation-page">
@@ -152,10 +178,10 @@ export function PoseEstimationPage() {
       </>}
     />
     <ProcessHandoff
-      title="Consumes the dataset produced by Workflow"
-      description="Pose Estimation reads an already exported, annotation-bearing BOP dataset. The external job remains durable after navigation; return through Jobs, then evaluate its immutable BOP19 CSV on BOP Evaluation."
-      to="/workflow/setup"
-      action="Return to workflow"
+      title="Consumes verified pose-and-mask evidence from Workflow"
+      description="Pose Estimation requires the selected run's verified pose_and_masks BOP export: bop_export_manifest.v5 declares complete BlenderProc annotations with capabilities.bop19_evaluation set to true, and every scene has matching scene_gt.json and scene_gt_info.json plus complete mask/ and mask_visib/ evidence. The external job remains durable after navigation; return through Jobs, then evaluate its immutable BOP19 CSV on BOP Evaluation."
+      to="/workflow/dataset?step=export"
+      action="Review required BOP evidence"
     />
 
     {setup.isPending
@@ -168,7 +194,7 @@ export function PoseEstimationPage() {
               <CardHeader className="pb-3">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div><CardTitle className="flex items-center gap-2"><FileCheck2 className="size-5 text-primary-strong" />Dataset snapshot</CardTitle><CardDescription className="mt-1 break-all font-mono">{selectedRun}</CardDescription></div>
-                  <StatusBadge status={setup.data.ready ? "ready" : "blocked"} tone={setup.data.ready ? "success" : "destructive"}>{setup.data.ready ? "Ready to submit" : `${setup.data.blockers.length} blocker${setup.data.blockers.length === 1 ? "" : "s"}`}</StatusBadge>
+                  <StatusBadge status={setupReady ? "ready" : "blocked"} tone={setupReady ? "success" : "destructive"}>{setupStatusLabel}</StatusBadge>
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -187,8 +213,8 @@ export function PoseEstimationPage() {
                   <div className="flex items-center gap-2 font-semibold"><AlertTriangle className="size-4" />Oracle-mask qualification</div>
                   <p className="mt-1">This qualified run does not measure detection or segmentation. Each row uses a known visible instance mask, reports score 1.0, and estimates every target independently without tracking across images or cameras.</p>
                 </div>}
-                {setup.data.blockers.length > 0 && <div className="space-y-2" aria-label="Pose estimation blockers">
-                  {setup.data.blockers.map((blocker) => <div key={`${blocker.code}-${blocker.message}`} className="flex gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"><AlertTriangle className="mt-0.5 size-4 shrink-0" /><span>{blocker.message}</span></div>)}
+                {setupBlockerMessages.length > 0 && <div className="space-y-2" aria-label="Pose estimation blockers">
+                  {setupBlockerMessages.map((blocker, index) => <div key={`${index}:${blocker}`} className="flex gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"><AlertTriangle className="mt-0.5 size-4 shrink-0" /><span>{blocker}</span></div>)}
                 </div>}
               </CardContent>
             </Card>
@@ -197,7 +223,7 @@ export function PoseEstimationPage() {
               <CardHeader className="pb-3"><CardTitle className="flex items-center gap-2"><Server className="size-5 text-primary-strong" />Controller & estimator runtime</CardTitle><CardDescription>Choose only from server-installed methods and qualified resource profiles.</CardDescription></CardHeader>
               <CardContent className="space-y-4">
                 <div className="grid grid-cols-2 gap-2">
-                  <Metric label="Controller" value={setup.data.controller.available ? setup.data.controller.ready ? "connected" : "not ready" : "unavailable"} />
+                  <Metric label="Controller" value={setup.data.controller.ready ? "ready" : setup.data.controller.available ? "connected, blocked" : "unavailable"} />
                   <Metric label="Integration" value={setup.data.controller.integration.enabled ? "enabled" : "disabled"} />
                   <Metric label="Estimator" value={selectedEstimator?.display_name ?? "not installed"} />
                   <Metric label="Runtime ID" value={runtime?.runtime_id ?? "not qualified"} />
@@ -221,7 +247,8 @@ export function PoseEstimationPage() {
                   {selectedProfile && <p className="text-[11px] leading-relaxed text-muted-foreground">{selectedProfile.partition} · {selectedProfile.gres} · {selectedProfile.cpus} CPU · {selectedProfile.memory} · {selectedProfile.walltime}{selectedProfile.max_targets ? ` · bounded to ${selectedProfile.max_targets} targets` : ""}</p>}
                 </div>
                 <div className="space-y-2"><Label htmlFor="cluster-operator">Operator / submitter</Label><Input id="cluster-operator" value={operator} onChange={(event) => setOperator(event.target.value)} placeholder="Name or lab account" maxLength={120} /></div>
-                <Button className="w-full" onClick={() => submit.mutate()} disabled={!canSubmit}>{submit.isPending ? <LoaderCircle className="animate-spin" /> : <Send />}{submit.isPending ? "Submitting…" : `Submit ${selectedEstimator?.display_name ?? "estimator"} job`}</Button>
+                {submissionBlockers.length > 0 && <div id="pose-estimation-submit-blockers" data-testid="pose-estimation-submit-blockers" role="alert" className="rounded-lg border border-warning/40 bg-warning/5 p-3 text-xs"><div className="font-semibold text-warning-foreground">Submission is disabled</div><ul className="mt-2 list-disc space-y-1 pl-5 text-muted-foreground">{submissionBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div>}
+                <Button className="w-full" aria-describedby={submissionBlockers.length > 0 ? "pose-estimation-submit-blockers" : undefined} onClick={() => submit.mutate()} disabled={!canSubmit}>{submit.isPending ? <LoaderCircle className="animate-spin" /> : <Send />}{submit.isPending ? "Submitting…" : `Submit ${selectedEstimator?.display_name ?? "estimator"} job`}</Button>
                 <p className="text-[11px] leading-relaxed text-muted-foreground">Submission creates a durable controller record and SLURM job. Work continues after navigation. <Link className="font-semibold text-primary-strong underline-offset-4 hover:underline" to="/jobs">Open Jobs</Link>.</p>
               </CardContent>
             </Card>

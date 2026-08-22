@@ -5,6 +5,14 @@ exactly `run_config.v4`; it does not migrate v3 or accept a generic pipeline
 section. Physical execution acknowledgements are deliberately absent and must
 be submitted afresh for each capture request.
 
+Once `capture_execution_plan.json` or later raw execution evidence exists, the
+capture-owned fields are immutable: intent, camera membership and identity,
+run-owned aliases, mounting/orientation, resolution, frame rate, motion speed,
+and synchronization. This closes the planning-to-launch race and keeps the
+saved configuration consistent with the recording. Use a new run for a
+different capture setup; descriptive run metadata and downstream annotation
+choices remain separate from this acquisition lock.
+
 ## Top-level fields
 
 | Field | Contract |

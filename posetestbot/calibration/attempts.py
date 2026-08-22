@@ -8,17 +8,20 @@ import math
 import os
 import re
 import shutil
+import stat
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, NoReturn, Sequence
 
 import cv2
 import numpy as np
 
 from posetestbot.aruco.grid import _matched_points, detect_sensor_folder
 from posetestbot.calibration.attempt_solver import (
+    DEFAULT_HARD_MAX_MEAN_ROTATION_DEG,
+    DEFAULT_HARD_MAX_MEAN_TRANSLATION_MM,
     DEFAULT_MAX_MEAN_ROTATION_DEG,
     DEFAULT_MAX_MEAN_TRANSLATION_MM,
     DEFAULT_MAX_OUTLIER_RATIO,
@@ -73,6 +76,7 @@ from posetestbot.calibration.profiles import (
     RigidTransform,
     TransformFrame,
     load_profile_collection,
+    profile_to_dict,
     rectified_intrinsics_from_native,
     write_profile_collection,
 )
@@ -111,7 +115,7 @@ from posetestbot.calibration.time_offset import (
     search_configuration as time_offset_search_configuration,
     sign_convention as time_offset_sign_convention,
 )
-from posetestbot.io.atomic import atomic_write_json
+from posetestbot.io.atomic import atomic_write_json, rename_path_no_replace
 from posetestbot.io.artifacts import (
     ARUCO_DETECTIONS,
     CALIBRATION_PROFILES,
@@ -159,7 +163,10 @@ REQUEST_SCHEMA_VERSION = "calibration_attempt_request.v2"
 PROGRESS_SCHEMA_VERSION = "calibration_attempt_progress.v1"
 OBSERVATIONS_FILE = "observations.json"
 PROMOTION_SCHEMA_VERSION = "calibration_attempt_promotion.v1"
-PROMOTION_REQUEST_SCHEMA_VERSION = "calibration_promotion_request.v1"
+PROMOTION_REQUEST_SCHEMA_VERSION = "calibration_promotion_request.v2"
+PROMOTION_TRANSACTION_SCHEMA_VERSION = "calibration_promotion_transaction.v1"
+PROMOTION_TRANSACTION_FILE = ".calibration_promotion.transaction.json"
+PROMOTION_MAX_JOURNAL_BYTES = 1_048_576
 ATTEMPT_DIRECTORY = Path("processed") / "calibration"
 REQUEST_FILE = "request.json"
 PROGRESS_FILE = "progress.json"
@@ -171,7 +178,32 @@ CANDIDATE_PROFILES_FILE = "candidate_profiles.json"
 PROMOTION_REQUEST_FILE = "promotion_request.json"
 PROMOTION_FILE = "promotion.json"
 TARGET_BUNDLE_DIRECTORY = "target_bundle"
+PROMOTION_REVIEW_INPUT_PATHS = (
+    REQUEST_FILE,
+    PROGRESS_FILE,
+    SYNC_QUALITY_REPORT,
+    TIME_OFFSET_SEARCH,
+    INTRINSIC_COMPARISON,
+    INTRINSIC_CALIBRATION_PROFILES,
+    PNP_CANDIDATES_FILE,
+    OBSERVATIONS_FILE,
+    EXTRINSIC_CANDIDATES_FILE,
+    RANKING_FILE,
+    CHECKS_FILE,
+    CANDIDATE_PROFILES_FILE,
+    TARGET_BUNDLE_DIRECTORY,
+)
 ATTEMPT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+PROMOTION_TRANSACTION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+PROMOTION_STAGING_PATTERN = re.compile(
+    r"^\.calibration-promotion-[0-9a-f]{32}-[0-9a-f]{32}\.tmp$"
+)
+PROMOTION_BACKUP_PATTERN = re.compile(
+    r"^\.calibration-promotion-[0-9a-f]{32}-[0-9a-f]{32}\.bak$"
+)
+PROMOTION_JOURNAL_TEMP_PATTERN = re.compile(
+    rf"^\.{re.escape(PROMOTION_TRANSACTION_FILE)}\.[0-9a-f]{{32}}\.tmp$"
+)
 ATTEMPT_MIN_MOTION_POSES = 4
 ATTEMPT_MIN_TRANSLATION_SPAN_MM = 20.0
 ATTEMPT_MIN_ROTATION_SPAN_DEG = 5.0
@@ -907,6 +939,7 @@ def _require_static_pose_template_base_reference(
 
 def list_calibration_attempts(run_root: str | Path) -> list[dict[str, Any]]:
     root = Path(run_root)
+    _recover_pending_calibration_promotion(root)
     parent = root / ATTEMPT_DIRECTORY
     if not parent.is_dir():
         return []
@@ -1076,6 +1109,8 @@ def calibration_setup(run_root: str | Path) -> dict[str, Any]:
                 },
                 "max_mean_translation_mm": 10.0,
                 "max_mean_rotation_deg": 5.0,
+                "hard_max_mean_translation_mm": (DEFAULT_HARD_MAX_MEAN_TRANSLATION_MM),
+                "hard_max_mean_rotation_deg": DEFAULT_HARD_MAX_MEAN_ROTATION_DEG,
                 "max_outlier_ratio": 0.25,
                 "warning_pairwise_companion_translation_mm": (
                     JOINT_CONSISTENCY_WARNING_TRANSLATION_MM
@@ -1358,6 +1393,8 @@ def record_attempt_job(
     job_id: str,
     kind: str,
 ) -> None:
+    if not isinstance(job_id, str) or not job_id.strip():
+        raise ValueError("Calibration attempt job_id must be a non-empty string")
     attempt_root = calibration_attempt_root(run_root, attempt_id)
     if kind == "calculation":
         progress = _read_json(attempt_root / PROGRESS_FILE)
@@ -1366,9 +1403,21 @@ def record_attempt_job(
         atomic_write_json(attempt_root / PROGRESS_FILE, progress)
         return
     if kind == "promotion":
-        promotion = _read_json(attempt_root / PROMOTION_FILE)
-        promotion["job_id"] = job_id
+        promotion_path = attempt_root / PROMOTION_FILE
+        promotion = _read_promotion_control_json(promotion_path, label="status")
+        if promotion.get("status") != "approved" or promotion.get("job_id"):
+            raise ValueError(
+                "Calibration promotion job binding requires one unqueued approval"
+            )
+        promotion.update(
+            {
+                "status": "queued",
+                "job_id": job_id,
+                "queued_at": utc_now_iso(),
+            }
+        )
         atomic_write_json(attempt_root / PROMOTION_FILE, promotion)
+        _fsync_promotion_directory(attempt_root)
         return
     raise ValueError("Calibration attempt job kind must be calculation or promotion")
 
@@ -1397,7 +1446,8 @@ def record_attempt_job_submission_failure(
         atomic_write_json(attempt_root / PROGRESS_FILE, progress)
         return
     if kind == "promotion":
-        promotion = _read_json(attempt_root / PROMOTION_FILE)
+        promotion_path = attempt_root / PROMOTION_FILE
+        promotion = _read_promotion_control_json(promotion_path, label="status")
         promotion.update(
             {
                 "status": "failed",
@@ -1406,7 +1456,8 @@ def record_attempt_job_submission_failure(
                 "failure_stage": "job_submission",
             }
         )
-        atomic_write_json(attempt_root / PROMOTION_FILE, promotion)
+        atomic_write_json(promotion_path, promotion)
+        _fsync_promotion_directory(attempt_root)
         return
     raise ValueError("Calibration attempt job kind must be calculation or promotion")
 
@@ -2595,6 +2646,7 @@ def _prepare_attempt_data(
             robot_timestamp_source=sensor_policy["robot_timestamp_source"],
             max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
             raw_robot_poses=loaded_robot_poses,
+            diagnostic_unmanaged=True,
         )
         for result in results:
             selected_sensor = selected_by_path[Path(result.sensor_folder).resolve()]
@@ -3470,6 +3522,7 @@ def _materialize_authoritative_synchronization(
             copy_files=False,
             max_nearest_pose_delta_ms=max_nearest_pose_delta_ms,
             raw_robot_poses=loaded_robot_poses,
+            diagnostic_unmanaged=True,
         )
         if len(results) != 1:
             raise ValueError(
@@ -3849,6 +3902,12 @@ def _candidate_profile(
             "held_out_residuals": candidate["held_out_residuals"],
             "outlier_count": candidate["outlier_count"],
             "outlier_ratio": candidate["outlier_ratio"],
+            "quality_state": candidate.get("quality_state", "ok"),
+            "quality_warnings": [
+                dict(check)
+                for check in candidate.get("quality_warnings", [])
+                if isinstance(check, Mapping)
+            ],
             "intrinsic_profile_id": intrinsic_profile["profile_id"],
             "intrinsics_policy": request_value["intrinsics_policy"],
             "synchronization": {
@@ -4198,6 +4257,17 @@ def _joint_bundle_record(
         and rotation_status != "error"
     )
     quality_warnings = [dict(check) for check in checks if check["status"] == "warning"]
+    for sensor_key, candidate in selected.items():
+        quality_warnings.extend(
+            {
+                **dict(check),
+                "scope": "individual_camera_candidate",
+                "sensor_key": sensor_key,
+                "candidate_id": candidate.get("candidate_id"),
+            }
+            for check in candidate.get("quality_warnings", [])
+            if isinstance(check, Mapping) and check.get("status") == "warning"
+        )
     return {
         "bundle_id": bundle_id,
         "pnp_method": pnp_method,
@@ -4443,6 +4513,7 @@ def _promotion_review(
         }
 
     selections: dict[str, str] = {}
+    warnings: list[dict[str, Any]] = []
     for sensor_key in sensor_keys:
         candidates = ranked_by_sensor.get(sensor_key, [])
         selected = next(
@@ -4455,18 +4526,34 @@ def _promotion_review(
         )
         if isinstance(selected, Mapping):
             selections[sensor_key] = str(selected["candidate_id"])
+            warnings.extend(
+                {
+                    **dict(check),
+                    "scope": "individual_camera_candidate",
+                    "sensor_key": sensor_key,
+                    "candidate_id": selected.get("candidate_id"),
+                }
+                for check in selected.get("quality_warnings", [])
+                if isinstance(check, Mapping) and check.get("status") == "warning"
+            )
     promotable = len(selections) == len(sensor_keys) and bool(sensor_keys)
     return {
         "schema_version": "calibration_promotion_review.v1",
         "policy_revision": JOINT_CONSISTENCY_POLICY_REVISION,
-        "status": "promotable" if promotable else "blocked",
+        "status": (
+            "promotable_with_warnings"
+            if promotable and warnings
+            else "promotable"
+            if promotable
+            else "blocked"
+        ),
         "selections": selections,
         "selected_camera_count": len(selections),
         "camera_count": len(sensor_keys),
         "joint_bundle_id": None,
         "selected_bundle": None,
         "eligible_bundles": [],
-        "quality_warnings": [],
+        "quality_warnings": warnings,
         "alternative_failure_count": alternative_failure_count,
         "blocking_reason": (
             None
@@ -4659,6 +4746,8 @@ def _validate_and_rank(
             },
             "max_mean_translation_mm": 10.0,
             "max_mean_rotation_deg": 5.0,
+            "hard_max_mean_translation_mm": DEFAULT_HARD_MAX_MEAN_TRANSLATION_MM,
+            "hard_max_mean_rotation_deg": DEFAULT_HARD_MAX_MEAN_ROTATION_DEG,
             "max_outlier_ratio": 0.25,
         },
         "results": results,
@@ -4846,6 +4935,7 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
 
 def load_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, Any]:
     root = Path(run_root)
+    _recover_pending_calibration_promotion(root)
     attempt_root = calibration_attempt_root(root, attempt_id)
     if not attempt_root.is_dir():
         raise FileNotFoundError(f"Calibration attempt not found: {attempt_id}")
@@ -4911,6 +5001,7 @@ def load_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str,
                 RANKING_FILE,
                 CHECKS_FILE,
                 CANDIDATE_PROFILES_FILE,
+                PROMOTION_REQUEST_FILE,
                 PROMOTION_FILE,
             )
             if (attempt_root / name).exists()
@@ -5988,12 +6079,68 @@ def create_promotion_request(
     selections: Mapping[str, Any] | None = None,
     operator: str | None = None,
 ) -> dict[str, Any]:
+    root = Path(run_root).resolve()
+    normalized_attempt_id = validate_attempt_id(attempt_id)
+    with run_config_lock(root):
+        return _create_promotion_request_locked(
+            root,
+            normalized_attempt_id,
+            selections=selections,
+            operator=operator,
+        )
+
+
+def _create_promotion_request_locked(
+    run_root: Path,
+    attempt_id: str,
+    *,
+    selections: Mapping[str, Any] | None = None,
+    operator: str | None = None,
+) -> dict[str, Any]:
+    """Record one approval pair while holding the run mutation lock.
+
+    ``promotion_request.json`` is written first and ``promotion.json`` is the
+    approval commit marker. An interruption before the marker is therefore
+    safely overwriteable by a retry, while a visible marker always has the
+    complete immutable request available for identity validation.
+    """
+
     root = Path(run_root)
+    attempt_root = calibration_attempt_root(root, attempt_id)
+    _assert_promotion_path_ancestors(
+        root,
+        attempt_root / PROMOTION_FILE,
+        label="attempt",
+    )
     attempt = load_calibration_attempt(root, attempt_id)
     _require_current_attempt_request(attempt["request"])
     if attempt["progress"].get("status") != "complete":
         raise ValueError("Calibration attempt is not complete")
-    prior_promotion = attempt.get("promotion")
+    promotion_path = attempt_root / PROMOTION_FILE
+    prior_promotion = (
+        _read_promotion_control_json(promotion_path, label="status")
+        if _promotion_path_exists(promotion_path)
+        else None
+    )
+    if (
+        isinstance(prior_promotion, Mapping)
+        and prior_promotion.get("status") != "failed"
+    ):
+        raise ValueError("Calibration attempt already has promotion evidence")
+
+    # Read the attempt again between two complete evidence snapshots. The
+    # semantic review below must describe the exact bytes bound into the
+    # approval request, not a generation changed while it was assembled.
+    initial_review_input_bindings = _promotion_review_input_bindings(attempt_root)
+    attempt = load_calibration_attempt(root, attempt_id)
+    _require_current_attempt_request(attempt["request"])
+    if attempt["progress"].get("status") != "complete":
+        raise ValueError("Calibration attempt is not complete")
+    prior_promotion = (
+        _read_promotion_control_json(promotion_path, label="status")
+        if _promotion_path_exists(promotion_path)
+        else None
+    )
     if (
         isinstance(prior_promotion, Mapping)
         and prior_promotion.get("status") != "failed"
@@ -6002,6 +6149,12 @@ def create_promotion_request(
     _promotion_time_offset_evidence(attempt)
     selected = _promotion_selections(attempt, selections)
     joint_bundle = _revalidate_joint_promotion(attempt, selected)
+    review_input_bindings = _promotion_review_input_bindings(attempt_root)
+    if review_input_bindings != initial_review_input_bindings:
+        raise ValueError(
+            "Calibration promotion review inputs changed while approval was "
+            "being recorded"
+        )
     value = {
         "schema_version": PROMOTION_REQUEST_SCHEMA_VERSION,
         "attempt_id": attempt_id,
@@ -6020,18 +6173,19 @@ def create_promotion_request(
         "joint_consistency_quality_warnings": (
             joint_bundle["quality_warnings"] if joint_bundle is not None else []
         ),
+        "review_input_bindings": review_input_bindings,
         "previous_failure": (
             dict(prior_promotion) if isinstance(prior_promotion, Mapping) else None
         ),
     }
-    attempt_root = calibration_attempt_root(root, attempt_id)
     atomic_write_json(attempt_root / PROMOTION_REQUEST_FILE, value)
+    _fsync_promotion_directory(attempt_root)
     atomic_write_json(
         attempt_root / PROMOTION_FILE,
         {
             "schema_version": PROMOTION_SCHEMA_VERSION,
             "attempt_id": attempt_id,
-            "status": "queued",
+            "status": "approved",
             "requested_at": value["created_at"],
             "selections": selected,
             "joint_bundle_id": value["joint_bundle_id"],
@@ -6041,9 +6195,11 @@ def create_promotion_request(
             "joint_consistency_quality_warnings": value[
                 "joint_consistency_quality_warnings"
             ],
+            "review_input_bindings": review_input_bindings,
             "operator": value["operator"],
         },
     )
+    _fsync_promotion_directory(attempt_root)
     return value
 
 
@@ -6056,11 +6212,18 @@ def _validate_promotion_request_identity(
     attempt_id: str,
     promotion_request: Mapping[str, Any],
     promotion_status: Mapping[str, Any],
-) -> None:
+) -> list[dict[str, Any]]:
     if promotion_request.get("schema_version") != PROMOTION_REQUEST_SCHEMA_VERSION:
         raise ValueError("Unsupported calibration promotion request schema")
     if promotion_status.get("schema_version") != PROMOTION_SCHEMA_VERSION:
         raise ValueError("Unsupported calibration promotion status schema")
+    if promotion_status.get("status") not in {"queued", "running"}:
+        raise ValueError(
+            "Calibration promotion status is not an active approved request"
+        )
+    promotion_job_id = promotion_status.get("job_id")
+    if not isinstance(promotion_job_id, str) or not promotion_job_id.strip():
+        raise ValueError("Calibration promotion status lacks its durable job binding")
     if (
         promotion_request.get("attempt_id") != attempt_id
         or promotion_status.get("attempt_id") != attempt_id
@@ -6094,6 +6257,25 @@ def _validate_promotion_request_identity(
                 "Calibration promotion request/status consistency evidence is "
                 "inconsistent"
             )
+    if promotion_request.get("created_at") != promotion_status.get(
+        "requested_at"
+    ) or promotion_request.get("operator") != promotion_status.get("operator"):
+        raise ValueError(
+            "Calibration promotion request/status approval audit fields are "
+            "inconsistent"
+        )
+    request_bindings = _validated_promotion_review_input_bindings(
+        promotion_request.get("review_input_bindings")
+    )
+    status_bindings = _validated_promotion_review_input_bindings(
+        promotion_status.get("review_input_bindings")
+    )
+    if request_bindings != status_bindings:
+        raise ValueError(
+            "Calibration promotion request/status review-input bindings are "
+            "inconsistent"
+        )
+    return request_bindings
 
 
 def _promotion_count(value: Any, *, label: str, candidate_id: str) -> int:
@@ -6498,9 +6680,11 @@ def _selected_profiles(
         if (
             inlier_count < DEFAULT_MIN_INLIERS
             or profile.quality.residual_translation_mm is None
-            or profile.quality.residual_translation_mm > DEFAULT_MAX_MEAN_TRANSLATION_MM
+            or profile.quality.residual_translation_mm
+            > DEFAULT_HARD_MAX_MEAN_TRANSLATION_MM
             or profile.quality.residual_rotation_deg is None
-            or profile.quality.residual_rotation_deg > DEFAULT_MAX_MEAN_ROTATION_DEG
+            or profile.quality.residual_rotation_deg
+            > DEFAULT_HARD_MAX_MEAN_ROTATION_DEG
             or outlier_ratio > DEFAULT_MAX_OUTLIER_RATIO
             or repeated_motion_outlier_ratio > DEFAULT_MAX_OUTLIER_RATIO
         ):
@@ -6517,6 +6701,11 @@ def _selected_profiles(
                     "pnp_method": candidate["pnp_method"],
                     "extrinsic_method": candidate["extrinsic_method"],
                 },
+                "promotion_quality_warnings": [
+                    dict(check)
+                    for check in profile.metadata.get("quality_warnings", [])
+                    if isinstance(check, Mapping)
+                ],
                 "promotion_synchronization_provenance": {
                     "source": time_offset_source,
                     "status": alignment["status"],
@@ -6562,43 +6751,1138 @@ def _selected_profiles(
     return selected
 
 
+def _selected_intrinsic_profiles(
+    attempt_intrinsics: Sequence[Mapping[str, Any]],
+    selected_profiles: Sequence[CalibrationProfile],
+) -> list[dict[str, Any]]:
+    """Bind each promoted extrinsic profile to its exact reviewed intrinsics."""
+
+    promoted: list[dict[str, Any]] = []
+    for profile in selected_profiles:
+        intrinsic_profile_id = profile.metadata.get("intrinsic_profile_id")
+        if not isinstance(intrinsic_profile_id, str) or not intrinsic_profile_id:
+            raise ValueError(
+                f"Candidate profile {profile.profile_id!r} lacks its intrinsic "
+                "profile identity"
+            )
+        matches = [
+            dict(item)
+            for item in attempt_intrinsics
+            if item.get("profile_id") == intrinsic_profile_id
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"Candidate profile {profile.profile_id!r} does not bind exactly "
+                f"one intrinsic profile {intrinsic_profile_id!r}"
+            )
+        intrinsic = matches[0]
+        if (
+            str(intrinsic.get("sensor_id")) != profile.sensor_id
+            or _camera_intrinsics(intrinsic) != profile.intrinsics
+        ):
+            raise ValueError(
+                f"Candidate profile {profile.profile_id!r} has inconsistent "
+                "intrinsic profile evidence"
+            )
+
+        serialized_profile = profile_to_dict(profile)["intrinsics"]
+        expected_native = {
+            key: serialized_profile["native"][key]
+            for key in (
+                "cam_K",
+                "width",
+                "height",
+                "distortion_model",
+                "distortion",
+            )
+        }
+        expected_rectified = serialized_profile["rectified"]
+        if expected_rectified is not None:
+            expected_rectified = {
+                key: expected_rectified[key]
+                for key in (
+                    "cam_K",
+                    "width",
+                    "height",
+                    "distortion_model",
+                    "distortion",
+                    "alpha",
+                    "valid_roi",
+                )
+            }
+        if (
+            intrinsic.get("native") != expected_native
+            or intrinsic.get("rectified") != expected_rectified
+            or not _optional_floats_match(
+                intrinsic.get("depth", {}).get("scale_to_mm")
+                if isinstance(intrinsic.get("depth"), Mapping)
+                else None,
+                profile.intrinsics.depth_scale_to_mm,
+            )
+        ):
+            raise ValueError(
+                f"Candidate profile {profile.profile_id!r} does not preserve its "
+                "reviewed intrinsic projection"
+            )
+        promoted.append(intrinsic)
+    return promoted
+
+
+def _promotion_path_exists(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def _remove_promotion_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _fsync_promotion_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISDIR(opened.st_mode):
+            raise ValueError(f"Calibration promotion directory is not regular: {path}")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_promotion_tree(root: Path) -> None:
+    """Make every regular staged file and directory durable before journaling."""
+
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError(
+            f"Calibration promotion staging must be a regular directory: {root}"
+        )
+    for current, directory_names, file_names in os.walk(
+        root,
+        topdown=False,
+        followlinks=False,
+    ):
+        current_path = Path(current)
+        for name in [*directory_names, *file_names]:
+            child = current_path / name
+            child_stat = os.stat(child, follow_symlinks=False)
+            if not (
+                stat.S_ISDIR(child_stat.st_mode) or stat.S_ISREG(child_stat.st_mode)
+            ):
+                raise ValueError(
+                    "Calibration promotion staging contains a non-regular entry: "
+                    f"{child}"
+                )
+        for name in file_names:
+            child = current_path / name
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(child, flags)
+            try:
+                opened = os.fstat(descriptor)
+                if not stat.S_ISREG(opened.st_mode):
+                    raise ValueError(
+                        f"Calibration promotion staged artifact is invalid: {child}"
+                    )
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        _fsync_promotion_directory(current_path)
+
+
+def _assert_promotion_path_ancestors(
+    run_root: Path,
+    path: Path,
+    *,
+    label: str,
+) -> None:
+    try:
+        relative = path.relative_to(run_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Calibration promotion transaction {label} path escapes the run"
+        ) from exc
+    cursor = run_root
+    for part in relative.parts[:-1]:
+        cursor /= part
+        if cursor.is_symlink():
+            raise ValueError(
+                "Calibration promotion transaction paths must not contain "
+                f"symlink ancestors: {cursor}"
+            )
+        if cursor.exists() and not cursor.is_dir():
+            raise ValueError(
+                "Calibration promotion transaction path has a non-directory "
+                f"ancestor: {cursor}"
+            )
+
+
+def _promotion_relative_path(run_root: Path, path: Path) -> str:
+    _assert_promotion_path_ancestors(run_root, path, label="managed")
+    try:
+        return path.relative_to(run_root).as_posix()
+    except ValueError as exc:
+        raise ValueError(
+            "Calibration promotion transaction path escapes the run"
+        ) from exc
+
+
+def _promotion_journal_path(
+    run_root: Path,
+    value: object,
+    *,
+    label: str,
+) -> Path:
+    relative = Path(str(value))
+    if not relative.parts or relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"Calibration promotion transaction {label} path is invalid")
+    path = run_root / relative
+    _assert_promotion_path_ancestors(run_root, path, label=label)
+    return path
+
+
+def _promotion_file_evidence(path: Path) -> dict[str, Any]:
+    initial = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISREG(initial.st_mode):
+        raise ValueError(
+            f"Calibration promotion artifact is not a regular file: {path}"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(
+            f"Calibration promotion artifact is not a regular file: {path}"
+        ) from exc
+    digest = hashlib.sha256()
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+            initial.st_dev,
+            initial.st_ino,
+        ):
+            raise ValueError(
+                f"Calibration promotion artifact is not a regular file: {path}"
+            )
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        after_read = os.fstat(descriptor)
+        visible = os.stat(path, follow_symlinks=False)
+        opened_identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        )
+        if (
+            not stat.S_ISREG(visible.st_mode)
+            or (visible.st_dev, visible.st_ino) != (opened.st_dev, opened.st_ino)
+            or (
+                after_read.st_dev,
+                after_read.st_ino,
+                after_read.st_size,
+                after_read.st_mtime_ns,
+                after_read.st_ctime_ns,
+            )
+            != opened_identity
+        ):
+            raise ValueError(
+                f"Calibration promotion artifact changed while reading: {path}"
+            )
+    finally:
+        os.close(descriptor)
+    return {
+        "kind": "file",
+        "size_bytes": opened.st_size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _read_promotion_control_json(path: Path, *, label: str) -> dict[str, Any]:
+    """Read a bounded promotion control without following a raced symlink."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(
+            f"Calibration promotion {label} must be a regular file"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_size > PROMOTION_MAX_JOURNAL_BYTES
+        ):
+            raise ValueError(
+                f"Calibration promotion {label} must be a bounded regular file"
+            )
+        chunks: list[bytes] = []
+        remaining = PROMOTION_MAX_JOURNAL_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        serialized = b"".join(chunks)
+        if len(serialized) > PROMOTION_MAX_JOURNAL_BYTES:
+            raise ValueError(f"Calibration promotion {label} is too large")
+        after_read = os.fstat(descriptor)
+        visible = os.stat(path, follow_symlinks=False)
+        opened_identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        )
+        if (
+            not stat.S_ISREG(visible.st_mode)
+            or (visible.st_dev, visible.st_ino) != (opened.st_dev, opened.st_ino)
+            or (
+                after_read.st_dev,
+                after_read.st_ino,
+                after_read.st_size,
+                after_read.st_mtime_ns,
+                after_read.st_ctime_ns,
+            )
+            != opened_identity
+        ):
+            raise ValueError(f"Calibration promotion {label} changed while reading")
+
+        def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(
+                        f"Calibration promotion {label} contains duplicate key {key!r}"
+                    )
+                result[key] = value
+            return result
+
+        def reject_nonstandard_number(token: str) -> NoReturn:
+            raise ValueError(
+                f"Calibration promotion {label} contains non-standard number {token}"
+            )
+
+        value = json.loads(
+            serialized,
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_nonstandard_number,
+        )
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise ValueError(f"Calibration promotion {label} is invalid JSON") from exc
+    finally:
+        os.close(descriptor)
+    if not isinstance(value, dict):
+        raise ValueError(f"Calibration promotion {label} must contain a JSON object")
+    return value
+
+
+def _promotion_path_evidence(path: Path) -> dict[str, Any]:
+    if path.is_symlink():
+        raise ValueError(
+            "Calibration promotion transaction artifacts must not be symlinks"
+        )
+    if path.is_file():
+        return _promotion_file_evidence(path)
+    if not path.is_dir():
+        raise ValueError(
+            f"Calibration promotion transaction artifact is not regular: {path}"
+        )
+    members: list[dict[str, Any]] = []
+    total_size = 0
+    root_stat = os.stat(path, follow_symlinks=False)
+    observed_entries: list[tuple[Path, int, int, int, int, int]] = []
+    for current, directory_names, file_names in os.walk(path, followlinks=False):
+        current_path = Path(current)
+        directory_names.sort()
+        file_names.sort()
+        for name in directory_names:
+            child = current_path / name
+            child_stat = os.stat(child, follow_symlinks=False)
+            if not stat.S_ISDIR(child_stat.st_mode):
+                raise ValueError(
+                    "Calibration promotion transaction directory contains a "
+                    f"non-regular entry: {child}"
+                )
+            members.append(
+                {
+                    "kind": "directory",
+                    "path": child.relative_to(path).as_posix(),
+                }
+            )
+            observed_entries.append(
+                (
+                    child,
+                    child_stat.st_dev,
+                    child_stat.st_ino,
+                    child_stat.st_size,
+                    child_stat.st_mtime_ns,
+                    child_stat.st_ctime_ns,
+                )
+            )
+        for name in file_names:
+            child = current_path / name
+            child_before = os.stat(child, follow_symlinks=False)
+            if not stat.S_ISREG(child_before.st_mode):
+                raise ValueError(
+                    "Calibration promotion transaction directory contains a "
+                    f"non-regular entry: {child}"
+                )
+            child_evidence = _promotion_file_evidence(child)
+            child_stat = os.stat(child, follow_symlinks=False)
+            if (child_stat.st_dev, child_stat.st_ino) != (
+                child_before.st_dev,
+                child_before.st_ino,
+            ):
+                raise ValueError(
+                    f"Calibration promotion directory changed while reading: {path}"
+                )
+            size = int(child_evidence["size_bytes"])
+            total_size += size
+            members.append(
+                {
+                    "kind": "file",
+                    "path": child.relative_to(path).as_posix(),
+                    "size_bytes": size,
+                    "sha256": child_evidence["sha256"],
+                }
+            )
+            observed_entries.append(
+                (
+                    child,
+                    child_stat.st_dev,
+                    child_stat.st_ino,
+                    child_stat.st_size,
+                    child_stat.st_mtime_ns,
+                    child_stat.st_ctime_ns,
+                )
+            )
+    visible_root = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISDIR(visible_root.st_mode) or (
+        visible_root.st_dev,
+        visible_root.st_ino,
+        visible_root.st_size,
+        visible_root.st_mtime_ns,
+        visible_root.st_ctime_ns,
+    ) != (
+        root_stat.st_dev,
+        root_stat.st_ino,
+        root_stat.st_size,
+        root_stat.st_mtime_ns,
+        root_stat.st_ctime_ns,
+    ):
+        raise ValueError(
+            f"Calibration promotion directory changed while reading: {path}"
+        )
+    for (
+        child,
+        expected_device,
+        expected_inode,
+        expected_size,
+        expected_mtime,
+        expected_ctime,
+    ) in observed_entries:
+        current = os.stat(child, follow_symlinks=False)
+        if (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_mtime_ns,
+            current.st_ctime_ns,
+        ) != (
+            expected_device,
+            expected_inode,
+            expected_size,
+            expected_mtime,
+            expected_ctime,
+        ):
+            raise ValueError(
+                f"Calibration promotion directory changed while reading: {path}"
+            )
+    serialized = json.dumps(
+        members,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return {
+        "kind": "directory",
+        "entry_count": len(members),
+        "size_bytes": total_size,
+        "sha256": hashlib.sha256(serialized).hexdigest(),
+    }
+
+
+def _validate_promotion_evidence(value: object, *, label: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            f"Calibration promotion transaction {label} evidence is invalid"
+        )
+    evidence = dict(value)
+    kind = evidence.get("kind")
+    if kind not in {"file", "directory"}:
+        raise ValueError(
+            f"Calibration promotion transaction {label} evidence is invalid"
+        )
+    expected_keys = (
+        {"kind", "size_bytes", "sha256"}
+        if kind == "file"
+        else {"kind", "entry_count", "size_bytes", "sha256"}
+    )
+    if set(evidence) != expected_keys:
+        raise ValueError(
+            f"Calibration promotion transaction {label} evidence is invalid"
+        )
+    for key in expected_keys - {"kind", "sha256"}:
+        if (
+            isinstance(evidence.get(key), bool)
+            or not isinstance(evidence.get(key), int)
+            or evidence[key] < 0
+        ):
+            raise ValueError(
+                f"Calibration promotion transaction {label} evidence is invalid"
+            )
+    digest = evidence.get("sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError(
+            f"Calibration promotion transaction {label} evidence is invalid"
+        )
+    return evidence
+
+
+def _require_promotion_evidence(
+    path: Path,
+    expected: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    if not _promotion_path_exists(path):
+        raise ValueError(
+            f"Calibration promotion transaction {label} artifact is missing"
+        )
+    if _promotion_path_evidence(path) != dict(expected):
+        raise ValueError(f"Calibration promotion transaction {label} artifact changed")
+
+
+def _promotion_review_input_bindings(attempt_root: Path) -> list[dict[str, Any]]:
+    bindings: list[dict[str, Any]] = []
+    for relative in PROMOTION_REVIEW_INPUT_PATHS:
+        path = attempt_root / relative
+        if not _promotion_path_exists(path):
+            raise ValueError(
+                f"Calibration promotion review input is missing: {relative}"
+            )
+        try:
+            evidence = _promotion_path_evidence(path)
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"Calibration promotion review input is invalid: {relative}"
+            ) from exc
+        bindings.append({"path": relative, **evidence})
+    return bindings
+
+
+def _validated_promotion_review_input_bindings(
+    value: object,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) != len(PROMOTION_REVIEW_INPUT_PATHS):
+        raise ValueError(
+            "Calibration promotion request lacks exact review-input bindings; "
+            "create a new promotion request"
+        )
+    bindings: list[dict[str, Any]] = []
+    for expected_path, raw_binding in zip(
+        PROMOTION_REVIEW_INPUT_PATHS,
+        value,
+        strict=True,
+    ):
+        if not isinstance(raw_binding, Mapping):
+            raise ValueError(
+                "Calibration promotion review-input binding is invalid: "
+                f"{expected_path}"
+            )
+        binding = dict(raw_binding)
+        if binding.pop("path", None) != expected_path:
+            raise ValueError(
+                "Calibration promotion review-input bindings do not exactly "
+                "cover the required evidence"
+            )
+        try:
+            evidence = _validate_promotion_evidence(
+                binding,
+                label=f"review input {expected_path}",
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "Calibration promotion review-input binding is invalid: "
+                f"{expected_path}"
+            ) from exc
+        bindings.append({"path": expected_path, **evidence})
+    return bindings
+
+
+def _require_promotion_review_inputs(
+    attempt_root: Path,
+    bindings: Sequence[Mapping[str, Any]],
+) -> None:
+    for binding in bindings:
+        relative = str(binding["path"])
+        path = attempt_root / relative
+        if not _promotion_path_exists(path):
+            raise ValueError(
+                "Calibration promotion review input is missing after approval: "
+                f"{relative}"
+            )
+        expected = {key: value for key, value in binding.items() if key != "path"}
+        try:
+            actual = _promotion_path_evidence(path)
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                "Calibration promotion review input is invalid after approval: "
+                f"{relative}"
+            ) from exc
+        if actual != expected:
+            raise ValueError(
+                f"Calibration promotion review input changed after approval: {relative}"
+            )
+
+
+def _promotion_transaction_roots(
+    run_root: Path,
+    *,
+    attempt_id: str,
+    transaction_id: str,
+) -> tuple[Path, Path]:
+    staging = run_root / (f".calibration-promotion-{attempt_id}-{transaction_id}.tmp")
+    backup = run_root / (f".calibration-promotion-{attempt_id}-{transaction_id}.bak")
+    return staging, backup
+
+
+def _promotion_transaction_targets(
+    run_root: Path,
+    *,
+    attempt_id: str,
+    target_id: str,
+) -> list[Path]:
+    try:
+        normalized_target_id = str(uuid.UUID(target_id))
+    except (AttributeError, ValueError) as exc:
+        raise ValueError(
+            "Calibration promotion transaction target identity is invalid"
+        ) from exc
+    if normalized_target_id != target_id:
+        raise ValueError("Calibration promotion transaction target identity is invalid")
+    return [
+        run_root / CALIBRATION_TARGET,
+        run_root / INTRINSIC_CALIBRATION_PROFILES,
+        run_root / CALIBRATION_PROFILES,
+        run_root / RUN_CONFIG,
+        run_root / DATASET_MANIFEST,
+        run_root / LIBRARY_DIRECTORY / target_id,
+        calibration_attempt_root(run_root, attempt_id) / PROMOTION_FILE,
+    ]
+
+
+def _promotion_staged_paths(
+    staging_root: Path,
+    targets: Sequence[Path],
+) -> list[Path]:
+    return [
+        *[staging_root / target.name for target in targets[:5]],
+        staging_root / TARGET_BUNDLE_DIRECTORY,
+        staging_root / PROMOTION_FILE,
+    ]
+
+
+def _load_promotion_transaction(
+    run_root: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]], Path, Path]:
+    journal_path = run_root / PROMOTION_TRANSACTION_FILE
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(journal_path, flags)
+    except OSError as exc:
+        raise ValueError(
+            "Calibration promotion transaction journal must be a regular file"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_size > PROMOTION_MAX_JOURNAL_BYTES
+        ):
+            raise ValueError(
+                "Calibration promotion transaction journal must be a bounded "
+                "regular file"
+            )
+        with os.fdopen(descriptor, "r", encoding="utf-8", closefd=False) as handle:
+            serialized = handle.read(PROMOTION_MAX_JOURNAL_BYTES + 1)
+        if len(serialized.encode("utf-8")) > PROMOTION_MAX_JOURNAL_BYTES:
+            raise ValueError("Calibration promotion transaction journal is too large")
+
+        def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(
+                        "Calibration promotion transaction journal contains "
+                        f"duplicate key {key!r}"
+                    )
+                result[key] = value
+            return result
+
+        def reject_nonstandard_number(token: str) -> NoReturn:
+            raise ValueError(
+                "Calibration promotion transaction journal contains "
+                f"non-standard number {token}"
+            )
+
+        try:
+            journal = json.loads(
+                serialized,
+                object_pairs_hook=reject_duplicate_keys,
+                parse_constant=reject_nonstandard_number,
+            )
+        except (json.JSONDecodeError, UnicodeError) as exc:
+            raise ValueError(
+                "Calibration promotion transaction journal is invalid JSON"
+            ) from exc
+        after_read = os.fstat(descriptor)
+        visible = os.stat(journal_path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(visible.st_mode)
+            or (visible.st_dev, visible.st_ino) != (opened.st_dev, opened.st_ino)
+            or (after_read.st_dev, after_read.st_ino, after_read.st_size)
+            != (opened.st_dev, opened.st_ino, opened.st_size)
+        ):
+            raise ValueError(
+                "Calibration promotion transaction journal changed while reading"
+            )
+    finally:
+        os.close(descriptor)
+    expected_journal_keys = {
+        "schema_version",
+        "phase",
+        "transaction_id",
+        "attempt_id",
+        "target_id",
+        "entries",
+    }
+    if (
+        not isinstance(journal, Mapping)
+        or set(journal) != expected_journal_keys
+        or journal.get("schema_version") != PROMOTION_TRANSACTION_SCHEMA_VERSION
+        or journal.get("phase") not in {"prepared", "committed"}
+        or not isinstance(journal.get("entries"), list)
+    ):
+        raise ValueError("Calibration promotion transaction journal is invalid")
+    transaction_id = str(journal.get("transaction_id", ""))
+    attempt_id = validate_attempt_id(str(journal.get("attempt_id", "")))
+    if not PROMOTION_TRANSACTION_ID_PATTERN.fullmatch(transaction_id):
+        raise ValueError("Calibration promotion transaction identity is invalid")
+    target_id = str(journal.get("target_id", ""))
+    targets = _promotion_transaction_targets(
+        run_root,
+        attempt_id=attempt_id,
+        target_id=target_id,
+    )
+    staging_root, backup_root = _promotion_transaction_roots(
+        run_root,
+        attempt_id=attempt_id,
+        transaction_id=transaction_id,
+    )
+    staged_paths = _promotion_staged_paths(staging_root, targets)
+    if len(journal["entries"]) != len(targets):
+        raise ValueError("Calibration promotion transaction entry set is incomplete")
+    entries: list[dict[str, Any]] = []
+    for index, (raw, expected_target, expected_staged) in enumerate(
+        zip(journal["entries"], targets, staged_paths, strict=True)
+    ):
+        expected_entry_keys = {
+            "staged",
+            "target",
+            "backup",
+            "had_target",
+            "staged_evidence",
+            "prior_evidence",
+        }
+        if (
+            not isinstance(raw, Mapping)
+            or set(raw) != expected_entry_keys
+            or type(raw.get("had_target")) is not bool
+        ):
+            raise ValueError("Calibration promotion transaction entry is invalid")
+        staged = _promotion_journal_path(run_root, raw.get("staged"), label="staged")
+        target = _promotion_journal_path(run_root, raw.get("target"), label="target")
+        backup = _promotion_journal_path(run_root, raw.get("backup"), label="backup")
+        expected_backup = backup_root / str(index)
+        if (
+            staged != expected_staged
+            or target != expected_target
+            or backup != expected_backup
+        ):
+            raise ValueError(
+                "Calibration promotion transaction entry path is not managed"
+            )
+        staged_evidence = _validate_promotion_evidence(
+            raw.get("staged_evidence"), label="staged"
+        )
+        prior_raw = raw.get("prior_evidence")
+        prior_evidence = (
+            _validate_promotion_evidence(prior_raw, label="prior")
+            if prior_raw is not None
+            else None
+        )
+        if raw["had_target"] != (prior_evidence is not None):
+            raise ValueError(
+                "Calibration promotion transaction prior evidence is inconsistent"
+            )
+        entries.append(
+            {
+                "staged": staged,
+                "target": target,
+                "backup": backup,
+                "had_target": raw["had_target"],
+                "staged_evidence": staged_evidence,
+                "prior_evidence": prior_evidence,
+            }
+        )
+    return dict(journal), entries, staging_root, backup_root
+
+
+def _remove_empty_promotion_transaction_root(path: Path) -> None:
+    if not _promotion_path_exists(path):
+        return
+    if path.is_symlink() or not path.is_dir():
+        raise ValueError(
+            "Calibration promotion transaction workspace must be a regular directory"
+        )
+    unexpected = list(path.iterdir())
+    if unexpected:
+        raise ValueError(
+            "Calibration promotion transaction workspace contains unexpected entries"
+        )
+    path.rmdir()
+
+
+def _rollback_prepared_promotion_transaction(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    staging_root: Path,
+    backup_root: Path,
+) -> None:
+    for entry in entries:
+        staged = Path(entry["staged"])
+        target = Path(entry["target"])
+        backup = Path(entry["backup"])
+        staged_evidence = entry["staged_evidence"]
+        prior_evidence = entry["prior_evidence"]
+        if _promotion_path_exists(backup):
+            if prior_evidence is None:
+                raise ValueError(
+                    "Calibration promotion transaction has an unexpected backup"
+                )
+            _require_promotion_evidence(backup, prior_evidence, label="backup")
+            if _promotion_path_exists(target):
+                _require_promotion_evidence(target, staged_evidence, label="installed")
+        elif prior_evidence is not None:
+            _require_promotion_evidence(target, prior_evidence, label="prior")
+        elif _promotion_path_exists(target):
+            _require_promotion_evidence(target, staged_evidence, label="installed")
+        if _promotion_path_exists(staged):
+            _require_promotion_evidence(staged, staged_evidence, label="staged")
+    for entry in reversed(entries):
+        staged = Path(entry["staged"])
+        target = Path(entry["target"])
+        backup = Path(entry["backup"])
+        staged_evidence = entry["staged_evidence"]
+        prior_evidence = entry["prior_evidence"]
+        if _promotion_path_exists(backup):
+            if prior_evidence is None:
+                raise ValueError(
+                    "Calibration promotion transaction has an unexpected backup"
+                )
+            _require_promotion_evidence(backup, prior_evidence, label="backup")
+            if _promotion_path_exists(target):
+                _require_promotion_evidence(target, staged_evidence, label="installed")
+                _remove_promotion_path(target)
+            _replace_promotion_path(backup, target)
+        elif prior_evidence is not None:
+            _require_promotion_evidence(target, prior_evidence, label="prior")
+        elif _promotion_path_exists(target):
+            _require_promotion_evidence(target, staged_evidence, label="installed")
+            _remove_promotion_path(target)
+        if _promotion_path_exists(staged):
+            _require_promotion_evidence(staged, staged_evidence, label="staged")
+            _remove_promotion_path(staged)
+    for entry in entries:
+        target = Path(entry["target"])
+        prior_evidence = entry["prior_evidence"]
+        if prior_evidence is None:
+            if _promotion_path_exists(target):
+                raise ValueError(
+                    "Calibration promotion rollback retained a new artifact"
+                )
+        else:
+            _require_promotion_evidence(target, prior_evidence, label="restored")
+    _remove_empty_promotion_transaction_root(staging_root)
+    _remove_empty_promotion_transaction_root(backup_root)
+
+
+def _finish_committed_promotion_transaction(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    staging_root: Path,
+    backup_root: Path,
+) -> None:
+    for entry in entries:
+        staged = Path(entry["staged"])
+        target = Path(entry["target"])
+        backup = Path(entry["backup"])
+        _require_promotion_evidence(target, entry["staged_evidence"], label="committed")
+        if _promotion_path_exists(staged):
+            raise ValueError(
+                "Committed calibration promotion retained a staged artifact"
+            )
+        if _promotion_path_exists(backup):
+            prior_evidence = entry["prior_evidence"]
+            if prior_evidence is None:
+                raise ValueError(
+                    "Committed calibration promotion has an unexpected backup"
+                )
+            _require_promotion_evidence(backup, prior_evidence, label="backup")
+    for entry in entries:
+        backup = Path(entry["backup"])
+        if _promotion_path_exists(backup):
+            _remove_promotion_path(backup)
+    _remove_empty_promotion_transaction_root(staging_root)
+    _remove_empty_promotion_transaction_root(backup_root)
+
+
+def _cleanup_orphaned_promotion_workspaces(run_root: Path) -> None:
+    if not run_root.is_dir():
+        return
+    for candidate in run_root.iterdir():
+        if PROMOTION_STAGING_PATTERN.fullmatch(candidate.name):
+            _remove_promotion_path(candidate)
+        elif PROMOTION_BACKUP_PATTERN.fullmatch(candidate.name):
+            raise ValueError(
+                "Orphaned calibration promotion backup requires recovery evidence"
+            )
+        elif PROMOTION_JOURNAL_TEMP_PATTERN.fullmatch(candidate.name):
+            _remove_promotion_path(candidate)
+
+
+def _recover_calibration_promotion_transaction(
+    run_root: Path,
+) -> dict[str, Any] | None:
+    """Recover a durable promotion journal after process interruption."""
+
+    journal_path = run_root / PROMOTION_TRANSACTION_FILE
+    if not _promotion_path_exists(journal_path):
+        _cleanup_orphaned_promotion_workspaces(run_root)
+        return None
+    journal, entries, staging_root, backup_root = _load_promotion_transaction(run_root)
+    if journal["phase"] == "prepared":
+        _rollback_prepared_promotion_transaction(
+            entries,
+            staging_root=staging_root,
+            backup_root=backup_root,
+        )
+        journal_path.unlink()
+        _cleanup_orphaned_promotion_workspaces(run_root)
+        _fsync_promotion_directory(run_root)
+        return None
+    cleanup_complete = True
+    try:
+        _finish_committed_promotion_transaction(
+            entries,
+            staging_root=staging_root,
+            backup_root=backup_root,
+        )
+    except OSError:
+        cleanup_complete = False
+    promoted_path = (
+        calibration_attempt_root(run_root, str(journal["attempt_id"])) / PROMOTION_FILE
+    )
+    promoted = _read_promotion_control_json(promoted_path, label="committed status")
+    if (
+        promoted.get("schema_version") != PROMOTION_SCHEMA_VERSION
+        or promoted.get("attempt_id") != journal["attempt_id"]
+        or promoted.get("status") != "promoted"
+    ):
+        raise ValueError("Committed calibration promotion status evidence is invalid")
+    if cleanup_complete:
+        journal_path.unlink()
+        _cleanup_orphaned_promotion_workspaces(run_root)
+        _fsync_promotion_directory(run_root)
+    return promoted
+
+
+def _recover_pending_calibration_promotion(
+    run_root: Path,
+) -> dict[str, Any] | None:
+    journal_path = run_root / PROMOTION_TRANSACTION_FILE
+    if not _promotion_path_exists(journal_path):
+        return None
+    with run_config_lock(run_root):
+        return _recover_calibration_promotion_transaction(run_root.resolve())
+
+
+def _replace_promotion_path(source: Path, destination: Path) -> None:
+    """Isolated replacement hook used by crash-recovery regressions."""
+
+    rename_path_no_replace(source, destination)
+
+
 def _transactional_replace(
     run_root: Path,
     promotions: Sequence[tuple[Path, Path]],
+    *,
+    attempt_id: str,
+    target_id: str,
+    transaction_id: str,
 ) -> None:
-    backup_root = run_root / f".calibration-promotion-backup-{uuid.uuid4().hex}"
-    backup_root.mkdir(parents=False, exist_ok=False)
-    installed: list[Path] = []
-    backups: list[tuple[Path, Path]] = []
+    if not PROMOTION_TRANSACTION_ID_PATTERN.fullmatch(transaction_id):
+        raise ValueError("Calibration promotion transaction identity is invalid")
+    expected_targets = _promotion_transaction_targets(
+        run_root,
+        attempt_id=attempt_id,
+        target_id=target_id,
+    )
+    staging_root, backup_root = _promotion_transaction_roots(
+        run_root,
+        attempt_id=attempt_id,
+        transaction_id=transaction_id,
+    )
+    expected_staged = _promotion_staged_paths(staging_root, expected_targets)
+    pairs = list(promotions)
+    if (
+        len(pairs) != len(expected_targets)
+        or [source for source, _target in pairs] != expected_staged
+        or [target for _source, target in pairs] != expected_targets
+    ):
+        raise ValueError("Calibration promotion transaction artifact set is incomplete")
+    journal_path = run_root / PROMOTION_TRANSACTION_FILE
+    if _promotion_path_exists(journal_path):
+        raise ValueError("A calibration promotion transaction is already active")
+    if _promotion_path_exists(backup_root):
+        raise ValueError("Calibration promotion backup workspace already exists")
+    _fsync_promotion_tree(staging_root)
+    entries = []
+    for index, (source, target) in enumerate(pairs):
+        _assert_promotion_path_ancestors(run_root, source, label="staged")
+        _assert_promotion_path_ancestors(run_root, target, label="target")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        had_target = _promotion_path_exists(target)
+        entries.append(
+            {
+                "staged": _promotion_relative_path(run_root, source),
+                "target": _promotion_relative_path(run_root, target),
+                "backup": _promotion_relative_path(run_root, backup_root / str(index)),
+                "had_target": had_target,
+                "staged_evidence": _promotion_path_evidence(source),
+                "prior_evidence": (
+                    _promotion_path_evidence(target) if had_target else None
+                ),
+            }
+        )
+    journal = {
+        "schema_version": PROMOTION_TRANSACTION_SCHEMA_VERSION,
+        "phase": "prepared",
+        "transaction_id": transaction_id,
+        "attempt_id": attempt_id,
+        "target_id": target_id,
+        "entries": entries,
+    }
+    atomic_write_json(journal_path, journal)
+    _fsync_promotion_directory(run_root)
+    validated_journal, validated_entries, _, _ = _load_promotion_transaction(run_root)
     try:
-        for index, (source, destination) in enumerate(promotions):
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if destination.exists():
-                backup = backup_root / str(index)
-                os.replace(destination, backup)
-                backups.append((backup, destination))
-            os.replace(source, destination)
-            installed.append(destination)
+        backup_root.mkdir(parents=False, exist_ok=False)
+        _fsync_promotion_directory(run_root)
+        for entry in validated_entries:
+            target = Path(entry["target"])
+            if entry["had_target"]:
+                _require_promotion_evidence(
+                    target, entry["prior_evidence"], label="prior"
+                )
+                _replace_promotion_path(target, Path(entry["backup"]))
+            elif _promotion_path_exists(target):
+                raise ValueError(
+                    "Calibration promotion target appeared after preparation"
+                )
+        for entry in validated_entries:
+            source = Path(entry["staged"])
+            target = Path(entry["target"])
+            _require_promotion_evidence(
+                source, entry["staged_evidence"], label="staged"
+            )
+            if _promotion_path_exists(target):
+                raise ValueError(
+                    "Calibration promotion target was not moved to its backup"
+                )
+            _replace_promotion_path(source, target)
+        for entry in validated_entries:
+            _require_promotion_evidence(
+                Path(entry["target"]),
+                entry["staged_evidence"],
+                label="installed",
+            )
     except Exception:
-        for destination in reversed(installed):
-            if destination.is_dir():
-                shutil.rmtree(destination)
-            elif destination.exists():
-                destination.unlink()
-        for backup, destination in reversed(backups):
-            os.replace(backup, destination)
+        _rollback_prepared_promotion_transaction(
+            validated_entries,
+            staging_root=staging_root,
+            backup_root=backup_root,
+        )
+        journal_path.unlink()
+        _fsync_promotion_directory(run_root)
         raise
-    finally:
-        if backup_root.exists():
-            shutil.rmtree(backup_root)
+    validated_journal["phase"] = "committed"
+    try:
+        atomic_write_json(journal_path, validated_journal)
+        _fsync_promotion_directory(run_root)
+    except Exception:
+        recovered = _recover_calibration_promotion_transaction(run_root)
+        if recovered is not None:
+            return
+        raise
+    try:
+        _finish_committed_promotion_transaction(
+            validated_entries,
+            staging_root=staging_root,
+            backup_root=backup_root,
+        )
+    except OSError:
+        # The committed journal makes cleanup retryable without changing which
+        # artifact generation is authoritative.
+        return
+    journal_path.unlink()
+    _fsync_promotion_directory(run_root)
 
 
 def promote_calibration_attempt(
     run_root: str | Path, attempt_id: str
 ) -> dict[str, Any]:
     root = Path(run_root).resolve()
+    normalized_attempt_id = validate_attempt_id(attempt_id)
     with run_config_lock(root):
-        return _promote_calibration_attempt_locked(root, attempt_id)
+        recovered = _recover_calibration_promotion_transaction(root)
+        if (
+            recovered is not None
+            and recovered.get("attempt_id") == normalized_attempt_id
+        ):
+            return recovered
+        return _promote_calibration_attempt_locked(root, normalized_attempt_id)
 
 
 def _promote_calibration_attempt_locked(
@@ -6606,6 +7890,11 @@ def _promote_calibration_attempt_locked(
 ) -> dict[str, Any]:
     root = Path(run_root)
     attempt_root = calibration_attempt_root(root, attempt_id)
+    _assert_promotion_path_ancestors(
+        root,
+        attempt_root / PROMOTION_FILE,
+        label="attempt",
+    )
     attempt = load_calibration_attempt(root, attempt_id)
     request_value = attempt["request"]
     _require_current_attempt_request(request_value)
@@ -6618,18 +7907,27 @@ def _promote_calibration_attempt_locked(
             )
         _require_static_pose_template_base_reference(root, reference_evidence)
     _verify_robot_pose_artifact_bindings(root, request_value)
-    promotion_request = _read_json(attempt_root / PROMOTION_REQUEST_FILE)
+    promotion_request = _read_promotion_control_json(
+        attempt_root / PROMOTION_REQUEST_FILE,
+        label="request",
+    )
     promotion_path = attempt_root / PROMOTION_FILE
-    current = _read_json(promotion_path)
-    _validate_promotion_request_identity(
+    current = _read_promotion_control_json(promotion_path, label="status")
+    review_input_bindings = _validate_promotion_request_identity(
         root,
         attempt_id,
         promotion_request,
         current,
     )
+    _require_promotion_review_inputs(attempt_root, review_input_bindings)
     current.update({"status": "running", "started_at": utc_now_iso()})
     atomic_write_json(promotion_path, current)
-    staging = root / f".calibration-promotion-{attempt_id}-{uuid.uuid4().hex}"
+    transaction_id = uuid.uuid4().hex
+    staging, _backup = _promotion_transaction_roots(
+        root,
+        attempt_id=attempt_id,
+        transaction_id=transaction_id,
+    )
     staging.mkdir(parents=False, exist_ok=False)
     try:
         current_config = load_run_config_for_run_root(root)
@@ -6682,12 +7980,10 @@ def _promote_calibration_attempt_locked(
             if existing_intrinsics_path.is_file()
             else []
         )
-        selected_sensor_ids = {profile.sensor_id for profile in selected_profiles}
-        promoted_intrinsics = [
-            item
-            for item in attempt_intrinsics
-            if str(item.get("sensor_id")) in selected_sensor_ids
-        ]
+        promoted_intrinsics = _selected_intrinsic_profiles(
+            attempt_intrinsics,
+            selected_profiles,
+        )
         promoted_intrinsic_keys = {
             (
                 str(item["sensor_id"]),
@@ -6757,6 +8053,38 @@ def _promote_calibration_attempt_locked(
         atomic_write_json(staging / DATASET_MANIFEST, manifest)
         bundle_stage = staging / TARGET_BUNDLE_DIRECTORY
         shutil.copytree(attempt_root / TARGET_BUNDLE_DIRECTORY, bundle_stage)
+        target_bundle_binding = next(
+            binding
+            for binding in review_input_bindings
+            if binding["path"] == TARGET_BUNDLE_DIRECTORY
+        )
+        _require_promotion_evidence(
+            bundle_stage,
+            {
+                key: value
+                for key, value in target_bundle_binding.items()
+                if key != "path"
+            },
+            label="approved staged target bundle",
+        )
+        promoted = {
+            "schema_version": PROMOTION_SCHEMA_VERSION,
+            "attempt_id": attempt_id,
+            "status": "promoted",
+            "job_id": current["job_id"],
+            "requested_at": promotion_request["created_at"],
+            "promoted_at": utc_now_iso(),
+            "operator": promotion_request.get("operator"),
+            "selections": dict(promotion_request["selections"]),
+            "joint_bundle_id": promotion_request.get("joint_bundle_id"),
+            "review_input_bindings": review_input_bindings,
+            "promoted_profile_ids": [
+                profile.profile_id for profile in selected_profiles
+            ],
+            "preserved_profile_ids": [profile.profile_id for profile in preserved],
+            "canonical_artifacts": sorted(canonical_artifacts),
+        }
+        atomic_write_json(staging / PROMOTION_FILE, promoted)
         promotions = [
             (staging / filename, root / filename)
             for filename in (
@@ -6773,26 +8101,27 @@ def _promote_calibration_attempt_locked(
                 root / LIBRARY_DIRECTORY / str(request_value["target_id"]),
             )
         )
-        _transactional_replace(root, promotions)
-        promoted = {
-            "schema_version": PROMOTION_SCHEMA_VERSION,
-            "attempt_id": attempt_id,
-            "status": "promoted",
-            "requested_at": promotion_request["created_at"],
-            "promoted_at": utc_now_iso(),
-            "operator": promotion_request.get("operator"),
-            "selections": dict(promotion_request["selections"]),
-            "joint_bundle_id": promotion_request.get("joint_bundle_id"),
-            "promoted_profile_ids": [
-                profile.profile_id for profile in selected_profiles
-            ],
-            "preserved_profile_ids": [profile.profile_id for profile in preserved],
-            "canonical_artifacts": sorted(canonical_artifacts),
-        }
-        atomic_write_json(promotion_path, promoted)
+        promotions.append((staging / PROMOTION_FILE, promotion_path))
+        # All source-dependent staging is complete. Recheck every approval
+        # binding before the transaction journal can make any staged artifact
+        # authoritative, catching mutation after the initial pre-write check.
+        _require_promotion_review_inputs(attempt_root, review_input_bindings)
+        _transactional_replace(
+            root,
+            promotions,
+            attempt_id=attempt_id,
+            target_id=str(request_value["target_id"]),
+            transaction_id=transaction_id,
+        )
         return promoted
     except Exception as exc:
-        failed = _read_json(promotion_path)
+        # A live journal owns every staged, installed, and backup path. Do not
+        # rewrite promotion.json or remove its staging tree after a recovery
+        # failure: either action would invalidate the evidence needed by the
+        # next locked recovery attempt.
+        if _promotion_path_exists(root / PROMOTION_TRANSACTION_FILE):
+            raise
+        failed = _read_promotion_control_json(promotion_path, label="status")
         failed.update(
             {
                 "status": "failed",
@@ -6803,5 +8132,7 @@ def _promote_calibration_attempt_locked(
         atomic_write_json(promotion_path, failed)
         raise
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        if not _promotion_path_exists(
+            root / PROMOTION_TRANSACTION_FILE
+        ) and _promotion_path_exists(staging):
+            _remove_promotion_path(staging)

@@ -8,7 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from posetestbot.pipeline.run_config import create_run_config, write_run_config
+from posetestbot.pipeline.run_config import (
+    create_run_config,
+    load_run_config_for_run_root,
+    write_run_config,
+)
 from posetestbot.web.app import create_app
 from posetestbot.web.routes import ui as web_ui
 from posetestbot.web.security import DEFAULT_RUN_ROOTS
@@ -330,3 +334,107 @@ def test_run_config_endpoint_never_persists_capture_gates(
     assert response.status_code == 400
     assert "unsupported fields: sequence_options" in response.get_json()["output"]
     assert not (run_root / "run_config.json").exists()
+
+
+@pytest.mark.parametrize(
+    "evidence_name",
+    [
+        "capture_execution_plan.json",
+        ".raw_robot_ee_poses.claim.json",
+        "raw_robot_ee_poses.journal." + ("1" * 32) + ".jsonl",
+        "raw_robot_ee_poses.partial.1.test.json",
+        "raw_robot_ee_poses.claim." + ("1" * 32) + ".recovered.json",
+    ],
+)
+def test_run_config_freezes_all_fields_after_capture_evidence(
+    tmp_path: Path,
+    monkeypatch,
+    evidence_name: str,
+) -> None:
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", tmp_path.as_posix())
+    run_root = tmp_path / "attempted-capture"
+    _write_valid_run(run_root, intent="calibration")
+    config = load_run_config_for_run_root(run_root)
+    (run_root / evidence_name).write_text("{}\n")
+    client = create_app().test_client()
+    payload = {
+        "run_root": run_root.as_posix(),
+        "run_name": config["run_name"],
+        "intent": "calibration",
+        "annotation_mode": "none",
+        "resolution": config["capture"]["resolution"],
+        "fps": config["capture"]["fps"],
+        "velocity_m_s": config["capture"]["velocity_m_s"],
+        "sensors": config["capture"]["sensors"],
+        "synchronization": config["capture"]["synchronization"],
+        "dataset_mode": "objectless",
+    }
+
+    state = client.get(
+        "/run-config", query_string={"run_root": run_root.as_posix()}
+    ).get_json()["camera_contract"]
+    assert state == {
+        "mutable": False,
+        "blockers": [
+            (
+                "raw_robot_ee_poses.journal.*.jsonl"
+                if evidence_name.startswith("raw_robot_ee_poses.journal.")
+                else "raw_robot_ee_poses.partial.*.json"
+                if evidence_name.startswith("raw_robot_ee_poses.partial.")
+                else "raw_robot_ee_poses.claim.*.recovered.json"
+                if evidence_name.startswith("raw_robot_ee_poses.claim.")
+                else evidence_name
+            )
+        ],
+    }
+
+    changed_speed = client.post(
+        "/run-config",
+        json={
+            **payload,
+            "velocity_m_s": (
+                0.02 if config["capture"]["velocity_m_s"] != 0.02 else 0.01
+            ),
+        },
+    )
+    assert changed_speed.status_code == 400
+    assert (
+        "Cannot replace run_config.json after a capture execution attempt"
+        in (changed_speed.get_json()["output"])
+    )
+
+    aliased_sensors = [dict(sensor) for sensor in config["capture"]["sensors"]]
+    aliased_sensors[0]["operator_alias"] = "Changed after capture"
+    aliased_sensors[0]["display_name"] = "Changed after capture"
+    changed_alias = client.post(
+        "/run-config", json={**payload, "sensors": aliased_sensors}
+    )
+    assert changed_alias.status_code == 400
+    assert "Cannot replace run_config.json" in changed_alias.get_json()["output"]
+
+    changed_annotation = client.post(
+        "/run-config", json={**payload, "annotation_mode": "pose"}
+    )
+    assert changed_annotation.status_code == 400
+    assert "Cannot replace run_config.json" in changed_annotation.get_json()["output"]
+
+
+def test_run_config_freezes_for_any_occupied_canonical_raw_pose_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", tmp_path.as_posix())
+    run_root = tmp_path / "occupied-raw-pose-path"
+    _write_valid_run(run_root, intent="calibration")
+    (run_root / "raw_robot_ee_poses.json").mkdir()
+
+    response = create_app().test_client().get(
+        "/run-config",
+        query_string={"run_root": run_root.as_posix()},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["camera_contract"] == {
+        "mutable": False,
+        "blockers": ["raw_robot_ee_poses.json"],
+    }

@@ -76,6 +76,8 @@ def fake_sensor_status(expected_counts=None) -> dict:
                         "display_name": "RealSense 1",
                         "effective_display_name": "Wrist RealSense",
                         "connected": True,
+                        "capture_ready": True,
+                        "capture_readiness_reason": None,
                         "inverted": False,
                         "metadata": {
                             "video_nodes": [
@@ -90,6 +92,8 @@ def fake_sensor_status(expected_counts=None) -> dict:
                         "display_name": "RealSense 2",
                         "effective_display_name": "Overhead RealSense",
                         "connected": True,
+                        "capture_ready": True,
+                        "capture_readiness_reason": None,
                         "inverted": False,
                         "metadata": {
                             "video_nodes": [
@@ -102,6 +106,7 @@ def fake_sensor_status(expected_counts=None) -> dict:
             }
         ],
         "total_connected": 2,
+        "total_capture_ready": 2,
         "all_expected_connected": True,
         "expected_counts_requested": False,
     }
@@ -126,6 +131,8 @@ def fake_full_lab_sensor_status(expected_counts=None) -> dict:
             "display_name": "RealSense 3",
             "effective_display_name": "Side RealSense",
             "connected": True,
+            "capture_ready": True,
+            "capture_readiness_reason": None,
             "inverted": False,
             "metadata": {
                 "video_nodes": [{"path": "/dev/video12", "accessible": True}],
@@ -145,6 +152,8 @@ def fake_full_lab_sensor_status(expected_counts=None) -> dict:
                         "display_name": "OAK-D Pro",
                         "effective_display_name": "OAK-D Pro",
                         "connected": True,
+                        "capture_ready": True,
+                        "capture_readiness_reason": None,
                         "inverted": False,
                         "metadata": {},
                     }
@@ -160,6 +169,8 @@ def fake_full_lab_sensor_status(expected_counts=None) -> dict:
                         "display_name": "ZED 2i",
                         "effective_display_name": "ZED 2i",
                         "connected": True,
+                        "capture_ready": True,
+                        "capture_readiness_reason": None,
                         "inverted": False,
                         "metadata": {},
                     }
@@ -168,6 +179,7 @@ def fake_full_lab_sensor_status(expected_counts=None) -> dict:
         ]
     )
     status["total_connected"] = 5
+    status["total_capture_ready"] = 5
     return status
 
 
@@ -181,6 +193,7 @@ def fake_full_lab_sensor_status_with_claimed_oak(expected_counts=None) -> dict:
     oak_family["devices"] = []
     oak_family["connected_count"] = 0
     status["total_connected"] = 4
+    status["total_capture_ready"] = 4
     return status
 
 
@@ -532,11 +545,23 @@ def test_unready_camera_is_not_presented_as_usable_or_selectable_on_devices(
     expect(unready.locator('[data-testid="sensor-capture-readiness"]')).to_contain_text(
         "below SuperSpeed"
     )
-    expect(unready.locator('[data-testid="sensor-preview-toggle"]')).to_be_disabled()
-    expect(unready.locator('[data-testid="sensor-preview-toggle"]')).to_contain_text(
+    preview_toggle = unready.locator('[data-testid="sensor-preview-toggle"]')
+    snapshot_button = unready.get_by_role("button", name="Snapshot")
+    expect(preview_toggle).to_be_disabled()
+    expect(preview_toggle).to_contain_text(
         "Not ready"
     )
-    expect(unready.get_by_role("button", name="Snapshot")).to_be_disabled()
+    expect(snapshot_button).to_be_disabled()
+    readiness_reason_id = unready.locator(
+        '[data-testid="sensor-capture-readiness"]'
+    ).get_attribute("id")
+    assert readiness_reason_id
+    assert readiness_reason_id in (
+        preview_toggle.get_attribute("aria-describedby") or ""
+    ).split()
+    assert readiness_reason_id in (
+        snapshot_button.get_attribute("aria-describedby") or ""
+    ).split()
 
     expect(unready.locator('[data-testid="sensor-run-selection"]')).to_have_count(0)
     expect(

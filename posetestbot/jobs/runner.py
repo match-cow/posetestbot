@@ -3,21 +3,31 @@
 from __future__ import annotations
 
 import base64
+import codecs
 import hashlib
 import json
 import os
 import signal
 import shlex
 import shutil
+import selectors
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+import weakref
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Mapping
+from typing import Iterator, Mapping
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - the lab/service runtime is Linux
+    fcntl = None
 
 from posetestbot.io.manifest import utc_now_iso
 from posetestbot.io.atomic import atomic_write_json
@@ -47,6 +57,75 @@ DEFAULT_JOB_PAGE_LIMIT = 50
 MAX_JOB_PAGE_LIMIT = 100
 JOB_INDEX_FILENAME = "index.sqlite3"
 JOB_INDEX_SCHEMA_VERSION = 1
+RESOURCE_LOCK_FILENAME = ".resource-claims.lock"
+JOB_STATE_LOCK_FILENAME = ".job-state.lock"
+JOB_CANCEL_REQUEST_FILENAME = "cancel_request.json"
+_RESOURCE_THREAD_LOCKS_GUARD = threading.Lock()
+_RESOURCE_THREAD_LOCKS: weakref.WeakValueDictionary[str, threading.RLock] = (
+    weakref.WeakValueDictionary()
+)
+_JOB_THREAD_LOCKS_GUARD = threading.Lock()
+_JOB_THREAD_LOCKS: weakref.WeakValueDictionary[str, threading.RLock] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _resource_thread_lock(job_root: Path) -> threading.RLock:
+    key = Path(os.path.abspath(job_root)).as_posix()
+    with _RESOURCE_THREAD_LOCKS_GUARD:
+        return _RESOURCE_THREAD_LOCKS.setdefault(key, threading.RLock())
+
+
+def _job_thread_lock(job_dir: Path) -> threading.RLock:
+    key = Path(os.path.abspath(job_dir)).as_posix()
+    with _JOB_THREAD_LOCKS_GUARD:
+        return _JOB_THREAD_LOCKS.setdefault(key, threading.RLock())
+
+
+def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _open_stable_directory(path: Path, *, label: str) -> tuple[int, os.stat_result]:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    descriptor_stat = os.fstat(descriptor)
+    try:
+        pathname_stat = os.stat(path, follow_symlinks=False)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    if not stat.S_ISDIR(descriptor_stat.st_mode) or not _same_inode(
+        descriptor_stat,
+        pathname_stat,
+    ):
+        os.close(descriptor)
+        raise RuntimeError(f"{label} directory identity changed while opening: {path}")
+    return descriptor, descriptor_stat
+
+
+def _verify_locked_path(
+    *,
+    directory_path: Path,
+    directory_fd: int,
+    directory_stat: os.stat_result,
+    lock_name: str,
+    lock_stat: os.stat_result,
+    label: str,
+) -> None:
+    try:
+        current_directory = os.stat(directory_path, follow_symlinks=False)
+        current_lock = os.stat(lock_name, dir_fd=directory_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise RuntimeError(f"{label} lock identity disappeared while waiting") from exc
+    if not _same_inode(directory_stat, current_directory):
+        raise RuntimeError(f"{label} directory identity changed while waiting")
+    if not stat.S_ISREG(lock_stat.st_mode) or not _same_inode(lock_stat, current_lock):
+        raise RuntimeError(f"{label} lock identity changed while waiting")
 
 
 def _resolve_supervised_command(
@@ -140,6 +219,7 @@ class LocalJobRunner:
         self._processes: dict[str, subprocess.Popen] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._local_job_ids: set[str] = set()
+        self._pending_terminal_jobs: dict[str, tuple[JobRecord, bool]] = {}
         self._runner_pid = os.getpid()
         self._runner_start_time = self._read_process_start_time(self._runner_pid)
         self._ensure_index()
@@ -166,31 +246,50 @@ class LocalJobRunner:
             )
         normalized_run_root = self._validate_scope(scope_kind, run_root)
 
-        requested_resources = sorted(set(resources or []))
-        with self._lock:
-            self._check_resources_available(requested_resources)
-            job_id = uuid.uuid4().hex[:12]
-            job_dir = self.job_root / job_id
-            job_dir.mkdir(parents=True, exist_ok=False)
-            job = JobRecord(
-                id=job_id,
-                name=name,
-                command=list(command),
-                cwd=Path(cwd).as_posix() if cwd is not None else None,
-                status=QUEUED,
-                created_at=utc_now_iso(),
-                log_path=(job_dir / "log.txt").as_posix(),
-                resources=requested_resources,
-                parameters=dict(parameters or {}),
-                runner_pid=self._runner_pid,
-                runner_start_time=self._runner_start_time,
-                visibility=visibility,
-                scope_kind=scope_kind,
-                run_root=normalized_run_root,
+        raw_resources = list(resources or [])
+        if not all(
+            isinstance(resource, str)
+            and resource.strip() == resource
+            and bool(resource)
+            and all(resource.split(":"))
+            for resource in raw_resources
+        ):
+            raise ValueError(
+                "Job resources must be trimmed strings with non-empty hierarchy segments"
             )
-            self._jobs[job_id] = job
-            self._local_job_ids.add(job_id)
-            self._persist_job(job)
+        requested_resources = sorted(set(raw_resources))
+        self._reconcile_pending_terminal_jobs()
+        with self._resource_transaction():
+            with self._lock:
+                self._check_resources_available(requested_resources)
+                job_id = uuid.uuid4().hex[:12]
+                job_dir = self.job_root / job_id
+                job_dir.mkdir(parents=True, exist_ok=False)
+                job = JobRecord(
+                    id=job_id,
+                    name=name,
+                    command=list(command),
+                    cwd=Path(cwd).as_posix() if cwd is not None else None,
+                    status=QUEUED,
+                    created_at=utc_now_iso(),
+                    log_path=(job_dir / "log.txt").as_posix(),
+                    resources=requested_resources,
+                    parameters=dict(parameters or {}),
+                    runner_pid=self._runner_pid,
+                    runner_start_time=self._runner_start_time,
+                    visibility=visibility,
+                    scope_kind=scope_kind,
+                    run_root=normalized_run_root,
+                )
+                try:
+                    self._jobs[job_id] = job
+                    self._local_job_ids.add(job_id)
+                    self._persist_job(job)
+                except BaseException:
+                    self._jobs.pop(job_id, None)
+                    self._local_job_ids.discard(job_id)
+                    shutil.rmtree(job_dir, ignore_errors=True)
+                    raise
 
         thread = threading.Thread(
             target=self._run_job,
@@ -200,14 +299,36 @@ class LocalJobRunner:
         )
         with self._lock:
             self._threads[job_id] = thread
-        thread.start()
+        try:
+            thread.start()
+        except BaseException as exc:
+            with self._lock:
+                self._threads.pop(job_id, None)
+                job = self._jobs[job_id]
+                terminal = JobRecord(**job.to_dict())
+                terminal.status = FAILED
+                terminal.ended_at = utc_now_iso()
+                terminal.message = (
+                    "Job worker thread could not start: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                self._append_tail(terminal, terminal.message)
+            self._defer_or_publish_terminal_job(job_id, terminal)
+            raise
         return self.get(job_id)
 
     def resource_holders(self, *, include_services: bool = False) -> dict[str, str]:
-        with self._lock:
-            return self._resource_holders(include_services=include_services)
+        self._reconcile_pending_terminal_jobs()
+        with self._resource_transaction():
+            with self._lock:
+                return self._resource_holders(include_services=include_services)
 
     def get(self, job_id: str) -> JobRecord:
+        self._refresh_foreign_jobs(job_id=job_id)
+        with self._lock:
+            has_pending_terminal = job_id in self._pending_terminal_jobs
+        if has_pending_terminal:
+            self._reconcile_pending_terminal_jobs()
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
@@ -241,6 +362,8 @@ class LocalJobRunner:
         include_services: bool = True,
     ) -> JobPage:
         """Return active work plus one stable keyset page of terminal history."""
+
+        self._refresh_foreign_jobs()
 
         if isinstance(limit, bool) or not 1 <= int(limit) <= MAX_JOB_PAGE_LIMIT:
             raise ValueError(f"limit must be an integer from 1 to {MAX_JOB_PAGE_LIMIT}")
@@ -378,49 +501,79 @@ class LocalJobRunner:
             if job.status in TERMINAL_STATUSES:
                 return JobRecord(**job.to_dict())
             process = self._processes.get(job_id)
-            job.status = CANCELED if job.status == QUEUED else CANCELING
-            job.message = "Cancellation requested."
-            if job.status == CANCELED:
-                job.ended_at = utc_now_iso()
-            self._append_tail(job, "Cancellation requested.")
-            self._persist_job(job)
+            snapshot = JobRecord(**job.to_dict())
 
-        if process is not None and process.poll() is None:
-            self._terminate_process_group(process)
-            with self._lock:
-                job = self._jobs.get(job_id)
-                if (
-                    job is not None
-                    and job.status == CANCELING
-                    and process.poll() is not None
-                ):
-                    job.status = CANCELED
-                    job.ended_at = utc_now_iso()
-                    job.returncode = process.returncode
-                    job.message = "Canceled."
-                    self._persist_job(job)
+        try:
+            requested = self._request_cancellation(snapshot)
+        except BaseException:
+            if process is not None:
+                try:
+                    self._terminate_process_group(process)
+                except BaseException:
+                    pass
+            else:
+                try:
+                    persisted = self._load_job_with_supervisor_identity(
+                        job_id,
+                        wait_s=0.0,
+                    )
+                    self._terminate_persisted_process_group(persisted)
+                except BaseException:
+                    pass
+            raise
+        with self._lock:
+            local = self._jobs.get(job_id)
+            if local is not None:
+                local.status = requested.status
+                local.ended_at = requested.ended_at
+                local.message = requested.message
+                if not local.tail or local.tail[-1] != "Cancellation requested.":
+                    self._append_tail(local, "Cancellation requested.")
+
+        stopped = requested.status == CANCELED
+        if not stopped and process is not None:
+            stopped = self._terminate_process_group(process)
+        elif not stopped:
+            persisted = self._load_job_with_supervisor_identity(job_id, wait_s=2.0)
+            stopped = self._terminate_persisted_process_group(persisted)
+
+        if stopped and requested.status != CANCELED:
+            self._finish_verified_cancellation(job_id, process=process)
         return self.get(job_id)
 
     def shutdown(self, *, timeout: float = 5.0) -> None:
         """Stop all locally owned groups, escalating once the grace period ends."""
 
         with self._lock:
-            active_ids = [
-                job.id
+            active = [
+                JobRecord(**job.to_dict())
                 for job in self._jobs.values()
                 if job.id in self._local_job_ids and job.status not in TERMINAL_STATUSES
             ]
+        active_ids = [job.id for job in active]
         processes: dict[str, subprocess.Popen] = {}
-        with self._lock:
-            for job_id in active_ids:
-                job = self._jobs[job_id]
-                job.status = CANCELED if job.status == QUEUED else CANCELING
+        for snapshot in active:
+            try:
+                requested = self._request_cancellation(snapshot)
+            except BaseException:
+                requested = JobRecord(**snapshot.to_dict())
+                requested.status = (
+                    CANCELED if requested.status == QUEUED else CANCELING
+                )
+                requested.ended_at = (
+                    utc_now_iso() if requested.status == CANCELED else None
+                )
+            with self._lock:
+                job = self._jobs.get(snapshot.id)
+                if job is None:
+                    continue
+                job.status = requested.status
+                job.ended_at = requested.ended_at
                 job.message = "Shutdown requested."
                 self._append_tail(job, job.message)
-                self._persist_job(job)
-                process = self._processes.get(job_id)
+                process = self._processes.get(snapshot.id)
                 if process is not None and process.poll() is None:
-                    processes[job_id] = process
+                    processes[snapshot.id] = process
 
         for process in processes.values():
             self._signal_supervisor(process, signal.SIGTERM)
@@ -432,15 +585,15 @@ class LocalJobRunner:
             if thread is None:
                 continue
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        for job_id, process in processes.items():
+        for process in processes.values():
             if process.poll() is None:
-                self._signal_supervisor(process, signal.SIGKILL)
-                self._terminate_recorded_workload(self.get(job_id), signal.SIGKILL)
+                self._terminate_process_group(process, timeout_s=1.0)
         for job_id in active_ids:
             with self._lock:
                 thread = self._threads.get(job_id)
             if thread is not None:
                 thread.join(timeout=1.0)
+        self._reconcile_pending_terminal_jobs()
 
     def log_text(self, job_id: str) -> str:
         job = self.get(job_id)
@@ -450,19 +603,36 @@ class LocalJobRunner:
         return log_path.read_text()
 
     def _run_job(self, job_id: str, env: dict[str, str]) -> None:
+        try:
+            self._run_job_inner(job_id, env)
+        except BaseException as exc:
+            self._fail_job_after_runner_error(job_id, exc)
+
+    def _run_job_inner(self, job_id: str, env: dict[str, str]) -> None:
+        canceled_before_start: JobRecord | None = None
         with self._lock:
             job = self._jobs[job_id]
             if job.status in {CANCELED, CANCELING}:
-                if job.status == CANCELING:
-                    job.status = CANCELED
-                    job.ended_at = utc_now_iso()
-                    self._persist_job(job)
-                self._jobs.pop(job_id, None)
-                self._threads.pop(job_id, None)
-                return
-            job.status = RUNNING
-            job.started_at = utc_now_iso()
-            self._persist_job(job)
+                canceled_before_start = JobRecord(**job.to_dict())
+                canceled_before_start.status = CANCELED
+                canceled_before_start.ended_at = (
+                    canceled_before_start.ended_at or utc_now_iso()
+                )
+                canceled_before_start.message = "Canceled."
+            else:
+                job.status = RUNNING
+                job.started_at = utc_now_iso()
+                self._persist_job(job)
+                if job.status in {CANCELED, CANCELING}:
+                    canceled_before_start = JobRecord(**job.to_dict())
+                    canceled_before_start.status = CANCELED
+                    canceled_before_start.ended_at = (
+                        canceled_before_start.ended_at or utc_now_iso()
+                    )
+                    canceled_before_start.message = "Canceled."
+        if canceled_before_start is not None:
+            self._defer_or_publish_terminal_job(job_id, canceled_before_start)
+            return
 
         with open(job.log_path, "ab", buffering=0) as log:
             log_bytes = log.tell()
@@ -494,6 +664,9 @@ class LocalJobRunner:
             write_log(f"$ {self._format_command(job.command)}\n")
             try:
                 identity_path = Path(job.log_path).parent / "supervisor.json"
+                cancel_request_path = (
+                    Path(job.log_path).parent / JOB_CANCEL_REQUEST_FILENAME
+                )
                 supervised_command = _resolve_supervised_command(job.command)
                 if supervised_command != job.command:
                     write_log(
@@ -510,6 +683,8 @@ class LocalJobRunner:
                     str(self._runner_start_time),
                     "--identity-path",
                     identity_path.as_posix(),
+                    "--cancel-request-path",
+                    cancel_request_path.as_posix(),
                     "--termination-timeout",
                     "5",
                     "--",
@@ -530,13 +705,12 @@ class LocalJobRunner:
             except Exception as exc:
                 with self._lock:
                     job = self._jobs[job_id]
-                    job.status = FAILED
-                    job.ended_at = utc_now_iso()
-                    job.message = f"{type(exc).__name__}: {exc}"
-                    self._append_tail(job, job.message)
-                    self._persist_job(job)
-                    self._jobs.pop(job_id, None)
-                    self._threads.pop(job_id, None)
+                    terminal = JobRecord(**job.to_dict())
+                    terminal.status = FAILED
+                    terminal.ended_at = utc_now_iso()
+                    terminal.message = f"{type(exc).__name__}: {exc}"
+                    self._append_tail(terminal, terminal.message)
+                self._defer_or_publish_terminal_job(job_id, terminal)
                 return
 
             with self._lock:
@@ -564,17 +738,22 @@ class LocalJobRunner:
             pending_tail = ""
             pending_tail_truncated = False
             last_tail_persisted_at = time.monotonic()
-            while True:
-                fragment = process.stdout.readline(OUTPUT_READ_CHARS)
-                if not fragment:
-                    break
-                write_log(fragment)
-                room = self.max_tail_line_chars - len(pending_tail)
-                if room > 0:
-                    pending_tail += fragment[:room]
-                if len(fragment) > room:
-                    pending_tail_truncated = True
-                if fragment.endswith("\n"):
+
+            def consume_tail_fragment(fragment: str) -> None:
+                nonlocal pending_tail
+                nonlocal pending_tail_truncated
+                nonlocal last_tail_persisted_at
+                pieces = fragment.split("\n")
+                for index, piece in enumerate(pieces):
+                    has_newline = index < len(pieces) - 1
+                    value = f"{piece}\n" if has_newline else piece
+                    room = max(0, self.max_tail_line_chars - len(pending_tail))
+                    if room > 0:
+                        pending_tail += value[:room]
+                    if len(value) > room:
+                        pending_tail_truncated = True
+                    if not has_newline:
+                        continue
                     line = pending_tail.rstrip("\r\n")
                     if pending_tail_truncated:
                         line += "… [line truncated]"
@@ -591,6 +770,10 @@ class LocalJobRunner:
                     pending_tail = ""
                     pending_tail_truncated = False
 
+            for fragment in self._iter_supervisor_output(process):
+                write_log(fragment)
+                consume_tail_fragment(fragment)
+
             if pending_tail or pending_tail_truncated:
                 line = pending_tail.rstrip("\r\n")
                 if pending_tail_truncated:
@@ -600,25 +783,126 @@ class LocalJobRunner:
                     self._append_tail(current, line)
 
             returncode = process.wait()
-            self._cleanup_recorded_workload(job_id, timeout_s=1.0)
+            workload_cleanup = self._cleanup_recorded_workload(job_id, timeout_s=1.0)
+            if workload_cleanup is False or (
+                returncode < 0 and workload_cleanup is not True
+            ):
+                raise RuntimeError(
+                    "Supervisor exited without verified workload-group cleanup"
+                )
             with self._lock:
                 job = self._jobs[job_id]
-                job.returncode = returncode
-                job.ended_at = utc_now_iso()
-                if job.status in {CANCELED, CANCELING}:
-                    job.status = CANCELED
-                    job.message = "Canceled."
+                terminal = JobRecord(**job.to_dict())
+                terminal.returncode = returncode
+                terminal.ended_at = utc_now_iso()
+                if terminal.status in {CANCELED, CANCELING}:
+                    terminal.status = CANCELED
+                    terminal.message = "Canceled."
                 elif returncode == 0:
-                    job.status = SUCCEEDED
-                    job.message = "Command completed successfully."
+                    terminal.status = SUCCEEDED
+                    terminal.message = "Command completed successfully."
                 else:
-                    job.status = FAILED
-                    job.message = f"Command exited with status {returncode}."
+                    terminal.status = FAILED
+                    terminal.message = f"Command exited with status {returncode}."
+                self._append_tail(terminal, terminal.message)
+            self._defer_or_publish_terminal_job(job_id, terminal)
+
+    def _fail_job_after_runner_error(
+        self,
+        job_id: str,
+        exc: BaseException,
+    ) -> None:
+        """Stop spawned work and release a claim after an internal runner fault."""
+
+        with self._lock:
+            process = self._processes.get(job_id)
+        stop_verified = process is None
+        if process is not None:
+            for attempt in range(3):
+                try:
+                    stop_verified = self._terminate_process_group(process)
+                except BaseException:
+                    stop_verified = False
+                if stop_verified:
+                    break
+                if attempt < 2:
+                    time.sleep(0.05)
+
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                if stop_verified:
+                    self._processes.pop(job_id, None)
+                    self._threads.pop(job_id, None)
+                return
+            terminal = JobRecord(**job.to_dict())
+            terminal.returncode = process.returncode if process is not None else None
+            terminal.ended_at = utc_now_iso()
+            if terminal.status in {CANCELED, CANCELING}:
+                terminal.status = CANCELED
+                terminal.message = "Canceled after an internal job runner failure."
+            else:
+                terminal.status = FAILED
+                terminal.message = (
+                    "Internal job runner failure: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            self._append_tail(terminal, terminal.message)
+            if not stop_verified:
+                job.message = (
+                    "Internal job runner failure; process termination has not been "
+                    "verified and the resource claim is retained: "
+                    f"{type(exc).__name__}: {exc}"
+                )
                 self._append_tail(job, job.message)
-                self._persist_job(job)
-                self._processes.pop(job_id, None)
                 self._threads.pop(job_id, None)
-                self._jobs.pop(job_id, None)
+                self._pending_terminal_jobs[job_id] = (terminal, True)
+                try:
+                    self._persist_job(job)
+                except BaseException:
+                    pass
+                return
+        self._defer_or_publish_terminal_job(job_id, terminal)
+
+    @staticmethod
+    def _iter_supervisor_output(process: subprocess.Popen) -> Iterator[str]:
+        """Yield output without hanging when an orphan keeps the pipe open."""
+
+        assert process.stdout is not None
+        if os.name == "nt":  # pragma: no cover - the service runtime is Linux
+            while True:
+                fragment = process.stdout.readline(OUTPUT_READ_CHARS)
+                if not fragment:
+                    return
+                yield fragment
+
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        descriptor = process.stdout.fileno()
+        exited_at: float | None = None
+        with selectors.DefaultSelector() as selector:
+            selector.register(descriptor, selectors.EVENT_READ)
+            while True:
+                if process.poll() is not None and exited_at is None:
+                    exited_at = time.monotonic()
+                timeout = 0.0 if exited_at is not None else 0.1
+                events = selector.select(timeout)
+                if not events:
+                    if exited_at is not None:
+                        break
+                    continue
+                payload = os.read(descriptor, OUTPUT_READ_CHARS)
+                if not payload:
+                    break
+                fragment = decoder.decode(payload)
+                if fragment:
+                    yield fragment
+                # Drain bytes already buffered at supervisor exit, but do not let a
+                # surviving descendant keep this worker blocked on the shared pipe.
+                if exited_at is not None and time.monotonic() - exited_at >= 0.1:
+                    break
+        final_fragment = decoder.decode(b"", final=True)
+        if final_fragment:
+            yield final_fragment
 
     def _append_tail(self, job: JobRecord, line: str) -> None:
         job.tail.append(self._bounded_tail_line(line))
@@ -637,18 +921,484 @@ class LocalJobRunner:
         suffix = "… [line truncated]"
         return line[: max(0, limit - len(suffix))] + suffix
 
+    @staticmethod
+    def _adopt_job_record(destination: JobRecord, source: JobRecord) -> None:
+        for item in fields(JobRecord):
+            setattr(destination, item.name, getattr(source, item.name))
+
+    @contextmanager
+    def _job_state_transaction(self, job_dir: Path) -> Iterator[None]:
+        """Serialize one job's state transitions across runner processes."""
+
+        thread_lock = _job_thread_lock(job_dir)
+        with thread_lock:
+            directory_fd, directory_stat = _open_stable_directory(
+                job_dir,
+                label="Job state",
+            )
+            flags = os.O_CREAT | os.O_RDWR
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            try:
+                descriptor = os.open(
+                    JOB_STATE_LOCK_FILENAME,
+                    flags,
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+            except BaseException:
+                os.close(directory_fd)
+                raise
+            try:
+                descriptor_stat = os.fstat(descriptor)
+                if not stat.S_ISREG(descriptor_stat.st_mode):
+                    raise RuntimeError("Job state lock must be a regular file")
+                if fcntl is not None:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                _verify_locked_path(
+                    directory_path=job_dir,
+                    directory_fd=directory_fd,
+                    directory_stat=directory_stat,
+                    lock_name=JOB_STATE_LOCK_FILENAME,
+                    lock_stat=descriptor_stat,
+                    label="Job state",
+                )
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+                os.close(directory_fd)
+
+    def _read_authoritative_job(self, job_dir: Path, job_id: str) -> JobRecord:
+        path = job_dir / "job.json"
+        if path.is_symlink() or job_dir.is_symlink():
+            raise RuntimeError(f"Persisted job state path is a symlink: {path}")
+        try:
+            with open(path, encoding="utf-8") as handle:
+                job = self._job_from_dict(json.load(handle))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Cannot verify persisted job state: {path}") from exc
+        if job.id != job_id:
+            raise RuntimeError(f"Persisted job identity does not match: {path}")
+        if Path(job.log_path).resolve() != (job_dir / "log.txt").resolve():
+            raise RuntimeError(f"Persisted job log path escapes its directory: {path}")
+        self._validate_process_identities(job)
+        return job
+
+    @staticmethod
+    def _validate_process_identities(job: JobRecord) -> None:
+        for field_name in (
+            "runner_pid",
+            "runner_start_time",
+            "supervisor_pid",
+            "supervisor_process_group_id",
+            "supervisor_start_time",
+            "process_pid",
+            "process_group_id",
+            "process_start_time",
+        ):
+            value = getattr(job, field_name)
+            if value is not None and (type(value) is not int or value <= 0):
+                raise ValueError(f"Persisted job {field_name} identity is invalid")
+        for prefix, values in (
+            ("runner", (job.runner_pid, job.runner_start_time)),
+            (
+                "supervisor",
+                (
+                    job.supervisor_pid,
+                    job.supervisor_process_group_id,
+                    job.supervisor_start_time,
+                ),
+            ),
+            (
+                "workload",
+                (job.process_pid, job.process_group_id, job.process_start_time),
+            ),
+        ):
+            populated = [value is not None for value in values]
+            if any(populated) and not all(populated):
+                raise ValueError(f"Persisted job {prefix} identity is incomplete")
+        if os.name != "nt":
+            if (
+                job.supervisor_pid is not None
+                and job.supervisor_process_group_id != job.supervisor_pid
+            ):
+                raise ValueError("Persisted supervisor group is not a dedicated session")
+            if job.process_pid is not None and job.process_group_id != job.process_pid:
+                raise ValueError("Persisted workload group is not a dedicated session")
+
+    def _cancellation_requested(self, job_dir: Path, job_id: str) -> bool:
+        path = job_dir / JOB_CANCEL_REQUEST_FILENAME
+        try:
+            path_stat = os.lstat(path)
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise RuntimeError(f"Job cancellation request is not a regular file: {path}")
+        try:
+            with open(path, encoding="utf-8") as handle:
+                value = json.load(handle)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Cannot verify job cancellation request: {path}") from exc
+        if (
+            not isinstance(value, dict)
+            or value.get("schema_version") != "job_cancel_request.v1"
+            or value.get("job_id") != job_id
+        ):
+            raise RuntimeError(f"Job cancellation request is invalid: {path}")
+        return True
+
+    def _merge_durable_job_state(
+        self,
+        candidate: JobRecord,
+        *,
+        existing: JobRecord | None,
+        cancellation_requested: bool,
+    ) -> JobRecord:
+        effective = JobRecord(**candidate.to_dict())
+        if existing is not None and existing.status in TERMINAL_STATUSES:
+            return existing
+        canceling = cancellation_requested or (
+            existing is not None and existing.status == CANCELING
+        )
+        if not canceling:
+            return effective
+
+        if effective.status in TERMINAL_STATUSES:
+            effective.status = CANCELED
+            effective.ended_at = effective.ended_at or utc_now_iso()
+            effective.message = "Canceled."
+            return effective
+
+        has_spawned_identity = any(
+            value is not None
+            for value in (
+                effective.supervisor_pid,
+                effective.process_pid,
+                existing.supervisor_pid if existing is not None else None,
+                existing.process_pid if existing is not None else None,
+            )
+        )
+        if effective.status == QUEUED or not has_spawned_identity:
+            effective.status = CANCELED
+            effective.ended_at = effective.ended_at or utc_now_iso()
+            effective.message = "Canceled."
+        else:
+            effective.status = CANCELING
+            effective.ended_at = None
+            effective.message = "Cancellation requested."
+        return effective
+
+    def _write_authoritative_job(self, path: Path, job: JobRecord) -> None:
+        self._validate_process_identities(job)
+        atomic_write_json(path, job.to_dict())
+        try:
+            self._upsert_index(path, job)
+        except Exception:
+            # The SQLite index is a rebuildable view.  Authoritative job state has
+            # already committed and must not be mistaken for a lifecycle failure.
+            pass
+
+    def _request_cancellation(self, snapshot: JobRecord) -> JobRecord:
+        job_dir = Path(snapshot.log_path).parent
+        with self._job_state_transaction(job_dir):
+            current = self._read_authoritative_job(job_dir, snapshot.id)
+            if current.status in TERMINAL_STATUSES:
+                return current
+            request_path = job_dir / JOB_CANCEL_REQUEST_FILENAME
+            if not self._cancellation_requested(job_dir, current.id):
+                atomic_write_json(
+                    request_path,
+                    {
+                        "schema_version": "job_cancel_request.v1",
+                        "job_id": current.id,
+                        "requested_at": utc_now_iso(),
+                        "requester_pid": self._runner_pid,
+                        "requester_start_time": self._runner_start_time,
+                    },
+                )
+            requested = JobRecord(**current.to_dict())
+            requested.status = CANCELED if current.status == QUEUED else CANCELING
+            requested.ended_at = utc_now_iso() if requested.status == CANCELED else None
+            requested.message = (
+                "Canceled." if requested.status == CANCELED else "Cancellation requested."
+            )
+            if not requested.tail or requested.tail[-1] != "Cancellation requested.":
+                self._append_tail(requested, "Cancellation requested.")
+            self._write_authoritative_job(job_dir / "job.json", requested)
+            return requested
+
+    def _load_job_with_supervisor_identity(
+        self,
+        job_id: str,
+        *,
+        wait_s: float = 0.0,
+    ) -> JobRecord:
+        job_dir = self.job_root / job_id
+        deadline = time.monotonic() + max(wait_s, 0.0)
+        while True:
+            with self._job_state_transaction(job_dir):
+                job = self._read_authoritative_job(job_dir, job_id)
+                identity_path = job_dir / "supervisor.json"
+                self._merge_supervisor_identity(job, identity_path, strict=True)
+            if (
+                job.supervisor_pid is not None
+                or job.status in TERMINAL_STATUSES
+                or time.monotonic() >= deadline
+            ):
+                return job
+            time.sleep(0.01)
+
+    def _finish_verified_cancellation(
+        self,
+        job_id: str,
+        *,
+        process: subprocess.Popen | None,
+    ) -> None:
+        job_dir = self.job_root / job_id
+        deferred = False
+        with self._job_state_transaction(job_dir):
+            current = self._read_authoritative_job(job_dir, job_id)
+            if current.status in TERMINAL_STATUSES:
+                terminal = current
+            else:
+                terminal = JobRecord(**current.to_dict())
+                terminal.status = CANCELED
+                terminal.ended_at = utc_now_iso()
+                terminal.returncode = (
+                    process.returncode if process is not None else terminal.returncode
+                )
+                terminal.message = "Canceled."
+                self._append_tail(terminal, terminal.message)
+                try:
+                    self._write_authoritative_job(job_dir / "job.json", terminal)
+                except BaseException:
+                    deferred = True
+        if deferred:
+            cleanup = job_id not in self._local_job_ids
+            with self._lock:
+                self._pending_terminal_jobs[job_id] = (terminal, cleanup)
+            return
+        with self._lock:
+            local = self._jobs.get(job_id)
+            if local is not None:
+                self._adopt_job_record(local, terminal)
+            if job_id not in self._local_job_ids:
+                self._jobs.pop(job_id, None)
+
+    def _defer_or_publish_terminal_job(
+        self,
+        job_id: str,
+        terminal: JobRecord,
+        *,
+        cleanup: bool = True,
+    ) -> bool:
+        try:
+            self._persist_job(terminal)
+        except BaseException:
+            with self._lock:
+                self._pending_terminal_jobs[job_id] = (terminal, cleanup)
+            return False
+        with self._lock:
+            self._pending_terminal_jobs.pop(job_id, None)
+            local = self._jobs.get(job_id)
+            if local is not None:
+                self._adopt_job_record(local, terminal)
+            if cleanup:
+                self._processes.pop(job_id, None)
+                self._threads.pop(job_id, None)
+                self._jobs.pop(job_id, None)
+                self._local_job_ids.discard(job_id)
+        return True
+
+    def _reconcile_pending_terminal_jobs(self) -> None:
+        with self._lock:
+            pending = [
+                (job_id, JobRecord(**terminal.to_dict()), cleanup)
+                for job_id, (terminal, cleanup) in self._pending_terminal_jobs.items()
+            ]
+        for job_id, terminal, cleanup in pending:
+            with self._lock:
+                process = self._processes.get(job_id)
+            if process is not None:
+                try:
+                    if not self._terminate_process_group(process):
+                        continue
+                except BaseException:
+                    continue
+            self._defer_or_publish_terminal_job(
+                job_id,
+                terminal,
+                cleanup=cleanup,
+            )
+
+    def _refresh_foreign_jobs(self, *, job_id: str | None = None) -> None:
+        with self._lock:
+            foreign_ids = [
+                item_id
+                for item_id in self._jobs
+                if item_id not in self._local_job_ids
+                and (job_id is None or item_id == job_id)
+            ]
+        for item_id in foreign_ids:
+            job_dir = self.job_root / item_id
+            with self._job_state_transaction(job_dir):
+                current = self._read_authoritative_job(job_dir, item_id)
+            with self._lock:
+                if item_id in self._local_job_ids:
+                    continue
+                if current.status in TERMINAL_STATUSES:
+                    self._jobs.pop(item_id, None)
+                else:
+                    self._jobs[item_id] = current
+
+    @contextmanager
+    def _resource_transaction(self) -> Iterator[None]:
+        """Serialize resource discovery and job publication across runners."""
+
+        thread_lock = _resource_thread_lock(self.job_root)
+        with thread_lock:
+            directory_fd, directory_stat = _open_stable_directory(
+                self.job_root,
+                label="Resource claim",
+            )
+            flags = os.O_CREAT | os.O_RDWR
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            try:
+                descriptor = os.open(
+                    RESOURCE_LOCK_FILENAME,
+                    flags,
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+            except BaseException:
+                os.close(directory_fd)
+                raise
+            try:
+                descriptor_stat = os.fstat(descriptor)
+                if not stat.S_ISREG(descriptor_stat.st_mode):
+                    raise RuntimeError("Resource claim lock must be a regular file")
+                if fcntl is not None:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                _verify_locked_path(
+                    directory_path=self.job_root,
+                    directory_fd=directory_fd,
+                    directory_stat=directory_stat,
+                    lock_name=RESOURCE_LOCK_FILENAME,
+                    lock_stat=descriptor_stat,
+                    label="Resource claim",
+                )
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+                os.close(directory_fd)
+
+    def _persisted_active_jobs(self) -> list[JobRecord]:
+        """Load active claims and reclaim jobs whose verified owner disappeared."""
+
+        active: list[JobRecord] = []
+        for path in sorted(self.job_root.glob("*/job.json")):
+            try:
+                if path.is_symlink() or path.parent.is_symlink():
+                    raise ValueError("Persisted job claim path is a symlink")
+                with open(path, encoding="utf-8") as handle:
+                    job = self._job_from_dict(json.load(handle))
+                if job.id != path.parent.name:
+                    raise ValueError(
+                        "Persisted job identity does not match its directory"
+                    )
+                if job.status not in {
+                    QUEUED,
+                    RUNNING,
+                    CANCELING,
+                    *TERMINAL_STATUSES,
+                }:
+                    raise ValueError("Persisted job status is invalid")
+                if job.status in TERMINAL_STATUSES:
+                    if job.id not in self._local_job_ids:
+                        self._jobs.pop(job.id, None)
+                    continue
+                if (
+                    len(job.id) != 12
+                    or job.id != job.id.lower()
+                    or any(character not in "0123456789abcdef" for character in job.id)
+                ):
+                    raise ValueError("Persisted active job identity is invalid")
+                if not isinstance(job.resources, list) or not all(
+                    isinstance(resource, str)
+                    and resource.strip() == resource
+                    and bool(resource)
+                    and all(resource.split(":"))
+                    for resource in job.resources
+                ):
+                    raise ValueError("Persisted job resources are invalid")
+                expected_log_path = (path.parent / "log.txt").resolve()
+                if Path(job.log_path).resolve() != expected_log_path:
+                    raise ValueError("Persisted job log path escapes its job directory")
+                self._cancellation_requested(path.parent, job.id)
+                supervisor_path = path.parent / "supervisor.json"
+                if supervisor_path.is_symlink():
+                    raise ValueError("Persisted supervisor identity is a symlink")
+                self._merge_supervisor_identity(job, supervisor_path, strict=True)
+                self._validate_process_identities(job)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    f"Cannot verify persisted resource claim: {path}"
+                ) from exc
+            if self._job_owner_is_alive(job):
+                if job.id not in self._local_job_ids:
+                    self._jobs[job.id] = job
+                active.append(job)
+                continue
+
+            orphan_stopped = self._terminate_persisted_process_group(job)
+            has_process_evidence = job.supervisor_pid is not None or job.process_pid is not None
+            if has_process_evidence and not orphan_stopped:
+                raise RuntimeError(
+                    "Cannot release persisted resource claim because its process "
+                    f"groups could not be verified stopped: {path}"
+                )
+            job.status = FAILED
+            job.ended_at = utc_now_iso()
+            job.returncode = None
+            job.message = "Job owner exited before this job completed."
+            if orphan_stopped:
+                job.message += " Its orphaned process group was stopped."
+            self._append_tail(job, job.message)
+            self._persist_job(job)
+            self._jobs.pop(job.id, None)
+        return active
+
     def _resource_holders(self, *, include_services: bool = True) -> dict[str, str]:
         holders = {}
-        for job in self._jobs.values():
-            if job.status in TERMINAL_STATUSES:
-                continue
+        for job in self._persisted_active_jobs():
             if not include_services and job.visibility == SERVICE_VISIBILITY:
                 continue
             for resource in job.resources:
+                conflicting = next(
+                    (
+                        (held, holder)
+                        for held, holder in holders.items()
+                        if holder != job.id and self._resources_conflict(resource, held)
+                    ),
+                    None,
+                )
+                if conflicting is not None:
+                    held, holder = conflicting
+                    raise RuntimeError(
+                        "Persisted resource claims overlap: "
+                        f"{resource} held by {job.id} conflicts with {held} held by {holder}"
+                    )
                 holders[resource] = job.id
         return holders
 
     def _check_resources_available(self, resources: list[str]) -> None:
+        if not resources:
+            return
         holders = self._resource_holders(include_services=True)
         conflicts: dict[str, str] = {}
         for requested in resources:
@@ -677,16 +1427,17 @@ class LocalJobRunner:
 
     def _terminate_process_group(
         self, process: subprocess.Popen, *, timeout_s: float = 5.0
-    ) -> None:
+    ) -> bool:
         if process.poll() is not None:
-            return
+            cleanup = self._cleanup_workload_for_supervisor(process, timeout_s=1.0)
+            return cleanup is True
 
         self._signal_supervisor(process, signal.SIGTERM)
 
         try:
             process.wait(timeout=timeout_s)
-            self._cleanup_workload_for_supervisor(process, timeout_s=1.0)
-            return
+            cleanup = self._cleanup_workload_for_supervisor(process, timeout_s=1.0)
+            return cleanup is not False
         except subprocess.TimeoutExpired:
             pass
 
@@ -694,25 +1445,18 @@ class LocalJobRunner:
         try:
             process.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
-            pass
-        with self._lock:
-            job_id = next(
-                (
-                    item_id
-                    for item_id, item_process in self._processes.items()
-                    if item_process is process
-                ),
-                None,
-            )
-        if job_id is not None:
-            self._cleanup_recorded_workload(job_id, timeout_s=0.0)
+            return False
+        cleanup = self._cleanup_workload_for_supervisor(process, timeout_s=0.0)
+        # SIGKILL bypasses the supervisor's workload cleanup handler.  If no
+        # workload identity was ever made durable, absence cannot be proven.
+        return cleanup is True
 
     def _cleanup_workload_for_supervisor(
         self,
         process: subprocess.Popen,
         *,
         timeout_s: float,
-    ) -> None:
+    ) -> bool | None:
         with self._lock:
             job_id = next(
                 (
@@ -723,19 +1467,43 @@ class LocalJobRunner:
                 None,
             )
         if job_id is not None:
-            self._cleanup_recorded_workload(job_id, timeout_s=timeout_s)
+            return self._cleanup_recorded_workload(job_id, timeout_s=timeout_s)
+        return None
 
-    def _cleanup_recorded_workload(self, job_id: str, *, timeout_s: float) -> None:
-        self._refresh_supervisor_identity(job_id)
-        job = self.get(job_id)
+    def _cleanup_recorded_workload(
+        self,
+        job_id: str,
+        *,
+        timeout_s: float,
+    ) -> bool | None:
+        try:
+            self._refresh_supervisor_identity(job_id)
+        except BaseException:
+            pass
+        with self._lock:
+            current = self._jobs.get(job_id)
+            if current is None:
+                return None
+            job = JobRecord(**current.to_dict())
+        self._merge_supervisor_identity(
+            job,
+            Path(job.log_path).parent / "supervisor.json",
+        )
+        if (
+            job.process_pid is None
+            or job.process_group_id is None
+            or job.process_start_time is None
+        ):
+            return None
         if not self._persisted_process_matches(job):
-            return
+            return True
         self._terminate_recorded_workload(job, signal.SIGTERM)
         deadline = time.monotonic() + max(timeout_s, 0.0)
         while self._persisted_process_matches(job) and time.monotonic() < deadline:
             time.sleep(0.02)
         if self._persisted_process_matches(job):
             self._terminate_recorded_workload(job, signal.SIGKILL)
+        return not self._persisted_process_matches(job)
 
     @staticmethod
     def _signal_supervisor(process: subprocess.Popen, signum: int) -> None:
@@ -756,18 +1524,18 @@ class LocalJobRunner:
         deadline = time.monotonic() + max(wait_s, 0.0)
         while True:
             try:
-                with open(path, encoding="utf-8") as handle:
-                    value = json.load(handle)
-                workload_pid = value.get("workload_pid")
-                if isinstance(workload_pid, int):
+                with self._lock:
+                    candidate = JobRecord(**self._jobs[job_id].to_dict())
+                self._merge_supervisor_identity(candidate, path, strict=True)
+                if candidate.process_pid is not None:
                     with self._lock:
                         job = self._jobs[job_id]
-                        job.process_pid = workload_pid
-                        job.process_group_id = value.get("workload_process_group_id")
-                        job.process_start_time = value.get("workload_start_time")
+                        job.process_pid = candidate.process_pid
+                        job.process_group_id = candidate.process_group_id
+                        job.process_start_time = candidate.process_start_time
                         self._persist_job(job)
                     return
-            except (OSError, ValueError, json.JSONDecodeError):
+            except FileNotFoundError:
                 pass
             if time.monotonic() >= deadline:
                 return
@@ -795,7 +1563,12 @@ class LocalJobRunner:
                     data = json.load(f)
                 job = self._job_from_dict(data)
                 self._normalize_loaded_tail(job)
-                self._merge_supervisor_identity(job, path.parent / "supervisor.json")
+                self._merge_supervisor_identity(
+                    job,
+                    path.parent / "supervisor.json",
+                    strict=True,
+                )
+                self._validate_process_identities(job)
             except Exception:
                 continue
 
@@ -853,12 +1626,79 @@ class LocalJobRunner:
         return read_process_start_time(pid)
 
     @staticmethod
-    def _merge_supervisor_identity(job: JobRecord, path: Path) -> None:
+    def _process_is_zombie(pid: int) -> bool:
+        if os.name == "nt":
+            return False
+        try:
+            value = Path(f"/proc/{pid}/stat").read_text()
+            fields_after_name = value[value.rfind(")") + 2 :].split()
+            return fields_after_name[0] == "Z"
+        except (IndexError, OSError):
+            return False
+
+    @staticmethod
+    def _dedicated_group_has_live_members(group_id: int) -> bool:
+        """Find descendants that remain in a workload's dedicated session."""
+
+        if os.name == "nt":
+            return False
+        try:
+            process_entries = Path("/proc").iterdir()
+        except OSError:
+            return False
+        for entry in process_entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                value = (entry / "stat").read_text()
+                fields = value[value.rfind(")") + 2 :].split()
+                state = fields[0]
+                process_group = int(fields[2])
+                session_id = int(fields[3])
+            except (IndexError, OSError, ValueError):
+                continue
+            if (
+                state != "Z"
+                and process_group == group_id
+                and session_id == group_id
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _merge_supervisor_identity(
+        job: JobRecord,
+        path: Path,
+        *,
+        strict: bool = False,
+    ) -> bool:
         try:
             with open(path, encoding="utf-8") as handle:
                 value = json.load(handle)
-        except (OSError, ValueError, json.JSONDecodeError):
-            return
+        except FileNotFoundError:
+            return False
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            if strict:
+                raise ValueError(f"Persisted supervisor identity is unreadable: {path}") from exc
+            return False
+        if not isinstance(value, dict) or value.get("schema_version") != (
+            "job_process_supervisor.v1"
+        ):
+            if strict:
+                raise ValueError(f"Persisted supervisor identity is invalid: {path}")
+            return False
+        for field_name, identity_name in (
+            ("runner_pid", "owner_pid"),
+            ("runner_start_time", "owner_start_time"),
+        ):
+            recorded = getattr(job, field_name)
+            identity_value = value.get(identity_name)
+            if recorded is not None and identity_value != recorded:
+                if strict:
+                    raise ValueError(
+                        f"Persisted supervisor owner identity conflicts with {field_name}"
+                    )
+                return False
         mappings = {
             "supervisor_pid": "supervisor_pid",
             "supervisor_process_group_id": "supervisor_process_group_id",
@@ -869,8 +1709,22 @@ class LocalJobRunner:
         }
         for field_name, identity_name in mappings.items():
             value_item = value.get(identity_name)
-            if getattr(job, field_name) is None and isinstance(value_item, int):
+            recorded = getattr(job, field_name)
+            if recorded is not None and value_item is not None and value_item != recorded:
+                if strict:
+                    raise ValueError(
+                        f"Persisted supervisor identity conflicts with {field_name}"
+                    )
+                return False
+            if recorded is None and type(value_item) is int and value_item > 0:
                 setattr(job, field_name, value_item)
+            elif value_item is not None and (type(value_item) is not int or value_item <= 0):
+                if strict:
+                    raise ValueError(
+                        f"Persisted supervisor identity has invalid {identity_name}"
+                    )
+                return False
+        return True
 
     @classmethod
     def _persisted_process_matches(cls, job: JobRecord) -> bool:
@@ -879,8 +1733,15 @@ class LocalJobRunner:
         start_time = job.process_start_time
         if pid is None or group_id is None or start_time is None or os.name == "nt":
             return False
-        if cls._read_process_start_time(pid) != start_time:
+        if group_id != pid:
             return False
+        current_start_time = cls._read_process_start_time(pid)
+        if current_start_time is None:
+            return cls._dedicated_group_has_live_members(group_id)
+        if current_start_time != start_time:
+            return False
+        if cls._process_is_zombie(pid):
+            return cls._dedicated_group_has_live_members(group_id)
         try:
             return os.getpgid(pid) == group_id
         except ProcessLookupError:
@@ -899,34 +1760,58 @@ class LocalJobRunner:
         *,
         timeout_s: float = 2.0,
     ) -> bool:
-        """Stop a verified process group left by an interrupted runner."""
+        """Stop verified supervisor/workload groups and prove both are absent."""
 
-        stopped = False
+        has_identity = (
+            job.supervisor_pid is not None
+            and job.supervisor_process_group_id is not None
+            and job.supervisor_start_time is not None
+        ) or (
+            job.process_pid is not None
+            and job.process_group_id is not None
+            and job.process_start_time is not None
+        )
         if cls._persisted_supervisor_matches(job):
             assert job.supervisor_process_group_id is not None
             try:
                 os.killpg(job.supervisor_process_group_id, signal.SIGTERM)
-                stopped = True
             except ProcessLookupError:
                 pass
-        if not cls._persisted_process_matches(job):
-            return stopped
-        assert job.process_group_id is not None
-        try:
-            os.killpg(job.process_group_id, signal.SIGTERM)
-            stopped = True
-        except ProcessLookupError:
-            return stopped
+        if cls._persisted_process_matches(job):
+            assert job.process_group_id is not None
+            try:
+                os.killpg(job.process_group_id, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
 
         deadline = time.monotonic() + max(timeout_s, 0.0)
-        while cls._persisted_process_matches(job) and time.monotonic() < deadline:
+        while (
+            cls._persisted_supervisor_matches(job)
+            or cls._persisted_process_matches(job)
+        ) and time.monotonic() < deadline:
             time.sleep(0.02)
+        if cls._persisted_supervisor_matches(job):
+            assert job.supervisor_process_group_id is not None
+            try:
+                os.killpg(job.supervisor_process_group_id, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         if cls._persisted_process_matches(job):
+            assert job.process_group_id is not None
             try:
                 os.killpg(job.process_group_id, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        return stopped
+        final_deadline = time.monotonic() + 1.0
+        while (
+            cls._persisted_supervisor_matches(job)
+            or cls._persisted_process_matches(job)
+        ) and time.monotonic() < final_deadline:
+            time.sleep(0.02)
+        return has_identity and not (
+            cls._persisted_supervisor_matches(job)
+            or cls._persisted_process_matches(job)
+        )
 
     @classmethod
     def _persisted_supervisor_matches(cls, job: JobRecord) -> bool:
@@ -935,7 +1820,11 @@ class LocalJobRunner:
         start_time = job.supervisor_start_time
         if pid is None or group_id is None or start_time is None or os.name == "nt":
             return False
+        if group_id != pid:
+            return False
         if cls._read_process_start_time(pid) != start_time:
+            return False
+        if cls._process_is_zombie(pid):
             return False
         try:
             return os.getpgid(pid) == group_id
@@ -954,9 +1843,21 @@ class LocalJobRunner:
             return False
 
     def _persist_job(self, job: JobRecord) -> None:
-        path = Path(job.log_path).parent / "job.json"
-        atomic_write_json(path, job.to_dict())
-        self._upsert_index(path, job)
+        job_dir = Path(job.log_path).parent
+        path = job_dir / "job.json"
+        with self._job_state_transaction(job_dir):
+            existing = (
+                self._read_authoritative_job(job_dir, job.id)
+                if path.is_file()
+                else None
+            )
+            effective = self._merge_durable_job_state(
+                job,
+                existing=existing,
+                cancellation_requested=self._cancellation_requested(job_dir, job.id),
+            )
+            self._write_authoritative_job(path, effective)
+        self._adopt_job_record(job, effective)
 
     @staticmethod
     def _validate_scope(
@@ -1245,7 +2146,7 @@ class LocalJobRunner:
             ),
         )
 
-    def _load_indexed_job(self, job_id: str) -> JobRecord:
+    def _load_indexed_job(self, job_id: str, *, repair_missing: bool = True) -> JobRecord:
         try:
             with self._index_connection() as connection:
                 row = connection.execute(
@@ -1254,8 +2155,11 @@ class LocalJobRunner:
                 ).fetchone()
         except sqlite3.DatabaseError:
             self._rebuild_index()
-            return self._load_indexed_job(job_id)
+            return self._load_indexed_job(job_id, repair_missing=False)
         if row is None:
+            if repair_missing:
+                self._ensure_index()
+                return self._load_indexed_job(job_id, repair_missing=False)
             raise KeyError(f"Unknown job: {job_id}")
         path = (self.job_root / str(row[0])).resolve()
         try:

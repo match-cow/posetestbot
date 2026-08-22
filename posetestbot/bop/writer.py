@@ -40,10 +40,12 @@ from posetestbot.io.artifacts import (
     MODELS_EVAL_DIR,
     RGB_DIR,
 )
+from posetestbot.sensors.frame_writer import validate_rgbd_images
 
 SCHEMA_VERSION = "bop_export_manifest.v5"
 FRAME_MAP_SCHEMA_VERSION = "posetestbot_bop_frame_map.v3"
 DATASET_INFO_SCHEMA_VERSION = "posetestbot_bop_dataset_info.v1"
+OUTPUT_ARTIFACT_SET_SCHEMA_VERSION = "bop_output_artifact_set.v1"
 ANNOTATION_SOURCES = frozenset({"none", "blenderproc"})
 ANNOTATION_MODES = frozenset({"none", "pose", "pose_and_masks"})
 SCENE_GT_INFO_FIELDS = frozenset(
@@ -714,25 +716,106 @@ def resolve_annotation_mode(
 
 
 def _read_rgbd_pair(rgb_path: Path, depth_path: Path) -> tuple[np.ndarray, np.ndarray]:
+    if rgb_path.is_symlink() or not rgb_path.is_file():
+        raise ValueError(f"RGB PNG must be a regular file: {rgb_path}")
+    if depth_path.is_symlink() or not depth_path.is_file():
+        raise ValueError(f"Depth PNG must be a regular file: {depth_path}")
     rgb = cv2.imread(rgb_path.as_posix(), cv2.IMREAD_UNCHANGED)
     depth = cv2.imread(depth_path.as_posix(), cv2.IMREAD_UNCHANGED)
     if rgb is None:
         raise ValueError(f"RGB PNG is unreadable: {rgb_path}")
     if depth is None:
         raise ValueError(f"Depth PNG is unreadable: {depth_path}")
-    if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] not in {3, 4}:
-        raise ValueError(f"RGB image must be uint8 with 3 or 4 channels: {rgb_path}")
-    if depth.dtype != np.uint16 or depth.ndim != 2:
-        raise ValueError(f"Depth image must be single-channel uint16: {depth_path}")
-    if rgb.shape[:2] != depth.shape:
-        raise ValueError(f"RGB/depth dimensions do not match: {rgb_path}, {depth_path}")
-    return rgb, depth
+    try:
+        return validate_rgbd_images(rgb, depth)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid BOP RGB-D pixel contract for {rgb_path}, {depth_path}: {exc}"
+        ) from exc
 
 
 def _sha256_file(path: Path) -> str:
     if path.is_symlink() or not path.is_file():
-        raise FileNotFoundError(f"Missing BlenderProc GT provenance input: {path}")
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+        raise FileNotFoundError(f"BOP artifact must be a regular file: {path}")
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def bop_output_artifact_set(output_root: str | Path) -> dict[str, object]:
+    """Fingerprint every published BOP file except the self-describing manifest."""
+
+    root = Path(output_root)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError(f"BOP output root must be a regular directory: {root}")
+    rows: list[dict[str, object]] = []
+    for path in sorted(
+        root.rglob("*"),
+        key=lambda item: item.relative_to(root).as_posix(),
+    ):
+        relative = path.relative_to(root).as_posix()
+        if relative == BOP_EXPORT_MANIFEST:
+            continue
+        if path.is_symlink():
+            raise ValueError(f"BOP output artifact must not be a symlink: {path}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ValueError(f"BOP output contains a non-regular artifact: {path}")
+        rows.append(
+            {
+                "path": relative,
+                "size_bytes": path.stat().st_size,
+                "sha256": _sha256_file(path),
+            }
+        )
+    payload = "".join(
+        json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+        for row in rows
+    ).encode("utf-8")
+    return {
+        "schema_version": OUTPUT_ARTIFACT_SET_SCHEMA_VERSION,
+        "algorithm": "sha256",
+        "contract": "all_regular_files_except_bop_export_manifest",
+        "file_count": len(rows),
+        "total_size_bytes": sum(int(row["size_bytes"]) for row in rows),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def validate_bop_export_artifact_set(
+    output_root: str | Path,
+    manifest: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Recompute and verify a v5 manifest's exact output artifact set."""
+
+    root = Path(output_root)
+    if manifest is None:
+        manifest_path = root / BOP_EXPORT_MANIFEST
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"BOP export manifest must be a regular file: {manifest_path}"
+            )
+        try:
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"BOP export manifest is invalid JSON: {manifest_path}"
+            ) from exc
+        if not isinstance(loaded, Mapping):
+            raise ValueError("BOP export manifest must be a JSON object")
+        manifest = loaded
+    if manifest.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(f"BOP export manifest schema must be {SCHEMA_VERSION}")
+    recorded = manifest.get("output_artifact_set")
+    if not isinstance(recorded, Mapping):
+        raise ValueError("BOP export manifest has no output_artifact_set evidence")
+    observed = bop_output_artifact_set(root)
+    if dict(recorded) != observed:
+        raise ValueError("BOP output artifact set is stale or mismatched")
+    return observed
 
 
 def _plain_child_file(root: Path, value: object, *, label: str) -> Path:
@@ -1556,7 +1639,7 @@ def export_sensor_scene_to_bop(
 
     frame_pairs = _frame_pairs(sensor_folder)
     for image_id, (rgb_source, depth_source) in enumerate(frame_pairs):
-        rgb_image, _depth_image = _read_rgbd_pair(rgb_source, depth_source)
+        rgb_image, depth_image = _read_rgbd_pair(rgb_source, depth_source)
         if calibration_profile is not None:
             expected_intrinsics = (
                 calibration_profile.rectified_intrinsics
@@ -1575,8 +1658,32 @@ def export_sensor_scene_to_bop(
                     f"profile: actual={actual_size}, expected={expected_size}"
                 )
         image_name = f"{image_id:06d}.png"
-        shutil.copy2(rgb_source, rgb_dest / image_name)
-        shutil.copy2(depth_source, depth_dest / image_name)
+        rgb_destination = rgb_dest / image_name
+        depth_destination = depth_dest / image_name
+        rgb_source_sha256 = _sha256_file(rgb_source)
+        depth_source_sha256 = _sha256_file(depth_source)
+        shutil.copy2(rgb_source, rgb_destination)
+        shutil.copy2(depth_source, depth_destination)
+        copied_rgb, copied_depth = _read_rgbd_pair(
+            rgb_destination,
+            depth_destination,
+        )
+        if (
+            copied_rgb.shape != rgb_image.shape
+            or copied_depth.shape != depth_image.shape
+        ):
+            raise ValueError(
+                "Copied BOP RGB-D dimensions changed during export: "
+                f"{rgb_destination}, {depth_destination}"
+            )
+        if (
+            _sha256_file(rgb_destination) != rgb_source_sha256
+            or _sha256_file(depth_destination) != depth_source_sha256
+        ):
+            raise ValueError(
+                "Copied BOP RGB-D bytes do not match their source artifacts: "
+                f"{rgb_destination}, {depth_destination}"
+            )
         image_id_key = str(image_id)
         scene_camera[image_id_key] = {
             "cam_K": cam_k,
@@ -1912,8 +2019,30 @@ def validate_bop_dataset(
         scene_folder = output_root / export.scene_folder
         rgb_names = {path.name for path in (scene_folder / RGB_DIR).glob("*.png")}
         depth_names = {path.name for path in (scene_folder / DEPTH_DIR).glob("*.png")}
-        if rgb_names != depth_names or len(rgb_names) != export.rgb_count:
+        if (
+            rgb_names != depth_names
+            or len(rgb_names) != export.rgb_count
+            or len(depth_names) != export.depth_count
+        ):
             raise ValueError(f"BOP scene frame sets are inconsistent: {scene_folder}")
+        image_size: tuple[int, int] | None = None
+        for name in sorted(rgb_names):
+            rgb_image, depth_image = _read_rgbd_pair(
+                scene_folder / RGB_DIR / name,
+                scene_folder / DEPTH_DIR / name,
+            )
+            pair_size = (int(rgb_image.shape[1]), int(rgb_image.shape[0]))
+            if image_size is None:
+                image_size = pair_size
+            elif pair_size != image_size:
+                raise ValueError(
+                    "BOP scene RGB-D dimensions must be consistent: "
+                    f"{scene_folder}; {name}={pair_size}, expected={image_size}"
+                )
+            if depth_image.shape != rgb_image.shape[:2]:
+                raise ValueError(
+                    f"BOP scene RGB-D dimensions do not match: {scene_folder / name}"
+                )
         image_ids = {int(Path(name).stem) for name in rgb_names}
         scene_image_ids[export.scene_id] = image_ids
         scene_camera = _load_json_if_present(scene_folder / "scene_camera.json")
@@ -2114,6 +2243,10 @@ def validate_bop_dataset(
         and target_count > 0
         and bool(model_ids)
     )
+    manifest_path = output_root / BOP_EXPORT_MANIFEST
+    if manifest_path.exists() or manifest_path.is_symlink():
+        validate_bop_export_artifact_set(output_root)
+
     return {
         "status": "ok",
         "scene_count": len(exports),
@@ -2429,6 +2562,8 @@ def write_bop_export_manifest(
         export_entries.append(
             {key: value for key, value in data.items() if value is not None}
         )
+    output_root.mkdir(parents=True, exist_ok=True)
+    output_artifact_set = bop_output_artifact_set(output_root)
     _write_json(
         manifest_path,
         {
@@ -2436,6 +2571,7 @@ def write_bop_export_manifest(
             "format": "bop-scenewise",
             "layout": "<split>/<scene_id>",
             "dataset_root": ".",
+            "output_artifact_set": output_artifact_set,
             "exports": export_entries,
             "calibration_profiles_path": (
                 Path(calibration_profiles_path).as_posix()
@@ -2472,4 +2608,5 @@ def write_bop_export_manifest(
             "validation": dict(validation or {}),
         },
     )
+    validate_bop_export_artifact_set(output_root)
     return manifest_path

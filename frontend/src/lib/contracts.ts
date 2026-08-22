@@ -183,8 +183,8 @@ export interface SensorDevice {
   display_name?: string
   effective_display_name?: string
   alias?: string
-  connected?: boolean
-  capture_ready?: boolean
+  connected: boolean
+  capture_ready: boolean
   capture_readiness_reason?: string | null
   live_rgb_preview_supported?: boolean
   inverted?: boolean
@@ -201,8 +201,9 @@ export interface SensorStatus {
     [key: string]: unknown
   }>
   total_connected: number
-  total_capture_ready?: number
-  all_expected_connected?: boolean
+  total_capture_ready: number
+  all_expected_connected: boolean
+  expected_counts_requested: boolean
   [key: string]: unknown
 }
 

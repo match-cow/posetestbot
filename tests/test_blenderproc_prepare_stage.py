@@ -281,6 +281,7 @@ def test_blenderproc_prepare_stage_accepts_calibration_profiles(
                     cam_k=(50.0, 0.0, 40.0, 0.0, 50.0, 40.0, 0.0, 0.0, 1.0),
                     width=80,
                     height=80,
+                    distortion=(0.0, 0.0, 0.0, 0.0, 0.0),
                 ),
                 extrinsics=RigidTransform(
                     from_frame=TransformFrame.CAMERA,
@@ -406,6 +407,7 @@ def test_blenderproc_prepare_stage_accepts_static_calibration_profiles(
                     cam_k=(50.0, 0.0, 40.0, 0.0, 50.0, 40.0, 0.0, 0.0, 1.0),
                     width=80,
                     height=80,
+                    distortion=(0.0, 0.0, 0.0, 0.0, 0.0),
                 ),
                 extrinsics=RigidTransform(
                     from_frame=TransformFrame.CAMERA,
@@ -497,6 +499,7 @@ def test_blenderproc_prepare_rejects_profile_with_wrong_run_mount(
                     cam_k=(50.0, 0.0, 40.0, 0.0, 50.0, 40.0, 0.0, 0.0, 1.0),
                     width=80,
                     height=80,
+                    distortion=(0.0, 0.0, 0.0, 0.0, 0.0),
                 ),
                 extrinsics=RigidTransform(
                     from_frame=TransformFrame.CAMERA,
@@ -550,6 +553,7 @@ def test_blenderproc_prepare_uses_exact_selected_profile_for_ambiguous_sensor(
         cam_k=(50.0, 0.0, 40.0, 0.0, 50.0, 40.0, 0.0, 0.0, 1.0),
         width=80,
         height=80,
+        distortion=(0.0, 0.0, 0.0, 0.0, 0.0),
     )
     eye_profile_id = "realsense_d435_123_eye_in_hand_selected_test"
     static_profile_id = "realsense_d435_123_static_selected_test"

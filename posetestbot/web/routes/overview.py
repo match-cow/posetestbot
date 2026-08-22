@@ -25,6 +25,9 @@ from posetestbot.io.artifacts import (
     SYNC_QUALITY_REPORT,
 )
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
+from posetestbot.pipeline.capture_execution import (
+    REPORT_SCHEMA_VERSION as CAPTURE_EXECUTION_REPORT_SCHEMA_VERSION,
+)
 from posetestbot.sync.calibration_policy import (
     resolve_calibration_profile_sync_policy,
 )
@@ -197,7 +200,7 @@ def _validated_artifact_status(relative_path: str, value: Mapping[str, Any]) -> 
 
     declared = value.get("overall_status", value.get("status"))
     if relative_path == CAPTURE_EXECUTION_REPORT:
-        if value.get("schema_version") != "capture_execution_report.v1":
+        if value.get("schema_version") != CAPTURE_EXECUTION_REPORT_SCHEMA_VERSION:
             return "invalid"
         return str(declared) if isinstance(declared, str) else "invalid"
     if relative_path == SYNC_QUALITY_REPORT:

@@ -22,6 +22,7 @@ from posetestbot.io.manifest import (
     write_run_manifest,
 )
 from posetestbot.pipeline.sensor_selection import enabled_sensor_folder_names
+from posetestbot.sync.non_destructive import dataset_processing_lock
 
 
 def parse_args() -> argparse.Namespace:
@@ -78,8 +79,7 @@ def synchronized_input_folder(
     return run_root / PROCESSED_DIR / SYNCHRONIZED_DIR
 
 
-def main() -> None:
-    args = parse_args()
+def _main(args: argparse.Namespace) -> None:
     run_root = Path(args.run_root)
     input_folder = synchronized_input_folder(run_root, args.input_folder)
     sensor_names = (
@@ -135,6 +135,12 @@ def main() -> None:
         write_run_manifest(manifest, run_root)
         raise
     print(message)
+
+
+def main() -> None:
+    args = parse_args()
+    with dataset_processing_lock(Path(args.run_root)):
+        _main(args)
 
 
 if __name__ == "__main__":

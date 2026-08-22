@@ -29,7 +29,7 @@ render, and disk resources.
 
 | Method and path | Contract |
 | --- | --- |
-| `GET /bop/evaluation/setup?run_root=…` | Inspect annotation-bearing dataset, pinned toolkit status, registered results, and evaluations |
+| `GET /bop/evaluation/setup?run_root=…` | Revalidate manifest-declared `pose_and_masks` eligibility and per-scene GT/info visibility rows; report pinned toolkit status, registered results, and evaluations |
 | `POST /bop/evaluation/results` | Multipart import of an already standard BOP19 CSV; locally validates and stores immutable provenance |
 | `GET /bop/evaluation/results/<result_id>/download?run_root=…` | Download the retained immutable CSV |
 | `POST /bop/evaluations` | Queue official toolkit evaluation of a registered result or deterministic test-only GT perturbation |
@@ -38,6 +38,17 @@ render, and disk resources.
 Result upload requires form fields `run_root`, file field `file` (or `result`),
 and optional `display_name`/`method_name`. The filename must be a basename with
 `.csv`; the bounded upload is validated again after staging.
+
+Evaluation setup accepts only a verified `bop_export_manifest.v5` whose
+annotation source is `blenderproc`, annotation state is `complete`, and
+`capabilities.bop19_evaluation` is literal `true`. The canonical
+`pose_and_masks` annotation-generation contract has already verified matching
+per-scene `scene_gt.json` and `scene_gt_info.json`, complete full/visible
+instance-mask evidence in `mask/` and `mask_visib/`, and valid visibility rows
+for every target. Evaluation setup directly revalidates the manifest
+declarations and the per-scene GT, GT-info, and visibility-row contract; it
+does not infer mask completeness from a pose-only export. A pose-only export
+with `scene_gt.json` is not evaluation-ready.
 
 Registered-result evaluation request:
 

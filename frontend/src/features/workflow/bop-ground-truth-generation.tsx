@@ -7,7 +7,7 @@ import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { api, errorMessage, query } from "@/lib/api"
-import type { BopAnnotationMode, BopAnnotationSetup, Job } from "@/lib/contracts"
+import type { BopAnnotationIssue, BopAnnotationMode, BopAnnotationSetup, Job } from "@/lib/contracts"
 import { jobStatusTone } from "@/lib/jobs"
 import { cn, formatDate } from "@/lib/utils"
 
@@ -33,6 +33,16 @@ function modeLabel(mode: BopAnnotationMode) {
 
 function shortHash(value: string | null) {
   return value ? `${value.slice(0, 16)}…` : "not recorded"
+}
+
+function isAnnotationIssue(value: unknown): value is BopAnnotationIssue {
+  if (!value || typeof value !== "object") return false
+  const issue = value as Record<string, unknown>
+  return typeof issue.code === "string" && typeof issue.message === "string"
+}
+
+function annotationIssues(value: unknown): BopAnnotationIssue[] | null {
+  return Array.isArray(value) && value.every(isAnnotationIssue) ? value : null
 }
 
 export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGroundTruthGenerationProps) {
@@ -64,14 +74,20 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
     queryFn: () => api<BopAnnotationSetup>(query("/bop/annotations/setup", { run_root: runRoot })),
     refetchInterval: active ? 1_000 : false,
   })
-  const configuredMode = setup.data?.configured_mode ?? "none"
-  const selectedMode: BopAnnotationMode = configuredMode === "pose" ? "pose" : "pose_and_masks"
-  const annotationRequested = configuredMode !== "none"
+  const configuredMode = setup.data?.configured_mode
+  const configuredModeValid = configuredMode === "none" || configuredMode === "pose" || configuredMode === "pose_and_masks"
+  const selectedMode: BopAnnotationMode | null = configuredMode === "pose" || configuredMode === "pose_and_masks"
+    ? configuredMode
+    : null
+  const annotationRequested = selectedMode !== null
   const generate = useMutation({
-    mutationFn: () => api<{ job_id: string; job: Job }>("/bop/annotations", {
-      method: "POST",
-      body: JSON.stringify({ run_root: runRoot, mode: selectedMode }),
-    }),
+    mutationFn: () => {
+      if (!selectedMode) throw new Error("Workflow step 1 does not request optional BOP ground truth")
+      return api<{ job_id: string; job: Job }>("/bop/annotations", {
+        method: "POST",
+        body: JSON.stringify({ run_root: runRoot, mode: selectedMode }),
+      })
+    },
     onSuccess: (data) => {
       setSubmittedJob({ runRoot, id: data.job_id })
       toast.success("Ground-truth generation queued", {
@@ -92,15 +108,27 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
   }, [currentJobId, currentJobStatus, queryClient, runRoot])
 
   const output = setup.data?.current_output ?? null
-  const fullEvidenceReady = output?.mode === "pose_and_masks" && output.verified && output.evaluation_ready
-  const selectedReadiness = setup.data?.readiness_by_mode[selectedMode]
-  const queueBlockers = Array.from(new Set([
+  const fullEvidenceReady = output?.mode === "pose_and_masks" && output.verified === true && output.evaluation_ready === true
+  const outputMatchesConfiguredMode = selectedMode !== null && output?.mode === selectedMode
+  const configuredFullEvidenceReady = selectedMode === "pose_and_masks" && outputMatchesConfiguredMode && fullEvidenceReady
+  const selectedReadiness = selectedMode ? setup.data?.readiness_by_mode?.[selectedMode] : undefined
+  const parsedReadinessBlockers = annotationIssues(selectedReadiness?.blockers)
+  const parsedReadinessWarnings = annotationIssues(selectedReadiness?.warnings)
+  const readinessContractValid = Boolean(
+    selectedReadiness
+    && typeof selectedReadiness.ready === "boolean"
+    && parsedReadinessBlockers !== null
+    && parsedReadinessWarnings !== null,
+  )
+  const readinessBlockers = parsedReadinessBlockers ?? []
+  const readinessWarnings = parsedReadinessWarnings ?? []
+  const queueBlockers = selectedMode ? Array.from(new Set([
     ...(!bopExportComplete ? ["Complete the base BOP image/model export before generating annotations."] : []),
-    ...(!annotationRequested ? ["Run setup records base BOP export only; change the annotation outcome in Workflow step 1 to request ground truth."] : []),
-    ...(annotationRequested && selectedReadiness && !selectedReadiness.ready && selectedReadiness.blockers.length === 0 ? [`${modeLabel(selectedMode)} is not ready for this run.`] : []),
-    ...(annotationRequested ? selectedReadiness?.blockers.map((issue) => issue.message) ?? [] : []),
+    ...(!readinessContractValid ? [`Readiness for the configured ${modeLabel(selectedMode).toLowerCase()} outcome was not returned or was malformed.`] : []),
+    ...(readinessContractValid && selectedReadiness?.ready !== true && readinessBlockers.length === 0 ? [`Readiness for the configured ${modeLabel(selectedMode).toLowerCase()} outcome was not confirmed.`] : []),
+    ...readinessBlockers.map((issue) => issue.message),
     ...(active ? ["Wait for the active ground-truth job to finish or cancel it from Jobs."] : []),
-  ]))
+  ])) : []
 
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: ["bop-annotations", "setup", runRoot] })
@@ -112,12 +140,10 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
     <CardHeader>
       <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <div>
-          <CardTitle className="text-base">Choose the BOP ground-truth evidence</CardTitle>
-          <CardDescription className="mt-1 max-w-4xl leading-relaxed">
-            Both choices derive each model-to-camera pose through the immutable object model, pose template, measured placement, robot pose, and selected camera calibration. Choose how much annotation evidence this exported dataset needs.
-          </CardDescription>
+          <CardTitle className="text-base">Configured BOP annotation outcome</CardTitle>
+          <CardDescription className="mt-1 max-w-4xl leading-relaxed">Workflow step 1 owns this run-level choice. This step reports the configured outcome and queues only the matching optional derived evidence.</CardDescription>
         </div>
-        {setup.data && <div className="grid shrink-0 grid-cols-3 gap-3 rounded-lg border bg-muted/20 px-4 py-3 text-center text-[10px]">
+        {setup.data && configuredModeValid && <div className="grid shrink-0 grid-cols-3 gap-3 rounded-lg border bg-muted/20 px-4 py-3 text-center text-[10px]">
           <div><div className="font-mono text-sm font-semibold">{setup.data.counts.sensors.toLocaleString()}</div><div className="text-muted-foreground">sensors</div></div>
           <div><div className="font-mono text-sm font-semibold">{setup.data.counts.frames.toLocaleString()}</div><div className="text-muted-foreground">frames</div></div>
           <div><div className="font-mono text-sm font-semibold">{setup.data.counts.instances.toLocaleString()}</div><div className="text-muted-foreground">instances</div></div>
@@ -129,8 +155,21 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
         ? <div className="flex items-center gap-2 rounded-lg border p-4 text-xs text-muted-foreground"><LoaderCircle aria-hidden="true" className="size-4 animate-spin" />Checking BlenderProc and dataset readiness…</div>
         : setup.isError
           ? <div role="alert" className="flex flex-col gap-3 rounded-lg border border-destructive/35 bg-destructive/5 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="text-sm font-semibold text-destructive">Ground-truth setup is unavailable</div><p className="mt-1 text-xs text-muted-foreground">{errorMessage(setup.error)}</p></div><Button type="button" variant="outline" size="sm" onClick={refresh}><RefreshCw aria-hidden="true" />Retry</Button></div>
-          : setup.data && <>
-            <div className="grid gap-3 xl:grid-cols-2">
+          : !setup.data || !configuredModeValid
+            ? <div role="alert" data-testid="bop-annotation-contract-error" className="rounded-lg border border-destructive/35 bg-destructive/5 p-4"><div className="text-sm font-semibold text-destructive">Annotation setup contract is invalid</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">The server did not return one recognized configured mode (<code>none</code>, <code>pose</code>, or <code>pose_and_masks</code>). No annotation outcome or generation action is assumed. Retry the setup check before continuing.</p><Button className="mt-3" type="button" variant="outline" size="sm" onClick={refresh}><RefreshCw aria-hidden="true" />Retry</Button></div>
+          : setup.data && configuredMode === "none"
+            ? <div className="rounded-lg border border-success/30 bg-success/5 p-5" data-testid="bop-base-only-outcome">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2 font-semibold">Base BOP dataset only <StatusBadge status={bopExportComplete ? "complete" : "waiting"} tone={bopExportComplete ? "success" : "warning"}>{bopExportComplete ? "configured outcome complete" : "waiting for base export"}</StatusBadge></div>
+                  <p className="mt-2 max-w-3xl text-xs leading-relaxed text-muted-foreground">This run does not request optional pose or mask generation. {bopExportComplete ? "The verified image/model export is the complete configured acquisition outcome." : "Complete dataset processing to produce the configured image/model export."}</p>
+                  <p className="mt-2 text-xs text-muted-foreground">Workflow step 1 records this run-owned outcome. {bopExportComplete ? "Because this run has been acquired, its setup is now read-only; start a fresh run to request a different outcome." : "If acquisition has not started, review step 1 to change it; after any capture attempt, use a fresh run."} Any generation request revalidates the exact configured mode.</p>
+                </div>
+                <Button asChild variant="outline" size="sm"><Link to="/workflow/dataset?step=configure">Review Workflow step 1</Link></Button>
+              </div>
+            </div>
+            : setup.data && selectedMode && <>
+            <div className={cn("grid gap-3", selectedMode === "pose_and_masks" && "xl:grid-cols-2")}>
               <div className={cn("rounded-lg border p-4", setup.data.runtime.available ? "border-success/30 bg-success/5" : "border-warning/40 bg-warning/5")}>
                 <div className="flex flex-wrap items-center gap-2 text-sm font-semibold">
                   BlenderProc runtime
@@ -145,75 +184,43 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
                 </p>
                 {!setup.data.runtime.available && setup.data.runtime.install_command && <code className="mt-2 block select-all rounded bg-background px-2 py-1.5 text-[10px]">{setup.data.runtime.install_command}</code>}
               </div>
-              <div className={cn("rounded-lg border p-4", setup.data.toolkit.available ? "border-success/30 bg-success/5" : selectedMode === "pose_and_masks" ? "border-warning/40 bg-warning/5" : "bg-muted/20")}>
+              {selectedMode === "pose_and_masks" && <div data-testid="bop-rendering-toolkit" className={cn("rounded-lg border p-4", setup.data.toolkit.available ? "border-success/30 bg-success/5" : "border-warning/40 bg-warning/5")}>
                 <div className="flex flex-wrap items-center gap-2 text-sm font-semibold">
                   Pinned rendering toolkit
-                  <StatusBadge status={setup.data.toolkit.available ? "ready" : selectedMode === "pose_and_masks" ? "blocked" : "not_required"} tone={setup.data.toolkit.available ? "success" : selectedMode === "pose_and_masks" ? "destructive" : "neutral"}>
-                    {setup.data.toolkit.available ? "available" : selectedMode === "pose_and_masks" ? "required for masks" : "not required for pose-only"}
-                  </StatusBadge>
+                  <StatusBadge status={setup.data.toolkit.available ? "ready" : "blocked"} tone={setup.data.toolkit.available ? "success" : "destructive"}>{setup.data.toolkit.available ? "available" : "required for masks"}</StatusBadge>
                 </div>
                 <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                   {setup.data.toolkit.available
                     ? `Revision ${setup.data.toolkit.revision ?? "unreported"}${setup.data.toolkit.renderer ? ` · ${setup.data.toolkit.renderer} renderer` : ""}.`
-                    : selectedMode === "pose"
-                      ? "Plain pose GT is transform-derived and remains available without the rendering toolkit."
-                      : setup.data.toolkit.reason ?? "Install the pinned rendering toolkit before generating masks and visibility evidence."}
+                    : setup.data.toolkit.reason ?? "Install the pinned rendering toolkit before generating masks and visibility evidence."}
                 </p>
-                {!setup.data.toolkit.available && selectedMode === "pose_and_masks" && setup.data.toolkit.install_command && <code className="mt-2 block select-all rounded bg-background px-2 py-1.5 text-[10px]">{setup.data.toolkit.install_command}</code>}
-              </div>
+                {!setup.data.toolkit.available && setup.data.toolkit.install_command && <code className="mt-2 block select-all rounded bg-background px-2 py-1.5 text-[10px]">{setup.data.toolkit.install_command}</code>}
+              </div>}
             </div>
             <div className="flex justify-end"><Button type="button" variant="outline" size="sm" onClick={refresh}><RefreshCw aria-hidden="true" />Refresh readiness</Button></div>
 
-            <fieldset>
-              <legend className="text-sm font-semibold">Configured optional annotation outcome</legend>
-              <p className="mt-1 text-xs text-muted-foreground">This choice is owned by <Link className="font-medium text-primary-strong underline-offset-4 hover:underline" to="/workflow/dataset?step=configure">Workflow step 1</Link>. Return there to change it before queueing derived evidence.</p>
-              {configuredMode === "none" && <div className="mt-3 rounded-lg border bg-muted/20 p-4 text-xs"><div className="font-semibold">Base BOP dataset only</div><p className="mt-1 text-muted-foreground">No ground-truth job is requested for this run. The verified image/model export remains the complete configured outcome.</p></div>}
-              {annotationRequested && <div className="mt-3 grid gap-4 xl:grid-cols-2" role="radiogroup" aria-label="BOP ground-truth annotation version">
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={selectedMode === "pose"}
-                  disabled
-                  className={cn("rounded-xl border p-4 text-left transition-colors", selectedMode === "pose" ? "border-primary bg-primary/5 ring-1 ring-primary/30" : "hover:border-foreground/25")}
-                >
-                  <span className="flex items-start gap-3">
-                    <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-muted"><FileJson aria-hidden="true" className="size-4 text-primary-strong" /></span>
-                    <span className="min-w-0">
-                      <span className="flex flex-wrap items-center gap-2"><span className="font-semibold">Plain pose ground truth</span><StatusBadge status="warning" tone="warning">not evaluation-ready</StatusBadge></span>
-                      <span className="mt-2 block text-xs leading-relaxed text-muted-foreground">Writes standard per-instance rotations and translations to each scene’s <code>scene_gt.json</code>. No segmentation render is performed.</span>
-                      <span className="mt-3 block rounded-md bg-muted/50 p-2 text-[11px]"><strong>Contains:</strong> target identity and exact model-to-camera pose.</span>
-                      <span className="mt-2 block text-[11px] text-warning-foreground">Does not create <code>scene_gt_info.json</code>, masks, visible masks, or BOP evaluation visibility evidence.</span>
-                    </span>
-                  </span>
-                </button>
+            <section className={cn("rounded-xl border p-4", selectedMode === "pose_and_masks" ? "border-primary/35 bg-primary/5" : "bg-muted/20")} data-testid="bop-configured-annotation-mode" aria-labelledby="bop-configured-annotation-mode-heading">
+              <div className="flex items-start gap-3">
+                <div className={cn("grid size-9 shrink-0 place-items-center rounded-lg", selectedMode === "pose_and_masks" ? "bg-primary/10" : "bg-muted")}>
+                  {selectedMode === "pose" ? <FileJson aria-hidden="true" className="size-4 text-primary-strong" /> : <ImageIcon aria-hidden="true" className="size-4 text-primary-strong" />}
+                </div>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2"><h3 id="bop-configured-annotation-mode-heading" className="font-semibold">{selectedMode === "pose" ? "Plain pose ground truth" : "Pose + object masks and visibility"}</h3><StatusBadge status={selectedMode === "pose" ? "not_evaluation_ready" : configuredFullEvidenceReady ? "evaluation_ready" : "verification_required"} tone={configuredFullEvidenceReady ? "success" : "warning"}>{selectedMode === "pose" ? "not evaluation-ready" : configuredFullEvidenceReady ? "evaluation-ready" : "verification required"}</StatusBadge></div>
+                  {selectedMode === "pose"
+                    ? <><p className="mt-2 text-xs leading-relaxed text-muted-foreground">The configured job writes standard per-instance rotations and translations to each scene’s <code>scene_gt.json</code>. It does not render segmentation or visibility evidence.</p><p className="mt-2 text-[11px] text-warning-foreground">Without <code>scene_gt_info.json</code> and verified visible-mask evidence, Inspect BOP metric evaluation remains unavailable.</p></>
+                    : <><p className="mt-2 text-xs leading-relaxed text-muted-foreground">BlenderProc produces pose GT, then the pinned official BOP Toolkit renders full and visible masks against captured depth and writes the visibility evidence.</p><p className="mt-2 rounded-md bg-background/65 p-2 text-[11px]"><strong>Required verified product:</strong> <code>scene_gt.json</code>, <code>scene_gt_info.json</code>, full-frame <code>mask/</code> and <code>mask_visib/</code> PNGs, and ROI/visibility metadata. Inspect evaluation stays unavailable until this evidence is verified.</p></>}
+                  <p className="mt-3 text-[11px] text-muted-foreground">Configured in <Link className="font-medium text-primary-strong underline-offset-4 hover:underline" to="/workflow/dataset?step=configure">Workflow step 1</Link>. Review it there; after any capture attempt, a different run-owned outcome requires a fresh run.</p>
+                </div>
+              </div>
+            </section>
 
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={selectedMode === "pose_and_masks"}
-                  disabled
-                  className={cn("rounded-xl border p-4 text-left transition-colors", selectedMode === "pose_and_masks" ? "border-primary bg-primary/5 ring-1 ring-primary/30" : "hover:border-foreground/25")}
-                >
-                  <span className="flex items-start gap-3">
-                    <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10"><ImageIcon aria-hidden="true" className="size-4 text-primary-strong" /></span>
-                    <span className="min-w-0">
-                      <span className="flex flex-wrap items-center gap-2"><span className="font-semibold">Pose + object masks and ROI</span><StatusBadge status="ready" tone="success">recommended</StatusBadge></span>
-                      <span className="mt-2 block text-xs leading-relaxed text-muted-foreground">BlenderProc loads and validates the calibrated scene and emits pose GT; the pinned official BOP Toolkit then renders full and visible masks against captured depth and writes the BOP visibility evidence.</span>
-                      <span className="mt-3 block rounded-md bg-primary/5 p-2 text-[11px]"><strong>Contains:</strong> <code>scene_gt.json</code>, <code>scene_gt_info.json</code>, standard full-frame per-instance <code>mask/</code> and <code>mask_visib/</code> PNGs, plus <code>bbox_obj</code> and <code>bbox_visib</code> ROI metadata.</span>
-                      <span className="mt-2 block text-[11px] text-success">This is the evaluation-compatible choice for simulated or real BOP19 pose results.</span>
-                    </span>
-                  </span>
-                </button>
-              </div>}
-            </fieldset>
-
-            {annotationRequested && (selectedReadiness?.blockers.length ?? 0) > 0 && <div role="alert" data-testid="bop-annotation-blockers" className="rounded-lg border border-warning/40 bg-warning/5 p-4">
+            {annotationRequested && readinessBlockers.length > 0 && <div role="alert" data-testid="bop-annotation-blockers" className="rounded-lg border border-warning/40 bg-warning/5 p-4">
               <div className="flex items-center gap-2 text-xs font-semibold text-warning-foreground"><AlertTriangle aria-hidden="true" className="size-4" />Ground truth cannot be queued yet</div>
-              <ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-relaxed text-muted-foreground">{selectedReadiness?.blockers.map((issue) => <li key={`${issue.code}:${issue.message}`}>{issue.message}</li>)}</ul>
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-relaxed text-muted-foreground">{readinessBlockers.map((issue) => <li key={`${issue.code}:${issue.message}`}>{issue.message}</li>)}</ul>
             </div>}
-            {annotationRequested && (selectedReadiness?.warnings.length ?? 0) > 0 && <div className="rounded-lg border bg-muted/20 p-4">
+            {annotationRequested && readinessWarnings.length > 0 && <div className="rounded-lg border bg-muted/20 p-4">
               <div className="text-xs font-semibold">Readiness notes</div>
-              <ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-relaxed text-muted-foreground">{selectedReadiness?.warnings.map((issue) => <li key={`${issue.code}:${issue.message}`}>{issue.message}</li>)}</ul>
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-relaxed text-muted-foreground">{readinessWarnings.map((issue) => <li key={`${issue.code}:${issue.message}`}>{issue.message}</li>)}</ul>
             </div>}
 
             {currentJobId && <div data-testid="bop-annotation-job-status" role="status" className={cn("rounded-lg border p-4", active ? "border-warning/40 bg-warning/5" : failed ? "border-destructive/40 bg-destructive/5" : "border-primary/35 bg-primary/5")}>
@@ -236,23 +243,25 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
               </div>
             </div>}
 
-            {output && <div data-testid="bop-annotation-evidence" className={cn("rounded-lg border p-4", fullEvidenceReady ? "border-success/35 bg-success/5" : "bg-muted/20")}>
+            {output && <div data-testid="bop-annotation-evidence" className={cn("rounded-lg border p-4", configuredFullEvidenceReady ? "border-success/35 bg-success/5" : "bg-muted/20")}>
               <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                 <div>
                   <div className="flex flex-wrap items-center gap-2 font-semibold">
                     {modeLabel(output.mode)} evidence
-                    <StatusBadge status={fullEvidenceReady ? "verified" : output.state} tone={fullEvidenceReady ? "success" : output.verified ? "warning" : "destructive"}>{fullEvidenceReady ? "verified for evaluation" : output.state}</StatusBadge>
+                    <StatusBadge status={configuredFullEvidenceReady ? "verified" : outputMatchesConfiguredMode ? output.state : "stale"} tone={configuredFullEvidenceReady ? "success" : output.verified === true ? "warning" : "destructive"}>{configuredFullEvidenceReady ? "verified for evaluation" : outputMatchesConfiguredMode ? output.state : "does not match configured mode"}</StatusBadge>
                   </div>
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                    {fullEvidenceReady
+                    {!outputMatchesConfiguredMode
+                      ? `This retained ${modeLabel(output.mode).toLowerCase()} output does not match the run's configured ${modeLabel(selectedMode).toLowerCase()} outcome. It is not offered to Inspect; generate and verify the configured outcome. After acquisition begins, choosing a different outcome requires a fresh run.`
+                      : configuredFullEvidenceReady
                       ? "Pose, visibility, full-frame instance masks, visible masks, and ROI metadata are complete. Inspect can now validate compatible BOP19 pose results."
                       : output.mode === "pose"
                         ? "Pose annotations are present, but this version intentionally has no rendered visibility or mask evidence and cannot be used for BOP metric evaluation."
                         : "The latest output has not yet supplied complete evaluation evidence. Refresh after the job finishes or review its log."}
                   </p>
-                  {!output.verified && output.integrity_error && <p role="alert" className="mt-2 text-xs text-destructive">Current annotation evidence failed its structural recheck: {output.integrity_error}</p>}
+                  {output.verified !== true && output.integrity_error && <p role="alert" className="mt-2 text-xs text-destructive">Current annotation evidence failed its structural recheck: {output.integrity_error}</p>}
                 </div>
-                {fullEvidenceReady && <Button asChild><Link to="/bop-evaluation">Inspect BOP metrics<ArrowRight aria-hidden="true" /></Link></Button>}
+                {configuredFullEvidenceReady && <Button asChild><Link to="/bop-evaluation">Inspect BOP metrics<ArrowRight aria-hidden="true" /></Link></Button>}
               </div>
               <dl className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
                 <div className="rounded-md border bg-background/70 p-3"><dt className="text-[10px] uppercase tracking-wide text-muted-foreground">GT annotations</dt><dd className="mt-1 font-mono text-sm font-semibold">{output.annotation_count.toLocaleString()}</dd></div>

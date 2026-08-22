@@ -69,6 +69,7 @@ def profile(
             cam_k=(600, 0, 320, 0, 600, 240, 0, 0, 1),
             width=640,
             height=480,
+            distortion=(0, 0, 0, 0, 0),
         ),
         extrinsics=RigidTransform(
             from_frame=TransformFrame.CAMERA,

@@ -13,12 +13,17 @@ from posetestbot.io.manifest import (
     write_run_manifest,
 )
 from posetestbot.io.artifacts import RUN_CONFIG
+from posetestbot.io.artifacts import PROCESSED_DIR, SYNCHRONIZED_DIR
 from posetestbot.sync.calibration_policy import (
     resolve_calibration_profile_sync_policy,
 )
 from posetestbot.sync.non_destructive import (
+    SensorSyncSettings,
+    dataset_processing_lock,
     sync_result_artifacts,
     synchronize_run,
+    synchronize_sensor_batch,
+    validate_sync_output_root,
 )
 from posetestbot.sync.quality import calibration_sync_provenance
 
@@ -41,8 +46,9 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=None,
         help=(
-            "Explicit run-contained raw sensor folder. Repeat to synchronize a "
-            "subset; omit to preserve run-wide discovery."
+            "Explicit run-contained enabled raw sensor folder. Repeat for the "
+            "complete enabled set; managed publication rejects partial subsets. "
+            "Omit to use run-wide discovery."
         ),
     )
     parser.add_argument(
@@ -71,7 +77,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-copy",
         action="store_true",
-        help="Write metadata only without copying rgb/depth frames.",
+        help=(
+            "Unsupported for the managed run stage; pairing-only output is "
+            "reserved for explicit calibration diagnostics."
+        ),
     )
     return parser.parse_args()
 
@@ -88,8 +97,12 @@ def load_sync_delta(value: str | None):
     return float(value)
 
 
-def main() -> None:
-    args = parse_args()
+def _main(args: argparse.Namespace) -> None:
+    if args.no_copy:
+        raise ValueError(
+            "Managed synchronization does not support --no-copy; canonical "
+            "output must contain copied RGB-D artifacts"
+        )
     run_root = Path(args.run_root)
     sync_delta = load_sync_delta(args.sync_delta)
     calibration_sync_policy = (
@@ -116,6 +129,16 @@ def main() -> None:
                 + ", ".join(manual_overrides)
             )
 
+    validate_sync_output_root(
+        run_root,
+        (
+            Path(args.output_root)
+            if args.output_root is not None
+            else run_root / PROCESSED_DIR / SYNCHRONIZED_DIR
+        ),
+        diagnostic_unmanaged=False,
+    )
+
     manifest = load_or_create_run_manifest(run_root)
     upsert_stage(manifest, name="sync_run", status="running")
     write_run_manifest(manifest, run_root)
@@ -129,19 +152,17 @@ def main() -> None:
                 sync_delta=sync_delta,
                 timestamp_source=args.timestamp_source or "host_received",
                 robot_timestamp_source=args.robot_timestamp_source,
-                copy_files=not args.no_copy,
+                copy_files=True,
             )
         else:
-            results = []
-            for sensor in calibration_sync_policy["sensors"]:
-                results.extend(
-                    synchronize_run(
-                        run_root,
-                        sensor_folders=[run_root / sensor["sensor_folder"]],
+            results = synchronize_sensor_batch(
+                run_root,
+                [
+                    SensorSyncSettings(
+                        sensor_folder=run_root / sensor["sensor_folder"],
                         sync_delta=sensor["sync_delta_ms"],
                         timestamp_source=sensor["frame_timestamp_source"],
                         robot_timestamp_source=sensor["robot_timestamp_source"],
-                        copy_files=not args.no_copy,
                         max_nearest_pose_delta_ms=sensor["max_nearest_pose_delta_ms"],
                         required_frame_timestamp_domain=sensor[
                             "required_frame_timestamp_domain"
@@ -152,7 +173,10 @@ def main() -> None:
                             sensor,
                         ),
                     )
-                )
+                    for sensor in calibration_sync_policy["sensors"]
+                ],
+                copy_files=True,
+            )
     except Exception as exc:
         upsert_stage(
             manifest,
@@ -199,6 +223,12 @@ def main() -> None:
         f"Synchronized {len(results)} sensor(s): wrote "
         f"{matched_frames} in-motion frame-pose match(es)."
     )
+
+
+def main() -> None:
+    args = parse_args()
+    with dataset_processing_lock(Path(args.run_root)):
+        _main(args)
 
 
 if __name__ == "__main__":

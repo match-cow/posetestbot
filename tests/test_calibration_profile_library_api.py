@@ -886,6 +886,21 @@ def test_selection_replacement_requires_cas_confirmation_and_blocks_after_captur
     )
     assert selected_b.status_code == 201, selected_b.get_json()
 
+    (destination / "capture_execution_plan.json").write_text("{}\n")
+    blocked_during_startup = client.post(
+        "/ui/calibrations/select",
+        json={
+            **_selection_request(destination, source_a, candidate_a["bundle_sha256"]),
+            "expected_current_bundle_sha256": candidate_b["bundle_sha256"],
+            "confirm_replace": True,
+        },
+    )
+    assert blocked_during_startup.status_code == 409
+    assert blocked_during_startup.get_json()["issues"][0]["blockers"] == [
+        "capture_execution_plan.json"
+    ]
+    (destination / "capture_execution_plan.json").unlink()
+
     atomic_write_json(destination / RAW_ROBOT_EE_POSES, {"poses": []})
     blocked = client.post(
         "/ui/calibrations/select",

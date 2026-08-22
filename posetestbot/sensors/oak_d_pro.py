@@ -7,7 +7,7 @@ import re
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import numpy as np
 
@@ -493,6 +493,30 @@ def _frames_from_sync_message(message_group: Any) -> tuple[Any | None, Any | Non
         return None, None
 
 
+def _next_sync_message(
+    output_queue: Any,
+    *,
+    stop_requested: Callable[[], bool] | None,
+    pipeline_running: Callable[[], bool],
+) -> Any | None:
+    """Read one synchronized pair while keeping SIGTERM-driven stop responsive."""
+
+    if stop_requested is None:
+        return output_queue.get()
+    try_get = getattr(output_queue, "tryGet", None)
+    if not callable(try_get):
+        raise OAKDProCaptureError(
+            "DepthAI output queue does not expose non-blocking tryGet required "
+            "for supervised capture shutdown."
+        )
+    while pipeline_running() and not stop_requested():
+        message = try_get()
+        if message is not None:
+            return message
+        time.sleep(0.01)
+    return None
+
+
 def capture_oak_d_pro_rgbd(
     output_path: str | Path | None,
     *,
@@ -505,6 +529,7 @@ def capture_oak_d_pro_rgbd(
     max_rgb_depth_delta_ns: int = DEFAULT_RGB_DEPTH_DELTA_NS,
     dai_module: Any | None = None,
     cv2_module: Any | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Capture aligned OAK-D Pro RGB-D frames into the current folder contract."""
 
@@ -565,10 +590,20 @@ def capture_oak_d_pro_rgbd(
                 sidecar_paths = {key: path.name for key, path in written.items()}
 
             pipeline.start()
-            while pipeline.isRunning() and (
-                max_frames <= 0 or captured_frames < max_frames
+            while (
+                pipeline.isRunning()
+                and (max_frames <= 0 or captured_frames < max_frames)
+                and not (stop_requested and stop_requested())
             ):
-                message_group = output_queue.get()
+                message_group = _next_sync_message(
+                    output_queue,
+                    stop_requested=stop_requested,
+                    pipeline_running=pipeline.isRunning,
+                )
+                if message_group is None:
+                    break
+                if stop_requested and stop_requested():
+                    break
                 host_wall_received_timestamp_ns = time.time_ns()
                 host_received_timestamp_ns = time.monotonic_ns()
                 depthai_now_ns = depthai_timedelta_ns(dai.Clock.now())

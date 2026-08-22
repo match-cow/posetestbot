@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export synchronized sensor folders into a minimal BOP scene layout."""
+"""Export verified RGB-D sensor folders into a minimal BOP scene layout."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import json
 import shutil
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -25,6 +26,7 @@ from posetestbot.bop.writer import (
     resolve_annotation_mode,
     targets_filename,
     validate_bop_dataset,
+    validate_bop_export_artifact_set,
     write_bop_coco_annotations,
     write_bop_dataset_info,
     write_bop_export_manifest,
@@ -40,6 +42,7 @@ from posetestbot.calibration.profiles import (
 )
 from posetestbot.calibration.rectification import (
     RECTIFIED_DIR,
+    validate_rectification_provenance,
 )
 from posetestbot.calibration.static_reuse import (
     verify_static_profile_destination_reference,
@@ -72,6 +75,7 @@ from posetestbot.io.manifest import (
 )
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
 from posetestbot.pipeline.sensor_selection import (
+    enabled_sensor_folder_names,
     enabled_sensor_mounting_modes_by_folder,
     filter_enabled_sensor_folders,
 )
@@ -93,7 +97,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input-folder",
         default=None,
-        help="Synchronized sensor folder root. Defaults to <run_root>/processed/synchronized.",
+        help=(
+            "RGB-D sensor folder root. Calibrated export requires the canonical "
+            "<run_root>/processed/rectified root; otherwise the default prefers "
+            "that root when present and falls back to processed/synchronized."
+        ),
     )
     parser.add_argument(
         "--output-folder",
@@ -159,6 +167,15 @@ def parse_args() -> argparse.Namespace:
             "recorded in scene_camera.json and bop_export_manifest.json."
         ),
     )
+    parser.add_argument(
+        "--diagnostic-unmanaged",
+        action="store_true",
+        help=(
+            "Allow a canonical-root diagnostic export without a run-owned "
+            "calibration_profile_selection.v2. This is not the managed dataset "
+            "processing path."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -177,6 +194,57 @@ def default_output_folder(run_root: Path, explicit_output_folder: str | None) ->
     return run_root / BOP_DIR
 
 
+def _reject_managed_symlink_components(
+    run_root: Path,
+    path: Path,
+    *,
+    label: str,
+) -> None:
+    root_absolute = run_root.absolute()
+    path_absolute = path.absolute()
+    try:
+        path_absolute.relative_to(root_absolute)
+    except ValueError as exc:
+        raise ValueError(f"Managed {label} must remain below the run root") from exc
+    current = Path(path_absolute.anchor)
+    for part in path_absolute.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(
+                f"Managed {label} must not contain symlink components: {current}"
+            )
+
+
+def validate_managed_export_paths(
+    run_root: str | Path,
+    input_folder: str | Path,
+    output_folder: str | Path,
+) -> tuple[Path, Path]:
+    """Resolve the fixed managed BOP input/output boundary before any write."""
+
+    root = Path(run_root)
+    requested_input = Path(input_folder)
+    requested_output = Path(output_folder)
+    canonical_inputs = (
+        root / PROCESSED_DIR / RECTIFIED_DIR,
+        root / PROCESSED_DIR / SYNCHRONIZED_DIR,
+    )
+    canonical_output = root / BOP_DIR
+    if not any(
+        requested_input.resolve() == candidate.resolve()
+        for candidate in canonical_inputs
+    ):
+        raise ValueError(
+            "Managed BOP export input must be the canonical processed/rectified "
+            "or processed/synchronized root"
+        )
+    if requested_output.resolve() != canonical_output.resolve():
+        raise ValueError("Managed BOP export output must be the canonical <run>/bop")
+    _reject_managed_symlink_components(root, requested_input, label="BOP input")
+    _reject_managed_symlink_components(root, requested_output, label="BOP output")
+    return requested_input, requested_output
+
+
 def _run_input_path(run_root: Path, value: str) -> Path:
     path = Path(value)
     return path if path.is_absolute() else run_root / path
@@ -186,6 +254,89 @@ def _selected_calibration_configured(run_root: Path, run_config: dict | None) ->
     return (run_config or {}).get("calibration_profile_selection") is not None or (
         run_root / CALIBRATION_PROFILE_SELECTION
     ).exists()
+
+
+@dataclass(frozen=True)
+class ValidatedCalibratedBopInput:
+    """One canonical rectified input bound to its synchronized source bytes."""
+
+    sensor_folder: Path
+    authoritative_source_sensor_folder: Path
+    input_fingerprint_sha256: str
+    authoritative_source_fingerprint_sha256: str
+
+
+def _fingerprint_digest(value: object, *, label: str) -> str:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"Validated rectification provenance lacks {label}")
+    digest = value.get("digest")
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise ValueError(
+            f"Validated rectification provenance has invalid {label} digest"
+        )
+    return digest
+
+
+def validate_calibrated_bop_inputs(
+    run_root: str | Path,
+    input_folder: str | Path,
+    sensor_names: tuple[str, ...],
+) -> dict[str, ValidatedCalibratedBopInput]:
+    """Require complete canonical rectification for a managed calibration run."""
+
+    root = Path(run_root)
+    requested_input = Path(input_folder)
+    canonical_rectified = root / PROCESSED_DIR / RECTIFIED_DIR
+    if requested_input.resolve() != canonical_rectified.resolve():
+        raise ValueError(
+            "Runs with selected calibration must export the canonical rectified "
+            f"input root: {canonical_rectified}"
+        )
+    if canonical_rectified.is_symlink() or not canonical_rectified.is_dir():
+        raise FileNotFoundError(
+            "Canonical rectified input root does not exist as a regular directory: "
+            f"{canonical_rectified}"
+        )
+    if not sensor_names:
+        raise ValueError("Selected calibration has no enabled sensor folders")
+    if len(sensor_names) != len(set(sensor_names)):
+        raise ValueError("Enabled sensor folders must be unique for BOP export")
+
+    synchronized_root = root / PROCESSED_DIR / SYNCHRONIZED_DIR
+    validated: dict[str, ValidatedCalibratedBopInput] = {}
+    missing: list[str] = []
+    for sensor_name in sensor_names:
+        source_sensor = synchronized_root / sensor_name
+        rectified_sensor = canonical_rectified / sensor_name
+        if not rectified_sensor.is_dir():
+            missing.append(sensor_name)
+            continue
+        provenance = validate_rectification_provenance(
+            source_sensor,
+            rectified_sensor,
+        )
+        validated[sensor_name] = ValidatedCalibratedBopInput(
+            sensor_folder=rectified_sensor,
+            authoritative_source_sensor_folder=source_sensor,
+            input_fingerprint_sha256=_fingerprint_digest(
+                provenance.get("output_fingerprint"),
+                label="output_fingerprint",
+            ),
+            authoritative_source_fingerprint_sha256=_fingerprint_digest(
+                provenance.get("source_fingerprint"),
+                label="source_fingerprint",
+            ),
+        )
+    if missing:
+        raise FileNotFoundError(
+            "Canonical rectified input is missing enabled sensor folder(s): "
+            + ", ".join(missing)
+        )
+    return validated
 
 
 def calibration_profile_for_sensor(
@@ -309,11 +460,27 @@ def main() -> None:
     run_root = Path(args.run_root)
     input_folder = default_input_folder(run_root, args.input_folder)
     output_folder = default_output_folder(run_root, args.output_folder)
+    input_folder, output_folder = validate_managed_export_paths(
+        run_root,
+        input_folder,
+        output_folder,
+    )
     calibration_profiles_path = (
         _run_input_path(run_root, args.calibration_profiles)
         if args.calibration_profiles
         else None
     )
+    run_config = load_run_config_for_run_root(run_root)
+    selected_calibration_configured = _selected_calibration_configured(
+        run_root,
+        run_config,
+    )
+    if not selected_calibration_configured and not args.diagnostic_unmanaged:
+        raise ValueError(
+            "Managed BOP export requires a run-owned "
+            "calibration_profile_selection.v2; use --diagnostic-unmanaged only "
+            "for isolated software diagnostics."
+        )
 
     manifest = load_or_create_run_manifest(run_root)
     upsert_stage(manifest, name="bop_export", status="running")
@@ -333,12 +500,13 @@ def main() -> None:
             raise ValueError(
                 "COCO annotations require --annotation-mode pose_and_masks"
             )
-        run_config = load_run_config_for_run_root(run_root)
         mounting_modes_by_sensor_name = enabled_sensor_mounting_modes_by_folder(
             run_config
         )
         calibration_profile_ids_by_sensor_name = None
-        if _selected_calibration_configured(run_root, run_config):
+        calibrated_inputs: dict[str, ValidatedCalibratedBopInput] = {}
+        calibrated_export = calibration_profiles_path is not None
+        if selected_calibration_configured:
             if calibration_profiles_path is None:
                 raise ValueError(
                     "A run with selected calibration provenance must pass its "
@@ -375,13 +543,25 @@ def main() -> None:
                 run_root,
                 calibration_sync_policy,
             )
+        if calibrated_export:
+            if args.input_folder is None:
+                input_folder = run_root / PROCESSED_DIR / RECTIFIED_DIR
+            calibrated_inputs = validate_calibrated_bop_inputs(
+                run_root,
+                input_folder,
+                enabled_sensor_folder_names(run_root),
+            )
         if output_folder.exists() and not args.overwrite:
             raise FileExistsError(
                 f"BOP dataset already exists: {output_folder}; pass --overwrite"
             )
-        sensor_folders = discover_exportable_sensor_folders(
-            input_folder,
-            run_root=run_root if args.input_folder is None else None,
+        sensor_folders = (
+            [item.sensor_folder for item in calibrated_inputs.values()]
+            if calibrated_export
+            else discover_exportable_sensor_folders(
+                input_folder,
+                run_root=run_root,
+            )
         )
         calibration_profiles = (
             load_profile_collection(calibration_profiles_path)
@@ -460,9 +640,27 @@ def main() -> None:
             calibration_profile = calibration_profiles_by_sensor_name.get(
                 sensor_folder.name
             )
-            portable_sensor_folder = (
-                _portable_run_path(sensor_folder, run_root) or sensor_folder.name
+            calibrated_input = calibrated_inputs.get(sensor_folder.name)
+            authoritative_sensor_folder = (
+                calibrated_input.authoritative_source_sensor_folder
+                if calibrated_input is not None
+                else sensor_folder
             )
+            portable_sensor_folder = _portable_run_path(sensor_folder, run_root)
+            portable_authoritative_sensor_folder = _portable_run_path(
+                authoritative_sensor_folder,
+                run_root,
+            )
+            if (
+                portable_sensor_folder is None
+                or portable_authoritative_sensor_folder is None
+            ):
+                if calibrated_input is not None:
+                    raise ValueError(
+                        "Managed calibrated BOP input paths must remain below the run root"
+                    )
+                portable_sensor_folder = sensor_folder.name
+                portable_authoritative_sensor_folder = sensor_folder.name
             exports.append(
                 export_sensor_scene_to_bop(
                     sensor_folder,
@@ -477,12 +675,37 @@ def main() -> None:
                         if object_instances is not None
                         else None
                     ),
+                    source_projection=(
+                        "rectified" if calibrated_input is not None else None
+                    ),
                     input_sensor_folder=portable_sensor_folder,
-                    authoritative_source_sensor_folder=portable_sensor_folder,
+                    authoritative_source_sensor_folder=(
+                        portable_authoritative_sensor_folder
+                    ),
+                    input_fingerprint_sha256=(
+                        calibrated_input.input_fingerprint_sha256
+                        if calibrated_input is not None
+                        else None
+                    ),
+                    authoritative_source_fingerprint_sha256=(
+                        calibrated_input.authoritative_source_fingerprint_sha256
+                        if calibrated_input is not None
+                        else None
+                    ),
                     annotation_source=args.annotation_source,
                     annotation_mode=annotation_mode,
                 )
             )
+        if calibrated_inputs:
+            post_copy_inputs = validate_calibrated_bop_inputs(
+                run_root,
+                run_root / PROCESSED_DIR / RECTIFIED_DIR,
+                tuple(calibrated_inputs),
+            )
+            if post_copy_inputs != calibrated_inputs:
+                raise RuntimeError(
+                    "Calibrated BOP inputs changed while their scene files were copied"
+                )
 
         pose_generation_provenance = {
             "source": "blenderproc_analytic_gt",
@@ -611,6 +834,7 @@ def main() -> None:
             annotation_mode=annotation_mode,
             annotation_provenance=annotation_provenance,
         )
+        validate_bop_export_artifact_set(staging_folder)
         replace_directory(staging_folder, output_folder)
 
         artifacts: dict[str, Path] = {

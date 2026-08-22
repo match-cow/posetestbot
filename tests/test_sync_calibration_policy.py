@@ -348,10 +348,6 @@ def test_profile_sync_policy_resolves_exact_same_family_camera_timing(
             "sync_delta_ms must be a finite number",
         ),
         (
-            _profile("camera-A", sync_delta_ms=True),
-            "sync_delta_ms must be a finite number",
-        ),
-        (
             _profile(
                 "camera-A",
                 sync_delta_ms=-70.0,
@@ -387,6 +383,14 @@ def test_profile_sync_policy_rejects_missing_or_contradictory_timing(
 
     with pytest.raises(ValueError, match=error):
         resolve_calibration_profile_sync_policy(run_root)
+
+
+def test_profile_writer_rejects_boolean_sync_delta(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="sync_delta_ms must be a finite number"):
+        write_profile_collection(
+            [_profile("camera-A", sync_delta_ms=True)],
+            tmp_path / "calibration_profiles.json",
+        )
 
 
 def test_profile_sync_policy_rejects_stale_current_sensor_profile_binding(

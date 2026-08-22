@@ -9,6 +9,10 @@ from posetestbot.sensors.contracts import MountingMode, SensorType
 
 
 AUTO_DEVICE_IDS = {"auto"}
+CAPTURE_RESOLUTION_IMAGE_SIZES: dict[str, tuple[int, int]] = {
+    "720p": (1280, 720),
+    "360p": (672, 376),
+}
 
 
 @dataclass(frozen=True)
@@ -103,6 +107,18 @@ def get_sensor_adapter(sensor_type: SensorType | str) -> SensorAdapterSpec:
     except KeyError as exc:
         raise ValueError(
             f"No capture adapter is registered for {normalized.value}"
+        ) from exc
+
+
+def capture_resolution_image_size(resolution: str) -> tuple[int, int]:
+    """Return the authoritative captured ``(width, height)`` for a run token."""
+
+    try:
+        return CAPTURE_RESOLUTION_IMAGE_SIZES[resolution]
+    except KeyError as exc:
+        supported = ", ".join(sorted(CAPTURE_RESOLUTION_IMAGE_SIZES))
+        raise ValueError(
+            f"Unsupported capture resolution {resolution!r}; expected: {supported}"
         ) from exc
 
 

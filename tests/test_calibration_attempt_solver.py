@@ -35,6 +35,7 @@ from posetestbot.calibration.transforms import robot_ee_to_reference
 
 from posetestbot.calibration.intrinsics import (
     factory_intrinsic_profile,
+    validate_intrinsic_profile,
     write_intrinsic_profile_collection,
 )
 
@@ -548,6 +549,38 @@ def _unsupported_intrinsic_profile(profile: dict, *, profile_id: str) -> dict:
     }
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("rectified_fx", -1.0, "focal lengths"),
+        ("native_bottom_row", 2.0, "bottom row"),
+        ("rectified_width", 320, "dimensions must match"),
+        ("depth_scale", 0.0, "scale_to_mm"),
+        ("roi_width", 0, "width and height must be positive"),
+    ],
+)
+def test_intrinsic_profile_rejects_nonphysical_projection_contracts(
+    tmp_path: Path,
+    field: str,
+    value: float | int,
+    message: str,
+) -> None:
+    profile = _intrinsic_sensor_fixture(tmp_path / field)
+    if field == "rectified_fx":
+        profile["rectified"]["cam_K"][0] = value
+    elif field == "native_bottom_row":
+        profile["native"]["cam_K"][8] = value
+    elif field == "rectified_width":
+        profile["rectified"]["width"] = value
+    elif field == "depth_scale":
+        profile["depth"]["scale_to_mm"] = value
+    else:
+        profile["rectified"]["valid_roi"][2] = value
+
+    with pytest.raises(ValueError, match=message):
+        validate_intrinsic_profile(profile)
+
+
 def _intrinsic_split_detections(
     count: int,
     *,
@@ -832,6 +865,87 @@ def test_leave_one_pose_out_ranking_recovers_known_transform(mode: str) -> None:
     assert candidate["held_out_residuals"]["median_translation_mm"] < 1e-5
 
 
+def test_complete_candidate_between_warning_and_hard_residual_limits_is_retained(
+    tmp_path: Path,
+) -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+
+    candidate = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+        # Use deliberately tiny limits so the otherwise exact synthetic fixture
+        # exercises the same warning band as the production 10 mm / 5 deg and
+        # 20 mm / 10 deg policy without manufacturing contradictory evidence.
+        max_mean_translation_mm=1e-14,
+        max_mean_rotation_deg=1e-9,
+        hard_max_mean_translation_mm=1e-10,
+        hard_max_mean_rotation_deg=1e-4,
+    )
+
+    assert candidate["status"] == "passing"
+    assert candidate["validation_state"] == "passed"
+    assert candidate["quality_state"] == "warning"
+    assert candidate["quality_warning_count"] == len(candidate["quality_warnings"])
+    assert {check["name"] for check in candidate["quality_warnings"]} >= {
+        "mean_translation_residual",
+        "mean_rotation_residual",
+        "full_input_motion_balanced_translation_residual",
+    }
+    residual_check = next(
+        check
+        for check in candidate["quality_warnings"]
+        if check["name"] == "mean_translation_residual"
+    )
+    assert residual_check["warning_threshold"] == 1e-14
+    assert residual_check["threshold"] == 1e-10
+
+    ranking = {
+        "results": [
+            {
+                "sensor_key": "realsense_d435:1",
+                "candidates": [candidate],
+            }
+        ]
+    }
+    review = attempt_module._promotion_review(
+        {"sensor_keys": ["realsense_d435:1"]}, ranking
+    )
+    assert review is not None
+    assert review["status"] == "promotable_with_warnings"
+    assert review["quality_warnings"]
+
+
+def test_candidate_above_hard_residual_limit_remains_failed() -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+
+    candidate = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+        max_mean_translation_mm=1e-16,
+        max_mean_rotation_deg=1e-12,
+        hard_max_mean_translation_mm=5e-14,
+        hard_max_mean_rotation_deg=1e-8,
+    )
+
+    assert candidate["status"] == "failed"
+    assert candidate["validation_state"] == "failed"
+    assert any(
+        check["status"] == "error"
+        and check["name"]
+        in {
+            "mean_translation_residual",
+            "full_input_motion_balanced_translation_residual",
+        }
+        for check in candidate["checks"]
+    )
+
+
 @pytest.mark.parametrize("mode", ["eye_in_hand", "eye_to_hand"])
 def test_robust_closure_rejects_one_outlier_and_recovers_transform(mode: str) -> None:
     observations, expected, _companion = _fixture_observations(mode)
@@ -878,6 +992,22 @@ def test_degenerate_motion_is_reported_as_candidate_failure() -> None:
 
     assert candidate["status"] == "error"
     assert "degenerate robot motion" in candidate["error"]
+
+
+def test_candidate_rejects_non_finite_acceptance_thresholds() -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+
+    candidate = evaluate_extrinsic_candidate(
+        observations,
+        mode="eye_in_hand",
+        pnp_method="IPPE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+        hard_max_mean_translation_mm=float("nan"),
+    )
+
+    assert candidate["status"] == "error"
+    assert candidate["error"] == "candidate acceptance thresholds must be finite"
 
 
 def test_attempt_quality_gates_require_fifteen_views_and_six_coverage_cells() -> None:
@@ -960,7 +1090,35 @@ def _coplanar_pnp_ransac_regression_fixture() -> tuple[
     return object_points, image_points, camera, distortion
 
 
-def test_planar_pnp_uses_shared_inliers_refines_and_retains_ippe_ambiguity() -> None:
+@pytest.mark.parametrize("invalid_value", [float("nan"), float("inf")])
+def test_planar_pnp_rejects_non_finite_inputs_and_thresholds(
+    invalid_value: float,
+) -> None:
+    object_points, image_points, camera, distortion = (
+        _coplanar_pnp_ransac_regression_fixture()
+    )
+
+    with pytest.raises(ValueError, match="reprojection threshold must be positive"):
+        solve_planar_pnp_candidates(
+            object_points,
+            image_points,
+            camera,
+            distortion,
+            max_all_point_mean_error_px=invalid_value,
+        )
+
+    invalid_image_points = image_points.copy()
+    invalid_image_points[0, 0] = invalid_value
+    with pytest.raises(ValueError, match="only finite values"):
+        solve_planar_pnp_candidates(
+            object_points,
+            invalid_image_points,
+            camera,
+            distortion,
+        )
+
+
+def test_planar_pnp_uses_shared_inliers_and_deduplicates_refined_ippe() -> None:
     object_points = np.asarray(
         [[x, y, 0.0] for y in (0.0, 40.0, 80.0) for x in (0.0, 40.0, 80.0, 120.0)],
         dtype=float,
@@ -984,9 +1142,13 @@ def test_planar_pnp_uses_shared_inliers_refines_and_retains_ippe_ambiguity() -> 
         np.zeros(5),
     )
 
-    assert set(result["selected"]) == {"IPPE", "ITERATIVE", "SQPNP"}
+    assert set(result["selected"]) == {"IPPE", "SQPNP"}
     assert result["common_inlier_count"] == len(object_points)
-    assert len([item for item in result["candidates"] if item["method"] == "IPPE"]) == 2
+    assert len([item for item in result["candidates"] if item["method"] == "IPPE"]) == 1
+    assert any(
+        item["method"] == "IPPE" and item["reason"] == "duplicate_pose_after_refinement"
+        for item in result["failures"]
+    )
     assert all(
         item["common_inlier_indices"] == result["common_inlier_indices"]
         and item["refinement"] == "solvePnPRefineLM"
@@ -994,6 +1156,54 @@ def test_planar_pnp_uses_shared_inliers_refines_and_retains_ippe_ambiguity() -> 
     )
     assert result["duplicate_marker_clutter_filtered"] is False
     assert result["raw_common_inlier_ratio"] == result["common_inlier_ratio"]
+
+
+def test_planar_pnp_does_not_select_near_tied_distinct_ippe_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    object_points = np.asarray(
+        [[x, y, 0.0] for y in (0.0, 40.0, 80.0) for x in (0.0, 40.0, 80.0, 120.0)],
+        dtype=float,
+    )
+    camera = np.asarray(
+        [[700.0, 0.0, 320.0], [0.0, 705.0, 240.0], [0.0, 0.0, 1.0]],
+        dtype=float,
+    )
+    projected = cv2.projectPoints(
+        object_points,
+        np.asarray([0.001, 0.0068, -0.0018]),
+        np.asarray([-3.8, -0.1, 1421.0]),
+        camera,
+        np.zeros(5),
+    )[0].reshape(-1, 2)
+    image_points = projected + np.random.default_rng(0).normal(
+        0.0,
+        0.3,
+        projected.shape,
+    )
+    monkeypatch.setattr(
+        cv2,
+        "solvePnPRefineLM",
+        lambda _objects, _images, _camera, _distortion, rvec, tvec: (rvec, tvec),
+    )
+
+    result = solve_planar_pnp_candidates(
+        object_points,
+        image_points,
+        camera,
+        np.zeros(5),
+        methods=("IPPE",),
+    )
+
+    assert result["selected"] == {}
+    ambiguity = next(
+        item
+        for item in result["failures"]
+        if item["reason"] == "unresolved_planar_pose_ambiguity"
+    )
+    assert ambiguity["reprojection_delta_px"] < 0.01
+    assert ambiguity["translation_delta_mm"] > 1.0
+    assert ambiguity["rotation_delta_deg"] > 1.0
 
 
 def test_planar_pnp_isolates_strong_target_instance_from_duplicate_marker_clutter() -> (
@@ -1161,7 +1371,7 @@ def test_candidate_ranking_has_stable_method_tie_breaks() -> None:
 
     ranked = rank_candidates(values)
 
-    assert [item["candidate_id"] for item in ranked] == ["ip-tsai", "ip", "it", "sq"]
+    assert [item["candidate_id"] for item in ranked] == ["ip-tsai", "ip", "sq", "it"]
     assert ranked[0]["recommended"] is True
 
 

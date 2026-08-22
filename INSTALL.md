@@ -58,7 +58,7 @@ inspection/conversion, exact slicing, pose-template preview, and PDF generation
 are disabled until the pinned checkout is available.
 
 Omit `--with-bop-toolkit` only when neither **Inspect → BOP Evaluation** nor the
-evaluation-compatible **Pose + masks** ground-truth product is needed.
+verified **Pose + masks** ground-truth product is needed.
 Annotation-free export and plain pose GT remain usable; the console reports the
 missing optional runtime at the affected controls.
 
@@ -262,9 +262,12 @@ template and object-GT workflow is documented in
 
 ### Workflow BOP Ground Truth
 
-After the guided object-dataset workflow verifies its base BOP image/model
-export, step 6 offers two explicit derived products:
+Object-dataset Workflow step 1 records exactly one run-owned outcome. After the
+base BOP image/model export is verified, step 6 displays and can queue only that
+configured outcome:
 
+- `none` ends with the base BOP dataset and neither requires nor offers an
+  annotation-generation job.
 - `pose` loads the immutable objects and calibrated cameras in BlenderProc
   2.8.0 and writes standard `scene_gt.json` model-to-camera rotations and
   translations. It does not fabricate visibility data and is deliberately not
@@ -303,7 +306,11 @@ or selection/calibration snapshots.
 
 The **Inspect → BOP Evaluation** page is a narrow dataset-validation exception
 to PoseTestBot's acquisition-only boundary. It consumes an already exported,
-annotation-bearing BOP v5 dataset and either:
+verified `pose_and_masks` BOP v5 dataset. Its manifest must declare complete
+BlenderProc annotations and BOP19 evaluation capability, with matching
+per-scene `scene_gt.json` and `scene_gt_info.json` plus complete `mask/` and
+`mask_visib/` visibility evidence. Pose-only ground truth is not
+evaluation-ready. Evaluation then consumes either:
 
 - an immutable, already compatible standard BOP19 result CSV selected from the
   run's registered results; or
@@ -435,10 +442,10 @@ progress, adapter/provenance, toolkit outputs, and final metric report below
 inspection artifacts; the exported `bop/` dataset and raw capture evidence are
 not modified.
 
-New annotation-bearing exports use the official BOP19 visibility target rule
-(`visib_fract >= 0.1`). Inspect warns when an older export's target list does
-not match that rule; such a run can validate its own exported contract, but its
-scores must not be presented as leaderboard-comparable.
+New verified `pose_and_masks` exports use the official BOP19 visibility target
+rule (`visib_fract >= 0.1`). Inspect warns when an older export's target list
+does not match that rule; such a run can validate its own exported contract,
+but its scores must not be presented as leaderboard-comparable.
 
 ### RealSense D435
 

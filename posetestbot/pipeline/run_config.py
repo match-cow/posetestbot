@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import stat
 import threading
 import uuid
 from contextlib import contextmanager
@@ -76,21 +78,75 @@ def run_config_lock(run_root: str | Path):
             finally:
                 held[lock_path] -= 1
             return
-        flags = os.O_CREAT | os.O_RDWR
+        root_stat = os.stat(root, follow_symlinks=False)
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise ValueError(f"Run root must be a regular directory: {root}")
+        directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        directory_flags |= getattr(os, "O_DIRECTORY", 0)
+        directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+        directory_descriptor = os.open(root, directory_flags)
+        opened_root = os.fstat(directory_descriptor)
+        if (opened_root.st_dev, opened_root.st_ino) != (
+            root_stat.st_dev,
+            root_stat.st_ino,
+        ):
+            os.close(directory_descriptor)
+            raise RuntimeError(f"Run root changed while acquiring its lock: {root}")
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
-        descriptor = os.open(lock_path, flags, 0o600)
+        descriptor = -1
         try:
-            with os.fdopen(descriptor, "a+b", closefd=False) as handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            descriptor = os.open(
+                RUN_CONFIG_LOCK,
+                flags,
+                0o600,
+                dir_fd=directory_descriptor,
+            )
+            opened_lock = os.fstat(descriptor)
+            if not stat.S_ISREG(opened_lock.st_mode):
+                raise RuntimeError(
+                    f"Run-config lock must be a regular file: {lock_path}"
+                )
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                visible_root = os.stat(root, follow_symlinks=False)
+                anchored_lock = os.stat(
+                    RUN_CONFIG_LOCK,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+                visible_lock = os.stat(lock_path, follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Run root or run-config lock changed while acquiring: {root}"
+                ) from exc
+            if (
+                not stat.S_ISDIR(visible_root.st_mode)
+                or (visible_root.st_dev, visible_root.st_ino)
+                != (opened_root.st_dev, opened_root.st_ino)
+                or not stat.S_ISREG(anchored_lock.st_mode)
+                or (anchored_lock.st_dev, anchored_lock.st_ino)
+                != (opened_lock.st_dev, opened_lock.st_ino)
+                or not stat.S_ISREG(visible_lock.st_mode)
+                or (visible_lock.st_dev, visible_lock.st_ino)
+                != (opened_lock.st_dev, opened_lock.st_ino)
+            ):
+                raise RuntimeError(
+                    f"Run root or run-config lock changed while acquiring: {root}"
+                )
+            try:
                 held[lock_path] = 1
                 try:
                     yield root
                 finally:
                     held.pop(lock_path, None)
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
-            os.close(descriptor)
+            if descriptor >= 0:
+                os.close(descriptor)
+            os.close(directory_descriptor)
 
 
 @dataclass(frozen=True)
@@ -1260,10 +1316,17 @@ def write_run_config_with_manifest(
 
 
 def load_run_config(path: str | Path) -> dict[str, Any]:
-    with open(path, "r") as f:
+    config_path = Path(path)
+    if config_path.is_symlink():
+        raise ValueError(f"Run config must be a regular file: {config_path}")
+    if not config_path.exists():
+        raise FileNotFoundError(config_path)
+    if not config_path.is_file():
+        raise ValueError(f"Run config must be a regular file: {config_path}")
+    with open(config_path, "r") as f:
         value = json.load(f)
     if not isinstance(value, dict):
-        raise ValueError(f"Run config must be a JSON object: {path}")
+        raise ValueError(f"Run config must be a JSON object: {config_path}")
     validate_run_config(value)
     return value
 
@@ -1278,3 +1341,16 @@ def load_run_config_for_run_root(run_root: str | Path) -> dict[str, Any]:
             f"{config['run_root']} != {run_root_path.as_posix()}"
         )
     return config
+
+
+def run_config_sha256(config: Mapping[str, Any]) -> str:
+    """Return the canonical digest used to bind capture to one v4 config."""
+
+    validate_run_config(config)
+    payload = json.dumps(
+        config,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()

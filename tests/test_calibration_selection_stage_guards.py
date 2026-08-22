@@ -11,7 +11,10 @@ from posetestbot.io.artifacts import (
     DATASET_MANIFEST,
 )
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
-from scripts.run_camera_rectification import _intrinsic_profiles_path
+from scripts.run_camera_rectification import (
+    _intrinsic_profiles_path,
+    _require_managed_rectification_roots,
+)
 
 
 def test_rectification_defaults_to_run_config_intrinsic_snapshot(
@@ -37,6 +40,116 @@ def test_rectification_defaults_to_run_config_intrinsic_snapshot(
     assert _intrinsic_profiles_path(run_root, "explicit.json") == (
         run_root / "explicit.json"
     )
+
+
+def test_managed_rectification_accepts_only_canonical_roots(tmp_path: Path) -> None:
+    run_root = tmp_path / "dataset"
+
+    _require_managed_rectification_roots(
+        run_root,
+        input_root=None,
+        output_root=None,
+    )
+    _require_managed_rectification_roots(
+        run_root,
+        input_root="processed/synchronized",
+        output_root="processed/rectified",
+    )
+
+    with pytest.raises(ValueError, match="canonical synchronized input root"):
+        _require_managed_rectification_roots(
+            run_root,
+            input_root="diagnostics/handpicked_frames",
+            output_root=None,
+        )
+    with pytest.raises(ValueError, match="canonical rectified output root"):
+        _require_managed_rectification_roots(
+            run_root,
+            input_root=None,
+            output_root="diagnostics/rectified",
+        )
+
+
+def test_managed_rectification_rejects_symlinked_canonical_input(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "dataset"
+    synchronized = run_root / "processed" / "synchronized"
+    alternate = run_root / "alternate"
+    alternate.mkdir(parents=True)
+    synchronized.parent.mkdir(parents=True)
+    synchronized.symlink_to(alternate, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="must not be symlinks"):
+        _require_managed_rectification_roots(
+            run_root,
+            input_root=None,
+            output_root=None,
+        )
+
+
+def test_rectification_stage_rejects_arbitrary_input_root_before_processing(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "dataset"
+    alternate = tmp_path / "handpicked"
+    alternate.mkdir()
+    repo_root = Path(__file__).resolve().parents[1]
+
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "scripts/run_camera_rectification.py",
+            run_root.as_posix(),
+            "--input-root",
+            alternate.as_posix(),
+            "--intrinsic-profiles",
+            "missing.json",
+        ],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "canonical synchronized input root" in result.stderr
+    assert not (run_root / DATASET_MANIFEST).exists()
+
+
+def test_managed_rectification_requires_run_owned_calibration_selection(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "unselected-rectification"
+    write_run_config(
+        run_root,
+        create_run_config(
+            capture_intent="dataset",
+            bop_annotation_mode="none",
+            run_root=run_root,
+        ),
+    )
+    (run_root / "processed" / "synchronized").mkdir(parents=True)
+
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "scripts/run_camera_rectification.py",
+            run_root.as_posix(),
+            "--intrinsic-profiles",
+            "missing.json",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "requires a run-owned calibration_profile_selection.v2" in result.stderr
+    assert not (run_root / DATASET_MANIFEST).exists()
 
 
 @pytest.mark.parametrize(

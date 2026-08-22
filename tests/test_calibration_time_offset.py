@@ -214,6 +214,54 @@ def test_auto_offset_boundary_optimum_keeps_recorded_timing_with_warning() -> No
     assert all(item["robot_pose_time_offset_ms"] == 0.0 for item in adjusted)
 
 
+def test_auto_offset_aggregate_boundary_is_rejected_when_fold_optima_are_interior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observations, robot_records = _synthetic_offset_evidence(
+        mode="eye_in_hand",
+        planted_offset_ms=20,
+    )
+    original_aggregate = time_offset_module._aggregate_fold_curve
+
+    def aggregate_with_boundary_optimum(*args, **kwargs):
+        curve = original_aggregate(*args, **kwargs)
+        boundary = max(
+            curve,
+            key=lambda item: float(item["robot_pose_time_offset_ms"]),
+        )
+        residuals = boundary["methods"]["shah"]["residuals"]
+        residuals["mean_translation_mm"] = -1.0
+        residuals["mean_rotation_deg"] = -1.0
+        boundary["residuals"] = residuals
+        return curve
+
+    monkeypatch.setattr(
+        time_offset_module,
+        "_aggregate_fold_curve",
+        aggregate_with_boundary_optimum,
+    )
+
+    result, adjusted = estimate_sensor_time_offset(
+        observations,
+        sensor_key="realsense_d435:test",
+        robot_records=robot_records,
+        mode="eye_in_hand",
+        offsets_ms=[float(value) for value in range(-40, 41, 10)],
+        methods=("shah",),
+        max_search_motions=12,
+    )
+
+    fold_offsets = [
+        item["candidate_robot_pose_time_offset_ms"]
+        for item in result["cross_validation"]["folds"]
+    ]
+    assert all(-40.0 < value < 40.0 for value in fold_offsets)
+    assert result["candidate_robot_pose_time_offset_ms"] == 40.0
+    assert result["boundary_hit"] is True
+    assert result["selected_robot_pose_time_offset_ms"] == 0.0
+    assert all(item["robot_pose_time_offset_ms"] == 0.0 for item in adjusted)
+
+
 def test_auto_offset_requires_three_motion_disjoint_folds() -> None:
     observations, robot_records = _synthetic_offset_evidence(
         mode="eye_in_hand",

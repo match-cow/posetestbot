@@ -99,6 +99,7 @@ def supervise(
     owner_pid: int,
     owner_start_time: int,
     identity_path: Path,
+    cancel_request_path: Path,
     command: list[str],
     termination_timeout_s: float = DEFAULT_TERMINATION_TIMEOUT_S,
 ) -> int:
@@ -137,6 +138,9 @@ def supervise(
     if not process_matches(owner_pid, owner_start_time):
         _write_identity(identity_path, identity, status="owner_missing")
         return 125
+    if cancel_request_path.is_file():
+        _write_identity(identity_path, identity, status="canceled_before_start")
+        return 130
 
     process: subprocess.Popen[Any] | None = None
     try:
@@ -155,7 +159,7 @@ def supervise(
         owner_check_at = 0.0
         while process.poll() is None:
             now = time.monotonic()
-            if stop_requested:
+            if stop_requested or cancel_request_path.is_file():
                 _write_identity(identity_path, identity, status="stopping")
                 terminate_group(
                     workload_group,
@@ -209,6 +213,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--owner-pid", type=int, required=True)
     parser.add_argument("--owner-start-time", type=int, required=True)
     parser.add_argument("--identity-path", type=Path, required=True)
+    parser.add_argument("--cancel-request-path", type=Path, required=True)
     parser.add_argument("--termination-timeout", type=float, default=5.0)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -225,6 +230,7 @@ def main() -> int:
         owner_pid=args.owner_pid,
         owner_start_time=args.owner_start_time,
         identity_path=args.identity_path,
+        cancel_request_path=args.cancel_request_path,
         command=args.command,
         termination_timeout_s=max(0.0, args.termination_timeout),
     )

@@ -41,6 +41,7 @@ from posetestbot.sensors.registry import (
 from posetestbot.sensors.readiness import selected_sensor_readiness_checks
 from posetestbot.sensors.status import (
     REALSENSE_MIN_USB_MAJOR,
+    SCHEMA_VERSION as SENSOR_STATUS_SCHEMA_VERSION,
     collect_sensor_status,
     realsense_usb_major_version,
 )
@@ -82,8 +83,11 @@ def _sensor_devices(family: Mapping[str, Any]) -> set[str]:
         for device in family.get("devices", [])
         if (
             isinstance(device, Mapping)
-            and device.get("connected", True)
-            and device.get("capture_ready") is not False
+            and device.get("sensor_type") == sensor_type
+            and isinstance(device.get("device_id"), str)
+            and bool(device["device_id"].strip())
+            and device.get("connected") is True
+            and device.get("capture_ready") is True
             and not _realsense_device_below_superspeed(
                 sensor_type=sensor_type,
                 device=device,
@@ -461,6 +465,15 @@ def _validate_sensor_readiness(
                 "sensor_status",
                 "warning",
                 "Sensor status was not collected for this capture-plan preflight.",
+            )
+        ]
+    if sensor_status.get("schema_version") != SENSOR_STATUS_SCHEMA_VERSION:
+        return [
+            _check(
+                "sensor_status",
+                "error",
+                "Sensor status must use the current schema before capture.",
+                details={"schema_version": sensor_status.get("schema_version")},
             )
         ]
 

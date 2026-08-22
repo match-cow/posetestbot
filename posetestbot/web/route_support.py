@@ -19,6 +19,7 @@ from posetestbot.config import (
 )
 from posetestbot.io.artifacts import (
     CAPTURE_EXECUTION_LOGS_DIR,
+    CAPTURE_EXECUTION_PLAN,
     CAPTURE_EXECUTION_REPORT,
     CAPTURE_EXECUTION_STATUS,
     DEPTH_DIR,
@@ -51,6 +52,7 @@ from posetestbot.pipeline.run_config import (
     write_run_config_with_manifest,
 )
 from posetestbot.robot.status import collect_robot_status
+from posetestbot.robot.pose_receiver import RAW_POSE_CLAIM_FILE
 from posetestbot.runtime.status import collect_runtime_status
 from posetestbot.sensors.registry import list_sensor_adapters
 from posetestbot.sensors.status import collect_sensor_status
@@ -75,14 +77,34 @@ def _raw_capture_evidence(run_root: str | Path) -> list[str]:
 
     root = Path(run_root)
     evidence: list[str] = []
-    for artifact in (CAPTURE_EXECUTION_STATUS, CAPTURE_EXECUTION_REPORT):
-        if (root / artifact).is_file():
+    for artifact in (
+        CAPTURE_EXECUTION_PLAN,
+        CAPTURE_EXECUTION_STATUS,
+        CAPTURE_EXECUTION_REPORT,
+    ):
+        path = root / artifact
+        if path.exists() or path.is_symlink():
             evidence.append(artifact)
     logs = root / CAPTURE_EXECUTION_LOGS_DIR
-    if logs.is_dir() and any(logs.iterdir()):
+    if logs.is_symlink() or (
+        logs.exists()
+        and (not logs.is_dir() or any(logs.iterdir()))
+    ):
         evidence.append(CAPTURE_EXECUTION_LOGS_DIR)
-    if (root / RAW_ROBOT_EE_POSES).is_file():
+    raw_pose = root / RAW_ROBOT_EE_POSES
+    if raw_pose.exists() or raw_pose.is_symlink():
         evidence.append(RAW_ROBOT_EE_POSES)
+    claim = root / RAW_POSE_CLAIM_FILE
+    if claim.exists() or claim.is_symlink():
+        evidence.append(RAW_POSE_CLAIM_FILE)
+    if root.is_dir() and any(root.glob("raw_robot_ee_poses.journal.*.jsonl")):
+        evidence.append("raw_robot_ee_poses.journal.*.jsonl")
+    if root.is_dir() and any(root.glob("raw_robot_ee_poses.partial.*.json")):
+        evidence.append("raw_robot_ee_poses.partial.*.json")
+    if root.is_dir() and any(
+        root.glob("raw_robot_ee_poses.claim.*.recovered.json")
+    ):
+        evidence.append("raw_robot_ee_poses.claim.*.recovered.json")
     if not root.is_dir():
         return sorted(set(evidence))
     for candidate in root.iterdir():
@@ -111,6 +133,8 @@ def _capture_sensor_contract(sensors: Any) -> list[tuple[Any, ...]]:
             (
                 str(value.get("sensor_type") or ""),
                 str(value.get("device_id") or ""),
+                str(value.get("display_name") or ""),
+                str(value.get("operator_alias") or ""),
                 str(value.get("mounting_mode") or ""),
                 value.get("enabled", True) is True,
                 value.get("inverted", False) is True,
@@ -185,6 +209,12 @@ def _run_config_from_payload(data: dict[str, Any]):
 
     resolution = data.get("resolution", existing_capture.get("resolution", "720p"))
     fps = int(data.get("fps", existing_capture.get("fps", 6)))
+    velocity = float(
+        data.get(
+            "velocity_m_s",
+            existing_capture.get("velocity_m_s", DEFAULT_CAPTURE_VELOCITY_M_S),
+        )
+    )
     synchronization = capture_synchronization_from_mapping(
         data.get("synchronization", existing_capture.get("synchronization"))
     )
@@ -194,14 +224,16 @@ def _run_config_from_payload(data: dict[str, Any]):
             != _capture_sensor_contract(sensors)
             or resolution != existing_capture["resolution"]
             or fps != existing_capture["fps"]
+            or velocity != existing_capture["velocity_m_s"]
             or synchronization.to_dict() != existing_capture["synchronization"]
             or intent != existing_capture["intent"]
         )
         evidence = _raw_capture_evidence(run_root) if changed else []
         if evidence:
             raise ValueError(
-                "Cannot change capture intent or camera contract after raw evidence "
-                "exists; create a new run: " + ", ".join(evidence)
+                "Cannot change capture intent, cameras, aliases, timing, or motion "
+                "settings after a capture execution attempt exists; create a new "
+                "run: " + ", ".join(evidence)
             )
 
     requested_profiles = data.get(
@@ -264,12 +296,6 @@ def _run_config_from_payload(data: dict[str, Any]):
         fixed_transform_from_mapping(item)
         for item in frames.get("fixed_transforms", [])
     )
-    velocity = float(
-        data.get(
-            "velocity_m_s",
-            existing_capture.get("velocity_m_s", DEFAULT_CAPTURE_VELOCITY_M_S),
-        )
-    )
     return create_run_config(
         run_root=run_root,
         run_id=existing.get("run_id") if existing else None,
@@ -304,6 +330,12 @@ def run_config():
             root = resolve_web_run_root(data.get("run_root"))
             normalized = {**data, "run_root": root.as_posix()}
             with run_config_lock(root):
+                blockers = _raw_capture_evidence(root)
+                if blockers:
+                    raise ValueError(
+                        "Cannot replace run_config.json after a capture execution "
+                        "attempt exists; create a new run: " + ", ".join(blockers)
+                    )
                 config = _run_config_from_payload(normalized)
                 path = write_run_config_with_manifest(root, config)
                 config_data = config.to_dict()

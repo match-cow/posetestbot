@@ -3,10 +3,11 @@
 PoseTestBot uses the pinned PoseTemplateCreator backend to turn managed CAD
 models into printable, immutable object-pose templates. This workflow creates
 ground-truth inputs and a validated base BOP dataset; it does not run pose
-estimators. When optional pose-plus-mask evidence is added, official metric
-inspection is the separate run-scoped **Inspect → BOP Evaluation** path and
-consumes that completed annotation-bearing export. Test-object upload and
-lifecycle are owned by the separate **Workpiece Catalogue** page; see
+estimators. When the optional `pose_and_masks` product is verified with complete
+BlenderProc pose, visibility-info, full-mask, and visible-mask evidence,
+official metric inspection is the separate run-scoped **Inspect → BOP
+Evaluation** path. Pose-only ground truth is not evaluation-ready. Test-object
+upload and lifecycle are owned by the separate **Workpiece Catalogue** page; see
 [WORKPIECE_CATALOGUE.md](WORKPIECE_CATALOGUE.md) for its persistence and API
 contract.
 
@@ -25,7 +26,7 @@ different revision, existing catalogs, bundles, and run selections remain
 browsable, and existing workpiece metadata remains editable, but new CAD
 inspection/conversion, exact slicing, and generation are disabled. Generating
 optional BOP ground-truth evidence requires BlenderProc 2.8.0. The
-evaluation-compatible pose-plus-mask product additionally requires the pinned
+verified pose-plus-mask product additionally requires the pinned
 official BOP Toolkit and its isolated runtime:
 
 ```bash

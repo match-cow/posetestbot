@@ -53,11 +53,23 @@ EXTRINSIC_METHOD_ORDER = (
     "shah",
     "li",
 )
-PNP_METHOD_ORDER = ("IPPE", "ITERATIVE", "SQPNP")
+# ITERATIVE remains readable for retained attempt evidence and focused
+# diagnostics, but is no longer generated as a default pseudo-independent
+# candidate: LM refinement made it converge to the same solution as the other
+# initializers on the repository corpus. IPPE and SQPNP retain distinct roles.
+PNP_METHOD_ORDER = ("IPPE", "SQPNP")
+
+PNP_EQUIVALENT_TRANSLATION_MM = 1e-4
+PNP_EQUIVALENT_ROTATION_DEG = 1e-5
+PNP_AMBIGUITY_MAX_REPROJECTION_DELTA_PX = 0.05
+PNP_AMBIGUITY_MIN_TRANSLATION_MM = 1.0
+PNP_AMBIGUITY_MIN_ROTATION_DEG = 1.0
 
 DEFAULT_MIN_INLIERS = 6
 DEFAULT_MAX_MEAN_TRANSLATION_MM = 10.0
 DEFAULT_MAX_MEAN_ROTATION_DEG = 5.0
+DEFAULT_HARD_MAX_MEAN_TRANSLATION_MM = 20.0
+DEFAULT_HARD_MAX_MEAN_ROTATION_DEG = 10.0
 DEFAULT_MAX_OUTLIER_RATIO = 0.25
 DEFAULT_MIN_PNP_COMMON_INLIERS = 12
 DEFAULT_MIN_PNP_COMMON_INLIER_RATIO = 0.5
@@ -228,13 +240,21 @@ def solve_planar_pnp_candidates(
     distortion_array = np.asarray(distortion, dtype=np.float64).reshape(-1)
     if len(object_array) != len(image_array) or len(object_array) < 4:
         raise ValueError("PnP requires at least four paired object/image points")
+    if not all(
+        np.all(np.isfinite(value))
+        for value in (object_array, image_array, matrix, distortion_array)
+    ):
+        raise ValueError("PnP inputs must contain only finite values")
     if not all(method in PNP_METHODS for method in methods):
         raise ValueError("Unsupported PnP method subset")
     if min_common_inliers < 4:
         raise ValueError("PnP minimum common inliers must be at least four")
     if not 0.0 < min_common_inlier_ratio <= 1.0:
         raise ValueError("PnP minimum common inlier ratio must be in (0, 1]")
-    if max_all_point_mean_error_px <= 0.0:
+    if (
+        not math.isfinite(max_all_point_mean_error_px)
+        or max_all_point_mean_error_px <= 0.0
+    ):
         raise ValueError("PnP whole-board reprojection threshold must be positive")
     if (point_marker_ids is None) != (point_grid_indices is None):
         raise ValueError("PnP marker IDs and grid indices must be provided together")
@@ -511,13 +531,77 @@ def solve_planar_pnp_candidates(
                     item["hypothesis"],
                 )
             )
+            distinct_candidates: list[dict[str, Any]] = []
+            for item in method_candidates:
+                duplicate = None
+                for retained in distinct_candidates:
+                    residual = transform_residual(
+                        transform_from_record(item["transform"]),
+                        transform_from_record(retained["transform"]),
+                    )
+                    if (
+                        residual["translation_mm"] <= PNP_EQUIVALENT_TRANSLATION_MM
+                        and residual["rotation_deg"] <= PNP_EQUIVALENT_ROTATION_DEG
+                    ):
+                        duplicate = retained
+                        break
+                if duplicate is not None:
+                    failures.append(
+                        {
+                            "method": method,
+                            "hypothesis": str(item["hypothesis"]),
+                            "reason": "duplicate_pose_after_refinement",
+                            "equivalent_hypothesis": str(duplicate["hypothesis"]),
+                        }
+                    )
+                    continue
+                distinct_candidates.append(item)
+            method_candidates = distinct_candidates
             accepted_candidates = [
                 item
                 for item in method_candidates
                 if item["quality_status"] == "accepted"
             ]
             if accepted_candidates:
-                accepted_candidates[0]["selected_for_method"] = True
+                ambiguous = False
+                if method == "IPPE" and len(accepted_candidates) > 1:
+                    best, alternative = accepted_candidates[:2]
+                    pose_delta = transform_residual(
+                        transform_from_record(best["transform"]),
+                        transform_from_record(alternative["transform"]),
+                    )
+                    reprojection_delta_px = abs(
+                        float(alternative["mean_reprojection_error_px"])
+                        - float(best["mean_reprojection_error_px"])
+                    )
+                    ambiguous = (
+                        reprojection_delta_px <= PNP_AMBIGUITY_MAX_REPROJECTION_DELTA_PX
+                        and (
+                            pose_delta["translation_mm"]
+                            >= PNP_AMBIGUITY_MIN_TRANSLATION_MM
+                            or pose_delta["rotation_deg"]
+                            >= PNP_AMBIGUITY_MIN_ROTATION_DEG
+                        )
+                    )
+                    if ambiguous:
+                        failures.append(
+                            {
+                                "method": method,
+                                "reason": "unresolved_planar_pose_ambiguity",
+                                "hypotheses": [
+                                    int(best["hypothesis"]),
+                                    int(alternative["hypothesis"]),
+                                ],
+                                "reprojection_delta_px": reprojection_delta_px,
+                                "translation_delta_mm": pose_delta["translation_mm"],
+                                "rotation_delta_deg": pose_delta["rotation_deg"],
+                                "max_reprojection_delta_px": (
+                                    PNP_AMBIGUITY_MAX_REPROJECTION_DELTA_PX
+                                ),
+                            }
+                        )
+                if not ambiguous:
+                    accepted_candidates[0]["selected_for_method"] = True
             else:
                 best = method_candidates[0]
                 failures.append(
@@ -1076,6 +1160,8 @@ def evaluate_extrinsic_candidate(
     min_inliers: int = DEFAULT_MIN_INLIERS,
     max_mean_translation_mm: float = DEFAULT_MAX_MEAN_TRANSLATION_MM,
     max_mean_rotation_deg: float = DEFAULT_MAX_MEAN_ROTATION_DEG,
+    hard_max_mean_translation_mm: float = DEFAULT_HARD_MAX_MEAN_TRANSLATION_MM,
+    hard_max_mean_rotation_deg: float = DEFAULT_HARD_MAX_MEAN_ROTATION_DEG,
     max_outlier_ratio: float = DEFAULT_MAX_OUTLIER_RATIO,
     min_accepted_views: int = 0,
     min_coverage_cells: int = 0,
@@ -1097,8 +1183,31 @@ def evaluate_extrinsic_candidate(
     balance_evidence: dict[str, Any] | None = None
     continuous_coverage: dict[str, Any] | None = None
     try:
+        if not all(
+            math.isfinite(value)
+            for value in (
+                max_mean_translation_mm,
+                max_mean_rotation_deg,
+                hard_max_mean_translation_mm,
+                hard_max_mean_rotation_deg,
+                max_outlier_ratio,
+                min_image_centroid_x_span_ratio,
+                min_image_centroid_y_span_ratio,
+                min_image_centroid_hull_area_ratio,
+                min_translation_span_mm,
+                min_rotation_span_deg,
+            )
+        ):
+            raise ValueError("candidate acceptance thresholds must be finite")
         if max_mean_translation_mm <= 0 or max_mean_rotation_deg <= 0:
             raise ValueError("residual thresholds must be greater than zero")
+        if (
+            hard_max_mean_translation_mm <= max_mean_translation_mm
+            or hard_max_mean_rotation_deg <= max_mean_rotation_deg
+        ):
+            raise ValueError(
+                "hard residual ceilings must be greater than warning thresholds"
+            )
         if not 0 <= max_outlier_ratio <= 1:
             raise ValueError("max_outlier_ratio must be between zero and one")
         if any(
@@ -1178,8 +1287,8 @@ def evaluate_extrinsic_candidate(
             observations,
             mode=mode,
             method=extrinsic_method,
-            max_translation_mm=max_mean_translation_mm,
-            max_rotation_deg=max_mean_rotation_deg,
+            max_translation_mm=hard_max_mean_translation_mm,
+            max_rotation_deg=hard_max_mean_rotation_deg,
         )
         for _iteration in range(8):
             fit_observations = [
@@ -1196,8 +1305,8 @@ def evaluate_extrinsic_candidate(
             )
             companion = _consensus_companion(
                 _companion_estimates(fit_observations, primary, mode=mode),
-                max_translation_mm=max_mean_translation_mm,
-                max_rotation_deg=max_mean_rotation_deg,
+                max_translation_mm=hard_max_mean_translation_mm,
+                max_rotation_deg=hard_max_mean_rotation_deg,
             )
             full_residuals = _closure_residuals(
                 observations,
@@ -1206,8 +1315,8 @@ def evaluate_extrinsic_candidate(
                 mode=mode,
             )
             next_mask = [
-                item["translation_mm"] <= max_mean_translation_mm
-                and item["rotation_deg"] <= max_mean_rotation_deg
+                item["translation_mm"] <= hard_max_mean_translation_mm
+                and item["rotation_deg"] <= hard_max_mean_rotation_deg
                 for item in full_residuals
             ]
             if next_mask == inlier_mask:
@@ -1271,8 +1380,8 @@ def evaluate_extrinsic_candidate(
             mode=mode,
         )
         input_inlier_mask = [
-            item["translation_mm"] <= max_mean_translation_mm
-            and item["rotation_deg"] <= max_mean_rotation_deg
+            item["translation_mm"] <= hard_max_mean_translation_mm
+            and item["rotation_deg"] <= hard_max_mean_rotation_deg
             for item in input_residuals
         ]
         inlier_count = sum(input_inlier_mask)
@@ -1283,8 +1392,8 @@ def evaluate_extrinsic_candidate(
         input_validation = _motion_balanced_validation(
             input_observations,
             input_residuals,
-            max_translation_mm=max_mean_translation_mm,
-            max_rotation_deg=max_mean_rotation_deg,
+            max_translation_mm=hard_max_mean_translation_mm,
+            max_rotation_deg=hard_max_mean_rotation_deg,
         )
         outlier_ratio = input_validation["motion_balanced_outlier_ratio"]
         full_summary = residual_summary(full_residuals)
@@ -1303,12 +1412,12 @@ def evaluate_extrinsic_candidate(
         )
         passing = (
             solver_inlier_count >= min_inliers
-            and held_out_summary["mean_translation_mm"] <= max_mean_translation_mm
-            and held_out_summary["mean_rotation_deg"] <= max_mean_rotation_deg
+            and held_out_summary["mean_translation_mm"] <= hard_max_mean_translation_mm
+            and held_out_summary["mean_rotation_deg"] <= hard_max_mean_rotation_deg
             and input_validation["motion_balanced_mean_translation_mm"]
-            <= max_mean_translation_mm
+            <= hard_max_mean_translation_mm
             and input_validation["motion_balanced_mean_rotation_deg"]
-            <= max_mean_rotation_deg
+            <= hard_max_mean_rotation_deg
             and outlier_ratio <= max_outlier_ratio
             and input_validation["max_repeated_motion_outlier_ratio"]
             <= max_outlier_ratio
@@ -1444,10 +1553,16 @@ def evaluate_extrinsic_candidate(
                     "ok"
                     if held_out_summary["mean_translation_mm"]
                     <= max_mean_translation_mm
-                    else "error"
+                    else (
+                        "warning"
+                        if held_out_summary["mean_translation_mm"]
+                        <= hard_max_mean_translation_mm
+                        else "error"
+                    )
                 ),
                 "actual": held_out_summary["mean_translation_mm"],
-                "threshold": max_mean_translation_mm,
+                "warning_threshold": max_mean_translation_mm,
+                "threshold": hard_max_mean_translation_mm,
                 "unit": "mm",
             },
             {
@@ -1455,10 +1570,16 @@ def evaluate_extrinsic_candidate(
                 "status": (
                     "ok"
                     if held_out_summary["mean_rotation_deg"] <= max_mean_rotation_deg
-                    else "error"
+                    else (
+                        "warning"
+                        if held_out_summary["mean_rotation_deg"]
+                        <= hard_max_mean_rotation_deg
+                        else "error"
+                    )
                 ),
                 "actual": held_out_summary["mean_rotation_deg"],
-                "threshold": max_mean_rotation_deg,
+                "warning_threshold": max_mean_rotation_deg,
+                "threshold": hard_max_mean_rotation_deg,
                 "unit": "deg",
             },
             {
@@ -1473,10 +1594,16 @@ def evaluate_extrinsic_candidate(
                     "ok"
                     if input_validation["motion_balanced_mean_translation_mm"]
                     <= max_mean_translation_mm
-                    else "error"
+                    else (
+                        "warning"
+                        if input_validation["motion_balanced_mean_translation_mm"]
+                        <= hard_max_mean_translation_mm
+                        else "error"
+                    )
                 ),
                 "actual": input_validation["motion_balanced_mean_translation_mm"],
-                "threshold": max_mean_translation_mm,
+                "warning_threshold": max_mean_translation_mm,
+                "threshold": hard_max_mean_translation_mm,
                 "unit": "mm",
             },
             {
@@ -1485,10 +1612,16 @@ def evaluate_extrinsic_candidate(
                     "ok"
                     if input_validation["motion_balanced_mean_rotation_deg"]
                     <= max_mean_rotation_deg
-                    else "error"
+                    else (
+                        "warning"
+                        if input_validation["motion_balanced_mean_rotation_deg"]
+                        <= hard_max_mean_rotation_deg
+                        else "error"
+                    )
                 ),
                 "actual": input_validation["motion_balanced_mean_rotation_deg"],
-                "threshold": max_mean_rotation_deg,
+                "warning_threshold": max_mean_rotation_deg,
+                "threshold": hard_max_mean_rotation_deg,
                 "unit": "deg",
             },
             {
@@ -1503,6 +1636,9 @@ def evaluate_extrinsic_candidate(
                 "threshold": max_outlier_ratio,
             },
         ]
+        quality_warnings = [
+            dict(check) for check in checks if check.get("status") == "warning"
+        ]
         return {
             "candidate_id": candidate_id,
             "sensor_key": sensor_key,
@@ -1511,6 +1647,9 @@ def evaluate_extrinsic_candidate(
             "algorithms": [pnp_method, extrinsic_method],
             "status": "passing" if passing else "failed",
             "validation_state": "passed" if passing else "failed",
+            "quality_state": "warning" if quality_warnings else "ok",
+            "quality_warning_count": len(quality_warnings),
+            "quality_warnings": quality_warnings,
             "score": float(score),
             "observation_count": input_observation_count,
             "input_observation_count": input_observation_count,
@@ -1586,6 +1725,10 @@ def evaluate_extrinsic_candidate(
                 "min_motion_poses": min_motion_poses,
                 "min_translation_span_mm": min_translation_span_mm,
                 "min_rotation_span_deg": min_rotation_span_deg,
+                "warning_mean_translation_mm": max_mean_translation_mm,
+                "warning_mean_rotation_deg": max_mean_rotation_deg,
+                "hard_max_mean_translation_mm": hard_max_mean_translation_mm,
+                "hard_max_mean_rotation_deg": hard_max_mean_rotation_deg,
             },
             "checks": [
                 {

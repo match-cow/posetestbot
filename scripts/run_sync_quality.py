@@ -11,6 +11,7 @@ from posetestbot.io.artifacts import RUN_CONFIG
 from posetestbot.sync.calibration_policy import (
     resolve_calibration_profile_sync_policy,
 )
+from posetestbot.sync.non_destructive import dataset_processing_lock
 from posetestbot.sync.quality import (
     build_sync_quality_report,
     write_sync_quality_report_with_manifest,
@@ -76,8 +77,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def _main(args: argparse.Namespace) -> None:
     run_root = Path(args.run_root)
     calibration_sync_policy = (
         resolve_calibration_profile_sync_policy(run_root)
@@ -168,6 +168,12 @@ def main() -> None:
 
     if report["overall_status"] == "error":
         raise SystemExit(1)
+
+
+def main() -> None:
+    args = parse_args()
+    with dataset_processing_lock(Path(args.run_root)):
+        _main(args)
 
 
 if __name__ == "__main__":

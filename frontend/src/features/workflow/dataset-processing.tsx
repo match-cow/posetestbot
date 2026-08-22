@@ -144,7 +144,7 @@ export function DatasetProcessing({ runRoot, ready, captureComplete, syncComplet
   return <Card data-testid="dataset-processing" className="border-primary/25">
     <CardHeader>
       <CardTitle className="text-base">Process the recorded dataset</CardTitle>
-      <CardDescription>One queued job runs the fixed four-command recipe below. It synchronizes, validates, rectifies, and writes the base image/model BOP dataset. Ground-truth generation is chosen separately in optional step 6. Raw camera frames and robot poses are never renamed or replaced.</CardDescription>
+      <CardDescription>One queued job runs the fixed four-command recipe below. It synchronizes, validates, rectifies, and writes the base image/model BOP dataset. The optional ground-truth outcome is configured in step 1 and queued separately in step 6. Raw camera frames and robot poses are never renamed or replaced.</CardDescription>
     </CardHeader>
     <CardContent className="space-y-5">
       <ol className="grid gap-2 sm:grid-cols-2" aria-label="Automatic dataset processing">
@@ -187,7 +187,7 @@ export function DatasetProcessing({ runRoot, ready, captureComplete, syncComplet
         <div className="flex items-start gap-2 text-xs text-muted-foreground"><ShieldCheck aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning-foreground" /><span>{!ready ? "Complete the readiness step before processing this run." : "Record the object dataset before processing it."}</span></div>
         {!ready && <Button type="button" variant="outline" size="sm" onClick={onReviewReadiness}>Review readiness</Button>}
       </div> : <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-xs text-muted-foreground">Calibration validation is automatic here; there is no second operator preflight. The queued job continues after navigation and is recovered from persistent job history when you return. After the base export is verified, step 6 offers optional pose-only or pose-and-mask ground truth.</p>
+        <p className="text-xs text-muted-foreground">Calibration validation is automatic here; there is no second operator preflight. The queued job continues after navigation and is recovered from persistent job history when you return. After the base export is verified, step 6 shows and can queue only the annotation outcome already configured in step 1.</p>
         <div className="flex flex-wrap gap-2">
           <Button type="button" onClick={() => process.mutate()} disabled={process.isPending || active}>
             {process.isPending || active ? <LoaderCircle aria-hidden="true" className="animate-spin" /> : <Play aria-hidden="true" />}

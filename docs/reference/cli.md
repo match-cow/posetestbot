@@ -41,7 +41,22 @@ not saved configuration.
 
 The lower-level capture-plan, preflight, execution-plan, execution, sync,
 quality, rectification, and BOP scripts remain implementation workers for the
-fixed recipes. They are not alternative operator workflows.
+fixed recipes. They are not alternative operator workflows. Managed sync,
+rectification, and BOP path options only assert their canonical run-owned
+locations; they do not authorize arbitrary output roots. Pairing-only sync and
+custom rectification roots are available only through explicit isolated
+diagnostic library calls. The rectification and BOP workers also require the
+run-owned `calibration_profile_selection.v2` used by `process_dataset.py`.
+`--diagnostic-unmanaged` is an explicit test/diagnostic escape hatch for
+canonical-root software checks; it does not become part of the managed recipe
+and cannot authorize custom paths.
+
+Direct invocations of `sync_run_non_destructive.py`, `run_sync_quality.py`,
+`run_blenderproc_prepare_stage.py`, and `run_blenderproc_render_stage.py`
+serialize their complete report/manifest/publication transaction through the
+same persistent per-run `processed/.synchronization.lock`. This prevents the
+whole synchronized root from being replaced while an annotation CLI publishes
+inside one of its sensor directories.
 
 ## Calibration and reusable inputs
 
@@ -71,8 +86,11 @@ entry points.
 | `run_bop_evaluation.py` | Run the narrow official BOP19 evaluation adapter |
 
 The base export is produced by `process_dataset.py`. Optional annotation is a
-separate, deliberate step. Evaluation consumes an existing annotation-bearing
-BOP dataset and immutable standard BOP19 CSV; it is not acquisition or
+separate, deliberate step. Evaluation consumes an immutable standard BOP19 CSV
+and a verified `pose_and_masks` BOP v5 export with complete BlenderProc
+annotations, matching per-scene `scene_gt.json`/`scene_gt_info.json`, and
+complete full/visible instance-mask evidence below `mask/` and `mask_visib/`.
+A pose-only export is not evaluation-ready. Evaluation is not acquisition or
 estimation.
 
 ## Documentation and validation

@@ -4,6 +4,14 @@ These endpoints expose read-only capability/status evidence, run-owned hardware
 snapshots, sensor aliases and previews, and the optional room-monitor service.
 Status is not physical execution authorization.
 
+Every discovered device carries explicit `connected` and `capture_ready`
+booleans. Clients must require literal `true`; a missing field is not evidence
+of connectivity or capture readiness. The unparameterized web status request
+also sets `expected_counts_requested=false`, so its aggregate is an observation
+of currently visible devices, not proof that a configured run has every
+expected camera. Run preflight and the selected-camera open probe own that
+stronger readiness claim.
+
 ## System and lifecycle
 
 | Method and path | Contract |

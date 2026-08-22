@@ -15,6 +15,7 @@ from posetestbot.io.artifacts import (
     RAW_ROBOT_EE_POSES,
     ROBOT_POSE_CADENCE_REPORT,
 )
+from posetestbot.robot.pose_receiver import STREAM_END_SOURCE_PACKET
 
 
 CADENCE_REPORT_SCHEMA_VERSION = "robot_pose_cadence_report.v1"
@@ -204,6 +205,15 @@ def analyze_robot_pose_cadence(
     estimated_packets_lost = 0
     sender_target_periods: set[int] = set()
     for record in records:
+        terminal = record.get(STREAM_END_SOURCE_PACKET)
+        if isinstance(terminal, Mapping):
+            terminal_lost = terminal.get("estimated_packets_lost")
+            if (
+                isinstance(terminal_lost, int)
+                and not isinstance(terminal_lost, bool)
+                and terminal_lost > 0
+            ):
+                estimated_packets_lost += terminal_lost
         source_packet = record.get("source_packet")
         if not isinstance(source_packet, Mapping):
             continue

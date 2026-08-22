@@ -151,29 +151,45 @@ class CalibrationProfile:
             raise ValueError("sensor_id is required")
         if not self.rig_position:
             raise ValueError("rig_position is required")
-        if len(self.intrinsics.cam_k) != 9:
-            raise ValueError("intrinsics.cam_k must have 9 values")
-        intrinsic_values = (*self.intrinsics.cam_k, *self.intrinsics.distortion)
-        if not all(math.isfinite(float(value)) for value in intrinsic_values):
-            raise ValueError("Calibration intrinsics must contain only finite values")
-        if (
-            not math.isfinite(float(self.intrinsics.depth_scale_to_mm))
-            or self.intrinsics.depth_scale_to_mm <= 0
-        ):
-            raise ValueError("intrinsics.depth_scale_to_mm must be finite and positive")
-        if self.intrinsics.width <= 0 or self.intrinsics.height <= 0:
-            raise ValueError("intrinsics width and height must be positive")
-        if self.intrinsics.cam_k[0] <= 0 or self.intrinsics.cam_k[4] <= 0:
-            raise ValueError("intrinsics focal lengths fx and fy must be positive")
-        if not all(
-            math.isclose(float(value), expected, abs_tol=1e-9)
-            for value, expected in zip(
-                self.intrinsics.cam_k[6:9], (0.0, 0.0, 1.0), strict=True
-            )
-        ):
-            raise ValueError("intrinsics.cam_k bottom row must be [0, 0, 1]")
+
+        def validate_camera_intrinsics(
+            intrinsics: CameraIntrinsics,
+            label: str,
+        ) -> None:
+            if len(intrinsics.cam_k) != 9:
+                raise ValueError(f"{label}.cam_k must have 9 values")
+            if len(intrinsics.distortion) != 5:
+                raise ValueError(f"{label}.distortion must have exactly 5 values")
+            values = (*intrinsics.cam_k, *intrinsics.distortion)
+            if not all(math.isfinite(float(value)) for value in values):
+                raise ValueError(f"{label} must contain only finite values")
+            if (
+                not math.isfinite(float(intrinsics.depth_scale_to_mm))
+                or intrinsics.depth_scale_to_mm <= 0
+            ):
+                raise ValueError(
+                    f"{label}.depth_scale_to_mm must be finite and positive"
+                )
+            if intrinsics.width <= 0 or intrinsics.height <= 0:
+                raise ValueError(f"{label} width and height must be positive")
+            if intrinsics.cam_k[0] <= 0 or intrinsics.cam_k[4] <= 0:
+                raise ValueError(f"{label} focal lengths fx and fy must be positive")
+            if not all(
+                math.isclose(float(value), expected, abs_tol=1e-9)
+                for value, expected in zip(
+                    intrinsics.cam_k[6:9],
+                    (0.0, 0.0, 1.0),
+                    strict=True,
+                )
+            ):
+                raise ValueError(f"{label}.cam_k bottom row must be [0, 0, 1]")
+            if not intrinsics.distortion_model.strip():
+                raise ValueError(f"{label}.distortion_model is required")
+
+        validate_camera_intrinsics(self.intrinsics, "intrinsics")
         if self.rectified_intrinsics is not None:
             rectified = self.rectified_intrinsics
+            validate_camera_intrinsics(rectified, "rectified_intrinsics")
             if (
                 rectified.width != self.intrinsics.width
                 or rectified.height != self.intrinsics.height
@@ -181,13 +197,20 @@ class CalibrationProfile:
                 raise ValueError(
                     "rectified intrinsics must preserve native output resolution"
                 )
-            if len(rectified.cam_k) != 9:
-                raise ValueError("rectified_intrinsics.cam_k must have 9 values")
             if any(
                 not math.isclose(float(value), 0.0, abs_tol=1e-12)
                 for value in rectified.distortion
             ):
                 raise ValueError("rectified intrinsics must have zero distortion")
+            if not math.isclose(
+                float(rectified.depth_scale_to_mm),
+                float(self.intrinsics.depth_scale_to_mm),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                raise ValueError(
+                    "rectified intrinsics must preserve native depth scale"
+                )
         if self.rectified_valid_roi is not None:
             if len(self.rectified_valid_roi) != 4 or any(
                 int(value) < 0 for value in self.rectified_valid_roi
@@ -196,14 +219,20 @@ class CalibrationProfile:
                     "rectified valid ROI must contain four nonnegative integers"
                 )
             x, y, width, height = self.rectified_valid_roi
+            if width <= 0 or height <= 0:
+                raise ValueError(
+                    "rectified valid ROI width and height must be positive"
+                )
             if x + width > self.intrinsics.width or y + height > self.intrinsics.height:
                 raise ValueError(
                     "rectified valid ROI must fit within output resolution"
                 )
-        if self.sync_delta_ms is not None and not math.isfinite(
-            float(self.sync_delta_ms)
+        if self.sync_delta_ms is not None and (
+            isinstance(self.sync_delta_ms, bool)
+            or not isinstance(self.sync_delta_ms, int | float)
+            or not math.isfinite(float(self.sync_delta_ms))
         ):
-            raise ValueError("sync_delta_ms must be finite")
+            raise ValueError("sync_delta_ms must be a finite number")
         self.extrinsics.validate_for_mounting_mode(self.mounting_mode)
         self.quality.validate()
         if self.status == CalibrationStatus.VALID and self.quality.num_inliers <= 0:
@@ -242,21 +271,114 @@ def _intrinsics_to_dict(intrinsics: CameraIntrinsics) -> dict[str, Any]:
     }
 
 
-def _intrinsics_from_dict(value: Mapping[str, Any]) -> CameraIntrinsics:
-    distortion = [float(item) for item in value.get("distortion", [])[:5]]
-    distortion.extend([0.0] * (5 - len(distortion)))
+def _require_exact_keys(
+    value: Mapping[str, Any],
+    expected: set[str],
+    *,
+    label: str,
+) -> None:
+    missing = sorted(expected - set(value))
+    unknown = sorted(set(value) - expected)
+    if missing or unknown:
+        details = []
+        if missing:
+            details.append("missing=" + ",".join(missing))
+        if unknown:
+            details.append("unknown=" + ",".join(unknown))
+        raise ValueError(f"{label} fields are invalid: " + "; ".join(details))
+
+
+def _strict_string(value: Any, *, label: str, nullable: bool = False) -> str | None:
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a string" + (" or null" if nullable else ""))
+    return value
+
+
+def _strict_integer(value: Any, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} must be an integer")
+    return value
+
+
+def _strict_number(
+    value: Any,
+    *,
+    label: str,
+    nullable: bool = False,
+) -> int | float | None:
+    if value is None and nullable:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"{label} must be a number" + (" or null" if nullable else ""))
+    if not math.isfinite(float(value)):
+        raise ValueError(f"{label} must be finite")
+    return value
+
+
+def _strict_number_sequence(
+    value: Any,
+    *,
+    label: str,
+    length: int,
+) -> tuple[float, ...]:
+    if not isinstance(value, list) or len(value) != length:
+        raise ValueError(f"{label} must contain exactly {length} numbers")
+    return tuple(
+        float(_strict_number(item, label=f"{label}[{index}]"))
+        for index, item in enumerate(value)
+    )
+
+
+def _intrinsics_from_dict(
+    value: Mapping[str, Any],
+    *,
+    label: str,
+    rectified: bool = False,
+) -> CameraIntrinsics:
+    expected = {
+        "cam_K",
+        "width",
+        "height",
+        "distortion_model",
+        "distortion",
+        "depth_scale_to_mm",
+        "projection_source",
+    }
+    if rectified:
+        expected.update({"alpha", "valid_roi"})
+    _require_exact_keys(value, expected, label=label)
+    projection_source = _strict_string(
+        value["projection_source"],
+        label=f"{label}.projection_source",
+        nullable=True,
+    )
+    if rectified:
+        alpha = _strict_number(value["alpha"], label=f"{label}.alpha")
+        if not math.isclose(float(alpha), 0.0, abs_tol=1e-12):
+            raise ValueError(f"{label}.alpha must be 0")
+        valid_roi = value["valid_roi"]
+        if not isinstance(valid_roi, list) or len(valid_roi) != 4:
+            raise ValueError(f"{label}.valid_roi must contain exactly 4 integers")
+        for index, item in enumerate(valid_roi):
+            _strict_integer(item, label=f"{label}.valid_roi[{index}]")
     return CameraIntrinsics(
-        cam_k=tuple(float(item) for item in value["cam_K"]),
-        width=int(value.get("width", 0)),
-        height=int(value.get("height", 0)),
-        distortion=tuple(distortion),
-        depth_scale_to_mm=float(value.get("depth_scale_to_mm", 1.0)),
-        distortion_model=str(value.get("distortion_model", "brown_conrady")),
-        projection_source=(
-            str(value["projection_source"])
-            if value.get("projection_source") is not None
-            else None
+        cam_k=_strict_number_sequence(value["cam_K"], label=f"{label}.cam_K", length=9),
+        width=_strict_integer(value["width"], label=f"{label}.width"),
+        height=_strict_integer(value["height"], label=f"{label}.height"),
+        distortion=_strict_number_sequence(
+            value["distortion"], label=f"{label}.distortion", length=5
         ),
+        depth_scale_to_mm=float(
+            _strict_number(
+                value["depth_scale_to_mm"], label=f"{label}.depth_scale_to_mm"
+            )
+        ),
+        distortion_model=str(
+            _strict_string(value["distortion_model"], label=f"{label}.distortion_model")
+        ),
+        projection_source=projection_source,
     )
 
 
@@ -370,72 +492,186 @@ def profile_to_dict(profile: CalibrationProfile) -> dict[str, Any]:
 
 
 def profile_from_dict(value: Mapping[str, Any]) -> CalibrationProfile:
-    source_schema = str(value.get("schema_version"))
+    if not isinstance(value, Mapping):
+        raise ValueError("Calibration profile must be an object")
+    _require_exact_keys(
+        value,
+        {
+            "schema_version",
+            "profile_id",
+            "sensor_id",
+            "sensor_type",
+            "mounting_mode",
+            "rig_position",
+            "intrinsics",
+            "extrinsics",
+            "target_type",
+            "calibration_dataset_id",
+            "method",
+            "status",
+            "quality",
+            "operator",
+            "calibrated_at",
+            "sync_delta_ms",
+            "metadata",
+            "projection_provenance",
+        },
+        label="calibration.v2 profile",
+    )
+    source_schema = _strict_string(value["schema_version"], label="schema_version")
     if source_schema != SCHEMA_VERSION:
         raise ValueError(f"Unsupported calibration schema: {source_schema!r}")
     raw_intrinsics = value["intrinsics"]
     if not isinstance(raw_intrinsics, Mapping):
         raise ValueError("Calibration intrinsics must be an object")
+    _require_exact_keys(
+        raw_intrinsics,
+        {"native", "rectified"},
+        label="calibration.v2 intrinsics",
+    )
     intrinsics = raw_intrinsics.get("native")
     rectified_intrinsics = raw_intrinsics.get("rectified")
     if not isinstance(intrinsics, Mapping):
         raise ValueError("calibration.v2 intrinsics.native must be an object")
     extrinsics = value["extrinsics"]
-    quality = value.get("quality", {})
-    native_intrinsics = _intrinsics_from_dict(intrinsics)
-    normalized_rectified = (
-        _intrinsics_from_dict(rectified_intrinsics)
-        if isinstance(rectified_intrinsics, Mapping)
-        else rectified_intrinsics_from_native(native_intrinsics)
+    if not isinstance(extrinsics, Mapping):
+        raise ValueError("calibration.v2 extrinsics must be an object")
+    _require_exact_keys(
+        extrinsics,
+        {"from", "to", "rotation_quaternion_wxyz", "translation_mm"},
+        label="calibration.v2 extrinsics",
     )
-    rectified_roi = (
-        tuple(int(item) for item in rectified_intrinsics.get("valid_roi", []))
+    quality = value["quality"]
+    if not isinstance(quality, Mapping):
+        raise ValueError("calibration.v2 quality must be an object")
+    _require_exact_keys(
+        quality,
+        {
+            "num_observations",
+            "num_inliers",
+            "mean_reprojection_error_px",
+            "max_reprojection_error_px",
+            "residual_translation_mm",
+            "residual_rotation_deg",
+            "notes",
+        },
+        label="calibration.v2 quality",
+    )
+    metadata = value["metadata"]
+    if not isinstance(metadata, Mapping):
+        raise ValueError("calibration.v2 metadata must be an object")
+    projection_provenance = value["projection_provenance"]
+    if not isinstance(projection_provenance, Mapping):
+        raise ValueError("calibration.v2 projection_provenance must be an object")
+
+    native_intrinsics = _intrinsics_from_dict(
+        intrinsics,
+        label="intrinsics.native",
+    )
+    normalized_rectified = (
+        _intrinsics_from_dict(
+            rectified_intrinsics,
+            label="intrinsics.rectified",
+            rectified=True,
+        )
         if isinstance(rectified_intrinsics, Mapping)
-        and isinstance(rectified_intrinsics.get("valid_roi"), list)
-        and len(rectified_intrinsics["valid_roi"]) == 4
         else None
+    )
+    if rectified_intrinsics is not None and not isinstance(
+        rectified_intrinsics, Mapping
+    ):
+        raise ValueError("intrinsics.rectified must be an object or null")
+    rectified_roi = (
+        tuple(rectified_intrinsics["valid_roi"])
+        if isinstance(rectified_intrinsics, Mapping)
+        else None
+    )
+    sync_delta_ms = _strict_number(
+        value["sync_delta_ms"],
+        label="sync_delta_ms",
+        nullable=True,
     )
     profile = CalibrationProfile(
         schema_version=SCHEMA_VERSION,
-        profile_id=str(value["profile_id"]),
-        sensor_id=str(value["sensor_id"]),
-        sensor_type=SensorType(value["sensor_type"]),
-        mounting_mode=MountingMode(value["mounting_mode"]),
-        rig_position=str(value.get("rig_position", "")),
+        profile_id=str(_strict_string(value["profile_id"], label="profile_id")),
+        sensor_id=str(_strict_string(value["sensor_id"], label="sensor_id")),
+        sensor_type=SensorType(
+            _strict_string(value["sensor_type"], label="sensor_type")
+        ),
+        mounting_mode=MountingMode(
+            _strict_string(value["mounting_mode"], label="mounting_mode")
+        ),
+        rig_position=str(_strict_string(value["rig_position"], label="rig_position")),
         intrinsics=native_intrinsics,
         rectified_intrinsics=normalized_rectified,
         rectified_valid_roi=rectified_roi,
         extrinsics=RigidTransform(
-            from_frame=_transform_frame(extrinsics["from"]),
-            to_frame=_transform_frame(extrinsics["to"]),
-            rotation_quaternion_wxyz=tuple(
-                float(item) for item in extrinsics["rotation_quaternion_wxyz"]
+            from_frame=TransformFrame(
+                _strict_string(extrinsics["from"], label="extrinsics.from")
             ),
-            translation_mm=tuple(float(item) for item in extrinsics["translation_mm"]),
+            to_frame=TransformFrame(
+                _strict_string(extrinsics["to"], label="extrinsics.to")
+            ),
+            rotation_quaternion_wxyz=_strict_number_sequence(
+                extrinsics["rotation_quaternion_wxyz"],
+                label="extrinsics.rotation_quaternion_wxyz",
+                length=4,
+            ),
+            translation_mm=_strict_number_sequence(
+                extrinsics["translation_mm"],
+                label="extrinsics.translation_mm",
+                length=3,
+            ),
         ),
-        target_type=CalibrationTargetType(value.get("target_type", "unknown")),
-        calibration_dataset_id=value.get("calibration_dataset_id"),
-        method=value.get("method"),
-        status=CalibrationStatus(value.get("status", "needs_validation")),
+        target_type=CalibrationTargetType(
+            _strict_string(value["target_type"], label="target_type")
+        ),
+        calibration_dataset_id=_strict_string(
+            value["calibration_dataset_id"],
+            label="calibration_dataset_id",
+            nullable=True,
+        ),
+        method=_strict_string(value["method"], label="method", nullable=True),
+        status=CalibrationStatus(_strict_string(value["status"], label="status")),
         quality=CalibrationQuality(
-            num_observations=int(quality.get("num_observations", 0)),
-            num_inliers=int(quality.get("num_inliers", 0)),
-            mean_reprojection_error_px=quality.get("mean_reprojection_error_px"),
-            max_reprojection_error_px=quality.get("max_reprojection_error_px"),
-            residual_translation_mm=quality.get("residual_translation_mm"),
-            residual_rotation_deg=quality.get("residual_rotation_deg"),
-            notes=quality.get("notes"),
-        ),
-        operator=value.get("operator"),
-        calibrated_at=value.get("calibrated_at"),
-        sync_delta_ms=value.get("sync_delta_ms"),
-        metadata={
-            **dict(value.get("metadata", {})),
-            **(
-                {"projection_provenance": dict(value["projection_provenance"])}
-                if isinstance(value.get("projection_provenance"), Mapping)
-                else {}
+            num_observations=_strict_integer(
+                quality["num_observations"], label="quality.num_observations"
             ),
+            num_inliers=_strict_integer(
+                quality["num_inliers"], label="quality.num_inliers"
+            ),
+            mean_reprojection_error_px=_strict_number(
+                quality["mean_reprojection_error_px"],
+                label="quality.mean_reprojection_error_px",
+                nullable=True,
+            ),
+            max_reprojection_error_px=_strict_number(
+                quality["max_reprojection_error_px"],
+                label="quality.max_reprojection_error_px",
+                nullable=True,
+            ),
+            residual_translation_mm=_strict_number(
+                quality["residual_translation_mm"],
+                label="quality.residual_translation_mm",
+                nullable=True,
+            ),
+            residual_rotation_deg=_strict_number(
+                quality["residual_rotation_deg"],
+                label="quality.residual_rotation_deg",
+                nullable=True,
+            ),
+            notes=_strict_string(
+                quality["notes"], label="quality.notes", nullable=True
+            ),
+        ),
+        operator=_strict_string(value["operator"], label="operator", nullable=True),
+        calibrated_at=_strict_string(
+            value["calibrated_at"], label="calibrated_at", nullable=True
+        ),
+        sync_delta_ms=float(sync_delta_ms) if sync_delta_ms is not None else None,
+        metadata={
+            **dict(metadata),
+            "projection_provenance": dict(projection_provenance),
         },
     )
     profile.validate()

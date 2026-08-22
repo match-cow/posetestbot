@@ -41,6 +41,7 @@ from posetestbot.pipeline.sensor_selection import (
 )
 from posetestbot.pose_templates.selection import prepare_object_instances
 from posetestbot.sensors.contracts import MountingMode
+from posetestbot.sync.non_destructive import dataset_processing_lock
 
 
 def parse_args() -> argparse.Namespace:
@@ -198,8 +199,7 @@ def run_prepare(
     return {f"{item.sensor_name}:{subdir}": item.output_folder for item in prepared}
 
 
-def main() -> None:
-    args = parse_args()
+def _main(args: argparse.Namespace) -> None:
     run_root = Path(args.run_root)
     input_folder = synchronized_input_folder(run_root, args.input_folder)
     sensor_names = (
@@ -303,6 +303,12 @@ def main() -> None:
     )
     write_run_manifest(manifest, run_root)
     print(f"Prepared BlenderProc inputs for {len(artifacts)} sensor folder(s).")
+
+
+def main() -> None:
+    args = parse_args()
+    with dataset_processing_lock(Path(args.run_root)):
+        _main(args)
 
 
 if __name__ == "__main__":

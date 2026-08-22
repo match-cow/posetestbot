@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import os
 import signal
 import shlex
 import subprocess
+import sys
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -24,6 +27,7 @@ from posetestbot.io.artifacts import (
     CAPTURE_PLAN,
     FRAME_METADATA_JSONL,
     RAW_ROBOT_EE_POSES,
+    RUN_CONFIG,
 )
 from posetestbot.io.manifest import (
     load_or_create_run_manifest,
@@ -40,23 +44,27 @@ from posetestbot.pipeline.capture_completion import build_capture_completion
 from posetestbot.pipeline.run_config import (
     load_run_config_for_run_root,
     run_config_lock,
+    run_config_sha256,
 )
 from posetestbot.robot.pose_receiver import (
-    CLAIM_SCHEMA_VERSION,
     DEFAULT_RECEIVE_IDLE_TIMEOUT_S,
     DEFAULT_RECEIVE_START_TIMEOUT_S,
+    RAW_POSE_CLAIM_FILE,
+    recover_pose_journals,
 )
+from posetestbot.sensors.registry import is_auto_device_id
 from posetestbot.sensors.status import collect_sensor_status
 
 
-SCHEMA_VERSION = "capture_execution_plan.v1"
-STATUS_SCHEMA_VERSION = "capture_execution_status.v1"
-REPORT_SCHEMA_VERSION = "capture_execution_report.v1"
+SCHEMA_VERSION = "capture_execution_plan.v2"
+STATUS_SCHEMA_VERSION = "capture_execution_status.v2"
+REPORT_SCHEMA_VERSION = "capture_execution_report.v2"
 DEFAULT_CAPTURE_EXECUTION_TIMEOUT_S = 720.0
 DEFAULT_CAMERA_READINESS_TIMEOUT_S = 15.0
 DEFAULT_CAMERA_STARTUP_ATTEMPTS = 3
 DEFAULT_CAMERA_STARTUP_RETRY_DELAY_S = 1.0
 MIN_CAMERA_READINESS_RECORDS = 3
+MAX_CAMERA_READINESS_RECORD_AGE_S = 2.0
 RECEIVER_MONITOR_INTERVAL_S = 0.1
 EXECUTION_ONLY_RECEIVER_FLAGS = frozenset(
     {
@@ -149,6 +157,27 @@ def _defer_capture_cancellation():
         raise body_error
 
 
+@contextmanager
+def _exclusive_capture_execution(run_root: Path):
+    """Reject a second supervisor for the same run without creating artifacts."""
+
+    root = run_root.resolve(strict=True)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    descriptor = os.open(root, flags)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                f"A capture execution supervisor is already active for {root}."
+            ) from exc
+        yield
+    finally:
+        os.close(descriptor)
+
+
 @dataclass(frozen=True)
 class CaptureExecutionGate:
     """One readiness or operator-intent gate for capture execution."""
@@ -200,6 +229,8 @@ class CaptureExecutionBoundary:
     expected_receiver_command: tuple[str, ...]
     expected_command_fingerprints: tuple[str, ...]
     sensor_output_paths: tuple[Path, ...]
+    run_config_sha256: str
+    config_snapshot: dict[str, Any]
 
 
 def _now() -> str:
@@ -270,8 +301,19 @@ def _mark_process_ended(info: dict[str, Any]) -> None:
 
 def _premature_camera_exit(
     background_processes: list[dict[str, Any]],
-) -> RuntimeError | None:
+) -> list[str]:
+    """Record camera exits observed while robot motion is still active.
+
+    Once the receiver has sent START, stopping it cannot stop the iiwa motion and
+    would discard the rest of the robot-pose stream.  Camera exits are therefore
+    retained as deferred failures while the receiver and every healthy camera
+    continue until the protocol's motion=end packet.
+    """
+
+    failures: list[str] = []
     for info in background_processes:
+        if info.get("termination_reason") == "camera_exited_while_receiver_active":
+            continue
         process = info["process"]
         returncode = process.poll()
         if returncode is None:
@@ -280,11 +322,8 @@ def _premature_camera_exit(
         info["returncode"] = returncode
         info["status"] = "failed"
         info["termination_reason"] = "camera_exited_while_receiver_active"
-        return RuntimeError(
-            "Camera capture command exited before the robot pose receiver "
-            f"completed: {info['command'].get('name')} (status {returncode})."
-        )
-    return None
+        failures.append(f"{info['command'].get('name')} (status {returncode})")
+    return failures
 
 
 def _camera_startup_exit(
@@ -306,25 +345,10 @@ def _camera_startup_exit(
     return None
 
 
-def _missing_sensor_readiness(
-    sensor_output_paths: tuple[Path, ...],
-) -> list[Path]:
-    missing = []
-    for output_path in sensor_output_paths:
-        metadata_path = output_path / FRAME_METADATA_JSONL
-        ready = (
-            _valid_frame_metadata_record_count(metadata_path)
-            >= MIN_CAMERA_READINESS_RECORDS
-        )
-        if not ready:
-            missing.append(metadata_path)
-    return missing
-
-
 def _valid_frame_metadata_record_count(path: Path) -> int:
     """Count complete JSONL records that satisfy the shared frame contract."""
 
-    return len(_valid_frame_metadata_records(path))
+    return len(_valid_frame_metadata_records(path, limit=None))
 
 
 def _valid_frame_metadata_records(
@@ -378,6 +402,63 @@ def _valid_frame_metadata_records(
     return records
 
 
+def _camera_readiness_advancement_failures(
+    background_processes: list[dict[str, Any]],
+    *,
+    maximum_record_age_s: float,
+) -> list[str]:
+    """Return cameras without post-readiness, recent committed metadata."""
+
+    now_ns = time.monotonic_ns()
+    maximum_record_age_ns = int(maximum_record_age_s * 1_000_000_000)
+    failures: list[str] = []
+    for info in background_processes:
+        metadata_path = info.get("readiness_metadata_path")
+        baseline_count = info.get("readiness_baseline_record_count")
+        baseline_timestamp_ns = info.get("readiness_baseline_timestamp_ns")
+        if (
+            not isinstance(metadata_path, Path)
+            or not isinstance(baseline_count, int)
+            or not isinstance(baseline_timestamp_ns, int)
+        ):
+            failures.append(f"{info['command'].get('name')}: missing baseline")
+            continue
+
+        records = _valid_frame_metadata_records(metadata_path, limit=None)
+        info["readiness_record_count"] = len(records)
+        if len(records) <= baseline_count:
+            failures.append(
+                f"{info['command'].get('name')}: metadata did not advance beyond "
+                f"{baseline_count} committed record(s)"
+            )
+            continue
+
+        latest_timestamp_ns = records[-1].get("host_received_timestamp_ns")
+        if (
+            isinstance(latest_timestamp_ns, bool)
+            or not isinstance(latest_timestamp_ns, int)
+            or latest_timestamp_ns <= baseline_timestamp_ns
+        ):
+            failures.append(
+                f"{info['command'].get('name')}: latest metadata timestamp did "
+                "not advance"
+            )
+            continue
+
+        record_age_ns = now_ns - latest_timestamp_ns
+        if record_age_ns < 0 or record_age_ns > maximum_record_age_ns:
+            failures.append(
+                f"{info['command'].get('name')}: latest committed metadata is "
+                f"not recent (age {record_age_ns / 1_000_000_000:.3f}s; "
+                f"maximum {maximum_record_age_s:.3f}s)"
+            )
+            continue
+
+        info["readiness_latest_timestamp_ns"] = latest_timestamp_ns
+        info["readiness_latest_record_age_s"] = record_age_ns / 1_000_000_000
+    return failures
+
+
 def _sensor_output_has_mutation(output_path: Path) -> bool:
     """Return whether a startup attempt left any raw sensor evidence.
 
@@ -390,12 +471,33 @@ def _sensor_output_has_mutation(output_path: Path) -> bool:
     return os.path.lexists(output_path)
 
 
-def _sensor_output_path(command: Mapping[str, Any]) -> Path:
+def _sensor_output_path(
+    command: Mapping[str, Any],
+    *,
+    run_root: Path,
+    require_absent: bool = False,
+) -> Path:
+    """Resolve one direct run-owned sensor output without following it at use time."""
+
     raw_output = command.get("output_folder")
     if not isinstance(raw_output, str) or not raw_output:
         raise ValueError("Every sensor_capture command requires output_folder")
-    output_path = Path(raw_output)
-    return output_path if output_path.is_absolute() else Path.cwd() / output_path
+    candidate = Path(raw_output)
+    if not candidate.is_absolute():
+        candidate = _repo_root() / candidate
+    root_resolved = run_root.resolve(strict=True)
+    resolved = candidate.resolve(strict=False)
+    if candidate != resolved or resolved.parent != root_resolved:
+        raise ValueError(
+            "Sensor output folder escapes the run root, is not a direct child, "
+            f"or traverses a symlink ancestor: {raw_output}"
+        )
+    if require_absent and os.path.lexists(candidate):
+        raise FileExistsError(
+            "Capture execution requires unused raw output paths; already present: "
+            f"{candidate}"
+        )
+    return resolved
 
 
 def _raw_pose_count(run_root: Path) -> int:
@@ -404,8 +506,6 @@ def _raw_pose_count(run_root: Path) -> int:
         return 0
     with open(path, "r") as f:
         value = json.load(f)
-    if isinstance(value, dict) and value.get("schema_version") == CLAIM_SCHEMA_VERSION:
-        return 0
     return len(value) if isinstance(value, dict) else 0
 
 
@@ -440,7 +540,7 @@ def _capture_command_fingerprints(plan: Mapping[str, Any]) -> tuple[str, ...]:
         fingerprints.append(
             json.dumps(canonical, sort_keys=True, separators=(",", ":"))
         )
-    return tuple(sorted(fingerprints))
+    return tuple(fingerprints)
 
 
 def _sensor_output_paths_from_plan(
@@ -451,27 +551,62 @@ def _sensor_output_paths_from_plan(
     commands = plan.get("commands")
     if not isinstance(commands, list):
         raise ValueError("Capture plan commands must be a list")
-    root_resolved = run_root.resolve()
     output_paths: list[Path] = []
     for command in commands:
         if not isinstance(command, Mapping) or command.get("role") != "sensor_capture":
             continue
-        raw_output = command.get("output_folder")
-        if not isinstance(raw_output, str) or not raw_output:
-            raise ValueError("Every sensor_capture command requires output_folder")
-        output_path = Path(raw_output)
-        if not output_path.is_absolute():
-            output_path = Path.cwd() / output_path
-        try:
-            output_path.resolve().relative_to(root_resolved)
-        except ValueError as exc:
-            raise ValueError(
-                f"Sensor output folder escapes the run root: {raw_output}"
-            ) from exc
-        output_paths.append(output_path)
-    if len(output_paths) != len(set(path.resolve() for path in output_paths)):
+        output_paths.append(
+            _sensor_output_path(command, run_root=run_root, require_absent=True)
+        )
+    if len(output_paths) != len(set(output_paths)):
         raise ValueError("Planned sensor output folders must be unique")
     return tuple(output_paths)
+
+
+def _revalidate_sensor_output_path_before_spawn(
+    command: Mapping[str, Any],
+    *,
+    run_root: Path,
+    expected_path: Path,
+) -> Path:
+    """Close path/symlink changes between planning and one camera spawn."""
+
+    output_path = _sensor_output_path(
+        command,
+        run_root=run_root,
+        require_absent=True,
+    )
+    if output_path != expected_path:
+        raise ValueError(
+            "Sensor output folder changed after capture planning: "
+            f"{output_path} != {expected_path}"
+        )
+    return output_path
+
+
+def _revalidate_sensor_output_paths(
+    commands: list[Mapping[str, Any]],
+    *,
+    run_root: Path,
+    expected_paths: tuple[Path, ...],
+) -> tuple[Path, ...]:
+    sensor_commands = [
+        command for command in commands if command.get("role") == "sensor_capture"
+    ]
+    if len(sensor_commands) != len(expected_paths):
+        raise ValueError("Capture plan sensor output count changed after planning")
+    return tuple(
+        _revalidate_sensor_output_path_before_spawn(
+            command,
+            run_root=run_root,
+            expected_path=expected_path,
+        )
+        for command, expected_path in zip(
+            sensor_commands,
+            expected_paths,
+            strict=True,
+        )
+    )
 
 
 def _assert_capture_outputs_absent(
@@ -482,6 +617,24 @@ def _assert_capture_outputs_absent(
     raw_pose_path = run_root / RAW_ROBOT_EE_POSES
     if os.path.lexists(raw_pose_path):
         blockers.append(raw_pose_path.as_posix())
+    claim_path = run_root / RAW_POSE_CLAIM_FILE
+    if os.path.lexists(claim_path):
+        blockers.append(claim_path.as_posix())
+    blockers.extend(
+        path.as_posix()
+        for path in sorted(run_root.glob("raw_robot_ee_poses.journal.*.jsonl"))
+        if os.path.lexists(path)
+    )
+    blockers.extend(
+        path.as_posix()
+        for path in sorted(run_root.glob("raw_robot_ee_poses.partial.*.json"))
+        if os.path.lexists(path)
+    )
+    blockers.extend(
+        path.as_posix()
+        for path in sorted(run_root.glob("raw_robot_ee_poses.claim.*.recovered.json"))
+        if os.path.lexists(path)
+    )
     blockers.extend(
         path.as_posix() for path in sensor_output_paths if os.path.lexists(path)
     )
@@ -492,19 +645,71 @@ def _assert_capture_outputs_absent(
         )
 
 
+def _load_bound_run_config(run_root: Path) -> tuple[dict[str, Any], str]:
+    config_path = run_root / RUN_CONFIG
+    if not config_path.is_file() or config_path.is_symlink():
+        raise ValueError(
+            f"Capture execution requires a regular run configuration: {config_path}"
+        )
+    config = load_run_config_for_run_root(run_root)
+    return config, run_config_sha256(config)
+
+
+def _assert_run_config_digest(
+    run_root: Path,
+    expected_sha256: str,
+    *,
+    phase: str,
+) -> dict[str, Any]:
+    try:
+        config, actual_sha256 = _load_bound_run_config(run_root)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            "run_config.json became missing, unreadable, or invalid after capture "
+            f"authorization ({phase}). Raw evidence is preserved and capture "
+            "cannot be accepted against an unverified configuration."
+        ) from exc
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError(
+            "run_config.json changed after capture authorization "
+            f"({phase}); expected {expected_sha256}, found {actual_sha256}. "
+            "Raw evidence is preserved and the robot receiver will not be "
+            "started from a stale configuration."
+        )
+    return config
+
+
 def _validate_capture_execution_boundary(
     run_root: Path,
 ) -> CaptureExecutionBoundary:
     """Perform only read-only checks before supervisor artifact creation."""
 
-    config = load_run_config_for_run_root(run_root)
+    config, config_sha256 = _load_bound_run_config(run_root)
     capture = config.get("capture")
     if not isinstance(capture, Mapping):
         raise ValueError("Run configuration capture must be an object")
+    sensors = capture.get("sensors")
+    if not isinstance(sensors, list):
+        raise ValueError("Run configuration capture sensors must be a list")
+    automatic_sensors = [
+        f"{index}:{sensor.get('sensor_type')}"
+        for index, sensor in enumerate(sensors)
+        if isinstance(sensor, Mapping)
+        and sensor.get("enabled", True) is True
+        and isinstance(sensor.get("device_id"), str)
+        and is_auto_device_id(str(sensor["device_id"]))
+    ]
+    if automatic_sensors:
+        raise ValueError(
+            "Physical capture execution requires a concrete device_id for every "
+            "enabled sensor; replace auto after discovery before authorization: "
+            + ", ".join(automatic_sensors)
+            + "."
+        )
     plan_path = run_root / CAPTURE_PLAN
     persisted_plan: dict[str, Any] | None = None
     build_options: dict[str, int | None] = {}
-    if plan_path.is_file():
+    if plan_path.is_file() and not plan_path.is_symlink():
         persisted_plan = load_capture_plan(run_root)
         build_options = capture_plan_build_options(persisted_plan)
     elif os.path.lexists(plan_path):
@@ -545,34 +750,236 @@ def _validate_capture_execution_boundary(
         expected_receiver_command=expected_receiver,
         expected_command_fingerprints=expected_fingerprints,
         sensor_output_paths=sensor_output_paths,
+        run_config_sha256=config_sha256,
+        config_snapshot=json.loads(json.dumps(config, allow_nan=False)),
     )
 
 
-def _terminate_process_group(
-    process: subprocess.Popen,
+@dataclass(frozen=True)
+class _ProcessIdentity:
+    pid: int
+    start_time: int | None
+
+
+def _linux_process_stat(pid: int) -> tuple[int, str, int] | None:
+    """Return ``(parent_pid, state, start_time)`` from procfs."""
+
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        fields = stat[stat.rfind(")") + 2 :].split()
+        return int(fields[1]), fields[0], int(fields[19])
+    except (IndexError, OSError, ValueError):
+        return None
+
+
+def _process_start_time(pid: int) -> int | None:
+    stat = _linux_process_stat(pid)
+    return stat[2] if stat is not None else None
+
+
+def _process_identity_is_live(identity: _ProcessIdentity) -> bool:
+    if sys.platform.startswith("linux"):
+        stat = _linux_process_stat(identity.pid)
+        return bool(
+            stat is not None
+            and stat[1] != "Z"
+            and (identity.start_time is None or stat[2] == identity.start_time)
+        )
+    try:
+        os.kill(identity.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _snapshot_process_tree(
+    root_pid: int,
+    *,
+    expected_start_time: int | None,
+) -> dict[int, _ProcessIdentity]:
+    """Snapshot a verified Linux descendant tree rooted at ``root_pid``.
+
+    Every retained PID is paired with its kernel start time before any signal is
+    sent.  Later checks use that identity so PID reuse cannot redirect cleanup.
+    """
+
+    if not sys.platform.startswith("linux"):
+        return {root_pid: _ProcessIdentity(root_pid, expected_start_time)}
+    if expected_start_time is None:
+        return {}
+
+    process_table: dict[int, tuple[int, str, int]] = {}
+    try:
+        proc_entries = tuple(Path("/proc").iterdir())
+    except OSError:
+        proc_entries = ()
+    for entry in proc_entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        stat = _linux_process_stat(pid)
+        if stat is not None:
+            process_table[pid] = stat
+
+    root_stat = process_table.get(root_pid)
+    if root_stat is None or root_stat[1] == "Z":
+        return {}
+    if expected_start_time is not None and root_stat[2] != expected_start_time:
+        return {}
+
+    descendants = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, (parent_pid, state, _start_time) in process_table.items():
+            if state == "Z" or pid in descendants or parent_pid not in descendants:
+                continue
+            descendants.add(pid)
+            changed = True
+    return {
+        pid: _ProcessIdentity(pid=pid, start_time=process_table[pid][2])
+        for pid in descendants
+    }
+
+
+def _signal_process_identities(
+    identities: Mapping[int, _ProcessIdentity],
+    signum: int,
+) -> None:
+    for identity in sorted(
+        identities.values(), key=lambda item: item.pid, reverse=True
+    ):
+        if identity.pid == os.getpid() or not _process_identity_is_live(identity):
+            continue
+        try:
+            os.kill(identity.pid, signum)
+        except (PermissionError, ProcessLookupError):
+            continue
+
+
+def _terminate_process_trees(
+    processes: list[tuple[subprocess.Popen[Any], int | None]],
     *,
     timeout_s: float,
-) -> None:
-    if process.poll() is not None:
-        return
+) -> set[int]:
+    """Stop multiple child trees within one bounded shared deadline.
+
+    Capture children deliberately inherit the outer job process group, allowing
+    LocalJobRunner to contain them after cancellation or an owner crash.  Normal
+    per-camera shutdown therefore signals verified PIDs instead of process
+    groups, which would also signal the capture supervisor.
+
+    The returned set contains root PIDs that still appear live after SIGKILL.
+    """
+
+    active = [item for item in processes if item[0].poll() is None]
+    if not active:
+        return set()
+    timeout_s = max(0.0, timeout_s)
+    final_deadline = time.monotonic() + timeout_s
+    graceful_deadline = time.monotonic() + timeout_s * 0.75
+
+    tree_identities: dict[int, dict[int, _ProcessIdentity]] = {
+        process.pid: {} for process, _start_time in active
+    }
+
+    def all_identities() -> dict[int, _ProcessIdentity]:
+        return {
+            pid: identity
+            for tree in tree_identities.values()
+            for pid, identity in tree.items()
+        }
+
     if os.name == "nt":
-        process.terminate()
-    else:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-    try:
-        process.wait(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        if os.name == "nt":
-            process.kill()
-        else:
+        for process, _start_time in active:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                return
-        process.wait(timeout=timeout_s)
+                process.terminate()
+            except (OSError, ProcessLookupError):
+                continue
+    else:
+        for process, start_time in active:
+            tree_identities[process.pid].update(
+                _snapshot_process_tree(
+                    process.pid,
+                    expected_start_time=start_time,
+                )
+            )
+        _signal_process_identities(all_identities(), signal.SIGTERM)
+
+    while time.monotonic() < graceful_deadline:
+        for process, start_time in active:
+            process.poll()
+            if process.returncode is None and os.name != "nt":
+                tree_identities[process.pid].update(
+                    _snapshot_process_tree(
+                        process.pid,
+                        expected_start_time=start_time,
+                    )
+                )
+        if all(process.poll() is not None for process, _start_time in active) and (
+            os.name == "nt"
+            or not any(
+                _process_identity_is_live(item) for item in all_identities().values()
+            )
+        ):
+            return set()
+        time.sleep(min(0.02, max(0.0, graceful_deadline - time.monotonic())))
+
+    if os.name == "nt":
+        for process, _start_time in active:
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except (OSError, ProcessLookupError):
+                    continue
+    else:
+        _signal_process_identities(all_identities(), signal.SIGKILL)
+
+    while time.monotonic() < final_deadline:
+        for process, _start_time in active:
+            process.poll()
+        if all(process.poll() is not None for process, _start_time in active) and (
+            os.name == "nt"
+            or not any(
+                _process_identity_is_live(item) for item in all_identities().values()
+            )
+        ):
+            return set()
+        time.sleep(min(0.02, max(0.0, final_deadline - time.monotonic())))
+
+    for process, _start_time in active:
+        try:
+            process.wait(timeout=0)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return {
+        process.pid
+        for process, start_time in active
+        if process.poll() is None
+        or _process_identity_is_live(_ProcessIdentity(process.pid, start_time))
+        or any(
+            _process_identity_is_live(identity)
+            for identity in tree_identities[process.pid].values()
+        )
+    }
+
+
+def _terminate_process_tree(
+    process: subprocess.Popen[Any],
+    *,
+    timeout_s: float,
+    expected_start_time: int | None = None,
+) -> bool:
+    """Stop one verified child tree; return whether its root still appears live."""
+
+    return process.pid in _terminate_process_trees(
+        [(process, expected_start_time)],
+        timeout_s=timeout_s,
+    )
 
 
 def _preflight_gate(preflight: Mapping[str, Any]) -> CaptureExecutionGate:
@@ -678,6 +1085,10 @@ def build_capture_execution_plan(
         write_plan_if_missing=write_plan_if_missing,
     )
     capture_plan = preflight["capture_plan"]
+    config_snapshot = preflight.get("config")
+    if not isinstance(config_snapshot, Mapping):
+        raise ValueError("Capture preflight did not retain a valid run configuration")
+    config_sha256 = run_config_sha256(config_snapshot)
     commands = [
         command
         for command in capture_plan.get("commands", [])
@@ -697,6 +1108,8 @@ def build_capture_execution_plan(
         "schema_version": SCHEMA_VERSION,
         "generated_at": _now(),
         "run_root": run_root_path.as_posix(),
+        "run_config_artifact": RUN_CONFIG,
+        "run_config_sha256": config_sha256,
         "mode": "full",
         "status": status,
         "message": (
@@ -723,7 +1136,7 @@ def build_capture_execution_plan(
         "skipped_commands": skipped,
         "gates": [gate.to_dict() for gate in gates],
         "execution_strategy": {
-            "supervisor": "planned_process_group",
+            "supervisor": "outer_job_group_with_verified_child_trees",
             "working_directory": ".",
             "start_order": (
                 "ascending startup_order then plan_index; start one sensor child "
@@ -742,8 +1155,8 @@ def build_capture_execution_plan(
                 "The robot pose receiver starts only after every sensor is ready."
             ),
             "stop_policy": (
-                "After robot_pose_receiver exits, terminate remaining selected "
-                "camera processes by process group."
+                "After robot_pose_receiver exits, cooperatively stop remaining "
+                "selected camera descendant trees within one shared deadline."
             ),
         },
         "capture_plan": capture_plan,
@@ -757,6 +1170,12 @@ def capture_execution_plan_path(run_root: str | Path) -> Path:
 
 def load_capture_execution_plan(run_root: str | Path) -> dict[str, Any]:
     path = capture_execution_plan_path(run_root)
+    if path.is_symlink():
+        raise ValueError(f"Capture execution plan must be a regular file: {path}")
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if not path.is_file():
+        raise ValueError(f"Capture execution plan must be a regular file: {path}")
     with open(path, "r") as f:
         value = json.load(f)
     if not isinstance(value, dict):
@@ -839,6 +1258,12 @@ def capture_execution_status_path(run_root: str | Path) -> Path:
 
 def load_capture_execution_status(run_root: str | Path) -> dict[str, Any]:
     path = capture_execution_status_path(run_root)
+    if path.is_symlink():
+        raise ValueError(f"Capture execution status must be a regular file: {path}")
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if not path.is_file():
+        raise ValueError(f"Capture execution status must be a regular file: {path}")
     with open(path, "r") as f:
         value = json.load(f)
     if not isinstance(value, dict):
@@ -970,6 +1395,9 @@ def _status_process_record(info: Mapping[str, Any]) -> dict[str, Any]:
 def _build_capture_execution_status(
     run_root: Path,
     *,
+    execution_id: str,
+    execution_dir: Path,
+    run_config_digest: str,
     status: str,
     message: str,
     allow_cameras: bool,
@@ -987,6 +1415,10 @@ def _build_capture_execution_status(
         "schema_version": STATUS_SCHEMA_VERSION,
         "generated_at": _now(),
         "run_root": run_root.as_posix(),
+        "execution_id": execution_id,
+        "execution_archive": execution_dir.relative_to(run_root).as_posix(),
+        "run_config_artifact": RUN_CONFIG,
+        "run_config_sha256": run_config_digest,
         "status": status,
         "message": message,
         "mode": "full",
@@ -1004,7 +1436,7 @@ def _build_capture_execution_status(
         "capture_execution_report_artifact": (
             CAPTURE_EXECUTION_REPORT if report_path is not None else None
         ),
-        "log_dir": (run_root / CAPTURE_EXECUTION_LOGS_DIR).as_posix(),
+        "log_dir": execution_dir.as_posix(),
     }
     if isinstance(plan, Mapping):
         data["plan_status"] = plan.get("status")
@@ -1036,6 +1468,11 @@ def _validated_execution_commands(
 
     if plan.get("status") != "ok":
         raise RuntimeError(str(plan.get("message") or "Capture execution is blocked."))
+    if plan.get("run_config_sha256") != boundary.run_config_sha256:
+        raise RuntimeError(
+            "Capture execution plan is not bound to the exact run configuration "
+            "accepted at the execution boundary."
+        )
     commands = _selected_commands_for_execution(plan)
     if not commands:
         raise RuntimeError("Capture execution plan selected no commands.")
@@ -1101,7 +1538,55 @@ def run_capture_execution(
     collect_sensors: Callable[[], dict] = collect_sensor_status,
     write_plan_if_missing: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
-    """Execute full real capture with process-group supervision."""
+    """Execute one exclusively supervised full real capture."""
+
+    missing_permissions = []
+    if allow_cameras is not True:
+        missing_permissions.append("allow_cameras=True")
+    if allow_real_robot is not True:
+        missing_permissions.append("allow_real_robot=True")
+    if missing_permissions:
+        raise CaptureExecutionPermissionError(
+            "Capture execution requires fresh strict acknowledgements before "
+            "any filesystem or hardware preparation: "
+            + ", ".join(missing_permissions)
+            + "."
+        )
+    with _exclusive_capture_execution(Path(run_root)):
+        return _run_capture_execution_locked(
+            run_root,
+            allow_cameras=allow_cameras,
+            allow_real_robot=allow_real_robot,
+            include_sensor_status=include_sensor_status,
+            timeout_s=timeout_s,
+            startup_wait_s=startup_wait_s,
+            camera_startup_attempts=camera_startup_attempts,
+            camera_startup_retry_delay_s=camera_startup_retry_delay_s,
+            terminate_timeout_s=terminate_timeout_s,
+            receive_start_timeout_s=receive_start_timeout_s,
+            receive_idle_timeout_s=receive_idle_timeout_s,
+            collect_sensors=collect_sensors,
+            write_plan_if_missing=write_plan_if_missing,
+        )
+
+
+def _run_capture_execution_locked(
+    run_root: str | Path,
+    *,
+    allow_cameras: bool = False,
+    allow_real_robot: bool = False,
+    include_sensor_status: bool | None = None,
+    timeout_s: float = DEFAULT_CAPTURE_EXECUTION_TIMEOUT_S,
+    startup_wait_s: float = DEFAULT_CAMERA_READINESS_TIMEOUT_S,
+    camera_startup_attempts: int = DEFAULT_CAMERA_STARTUP_ATTEMPTS,
+    camera_startup_retry_delay_s: float = DEFAULT_CAMERA_STARTUP_RETRY_DELAY_S,
+    terminate_timeout_s: float = 2.0,
+    receive_start_timeout_s: float = DEFAULT_RECEIVE_START_TIMEOUT_S,
+    receive_idle_timeout_s: float = DEFAULT_RECEIVE_IDLE_TIMEOUT_S,
+    collect_sensors: Callable[[], dict] = collect_sensor_status,
+    write_plan_if_missing: bool = True,
+) -> tuple[Path, dict[str, Any]]:
+    """Execute full real capture with job-group and verified-tree supervision."""
 
     missing_permissions = []
     if allow_cameras is not True:
@@ -1142,7 +1627,13 @@ def run_capture_execution(
         )
 
     run_root_path = Path(run_root)
+    execution_id = uuid.uuid4().hex
     with run_config_lock(run_root_path):
+        recovery_config, _recovery_digest = _load_bound_run_config(run_root_path)
+        recover_pose_journals(
+            run_root_path,
+            expected_run_id=str(recovery_config["run_id"]),
+        )
         boundary = _validate_capture_execution_boundary(run_root_path)
         plan = build_capture_execution_plan(
             run_root_path,
@@ -1158,15 +1649,41 @@ def run_capture_execution(
             plan,
             boundary=boundary,
         )
+        _assert_run_config_digest(
+            run_root_path,
+            boundary.run_config_sha256,
+            phase="before execution evidence publication",
+        )
         # Sensor discovery can take time. Recheck under the shared run-config
         # transaction before publishing the first durable execution evidence.
+        _revalidate_sensor_output_paths(
+            commands,
+            run_root=run_root_path,
+            expected_paths=boundary.sensor_output_paths,
+        )
         _assert_capture_outputs_absent(
             run_root_path,
             boundary.sensor_output_paths,
         )
 
-        logs_dir = run_root_path / CAPTURE_EXECUTION_LOGS_DIR
-        logs_dir.mkdir(parents=True, exist_ok=True)
+        logs_root = run_root_path / CAPTURE_EXECUTION_LOGS_DIR
+        logs_dir = logs_root / execution_id
+        plan = {
+            **plan,
+            "execution_id": execution_id,
+            "execution_archive": logs_dir.relative_to(run_root_path).as_posix(),
+            "log_dir": logs_dir.as_posix(),
+        }
+        if os.path.lexists(logs_root):
+            if not logs_root.is_dir() or logs_root.is_symlink():
+                raise ValueError(
+                    "Capture execution archive root must be a regular directory: "
+                    f"{logs_root}"
+                )
+        else:
+            logs_root.mkdir(parents=True, exist_ok=False)
+        logs_dir.mkdir(parents=False, exist_ok=False)
+        atomic_write_json(logs_dir / CAPTURE_EXECUTION_PLAN, plan)
         plan_path = write_capture_execution_plan(run_root_path, plan)
         manifest = load_or_create_run_manifest(run_root_path)
         upsert_stage(manifest, name="capture_execution", status="running")
@@ -1180,26 +1697,47 @@ def run_capture_execution(
     report_path: Path | None = None
 
     def record_status(status_value: str, message_value: str) -> Path:
-        return write_capture_execution_status(
+        status_record = _build_capture_execution_status(
             run_root_path,
-            _build_capture_execution_status(
-                run_root_path,
-                status=status_value,
-                message=message_value,
-                allow_cameras=allow_cameras,
-                allow_real_robot=allow_real_robot,
-                receive_start_timeout_s=receive_start_timeout_s,
-                receive_idle_timeout_s=receive_idle_timeout_s,
-                started_monotonic=started_monotonic,
-                plan=plan,
-                process_infos=process_infos,
-                report_path=report_path,
-            ),
+            execution_id=execution_id,
+            execution_dir=logs_dir,
+            run_config_digest=boundary.run_config_sha256,
+            status=status_value,
+            message=message_value,
+            allow_cameras=allow_cameras,
+            allow_real_robot=allow_real_robot,
+            receive_start_timeout_s=receive_start_timeout_s,
+            receive_idle_timeout_s=receive_idle_timeout_s,
+            started_monotonic=started_monotonic,
+            plan=plan,
+            process_infos=process_infos,
+            report_path=report_path,
         )
+        atomic_write_json(logs_dir / CAPTURE_EXECUTION_STATUS, status_record)
+        return write_capture_execution_status(run_root_path, status_record)
 
     status_path = record_status("starting", "Capture execution supervisor starting.")
 
     def cleanup_processes(reason: str) -> None:
+        live_infos = [
+            info
+            for info in process_infos
+            if info.get("process") is not None and info["process"].poll() is None
+        ]
+        live_info_ids = {id(info) for info in live_infos}
+        survivors: set[int] = set()
+        termination_error: str | None = None
+        try:
+            survivors = _terminate_process_trees(
+                [
+                    (info["process"], info.get("process_start_time"))
+                    for info in live_infos
+                ],
+                timeout_s=terminate_timeout_s,
+            )
+        except Exception as exc:
+            termination_error = f"{type(exc).__name__}: {exc}"
+
         for info in process_infos:
             process = info.get("process")
             if process is None:
@@ -1210,14 +1748,21 @@ def run_capture_execution(
                     )
                     info["termination_reason"] = f"not_spawned_during_{reason}"
             elif process.poll() is None:
+                info["status"] = "failed"
+                info["termination_reason"] = f"{reason}_termination_incomplete"
+                if termination_error is not None:
+                    info["termination_error"] = termination_error
+            elif id(info) in live_info_ids:
                 preserve_failure = (
                     info.get("status") == "failed"
                     and isinstance(info.get("termination_reason"), str)
                     and bool(info["termination_reason"])
                 )
-                _terminate_process_group(process, timeout_s=terminate_timeout_s)
                 _mark_process_ended(info)
-                if not preserve_failure:
+                if process.pid in survivors:
+                    info["status"] = "failed"
+                    info["termination_reason"] = f"{reason}_termination_incomplete"
+                elif not preserve_failure:
                     info["status"] = "terminated"
                     info["termination_reason"] = reason
             elif info.get("status") in {"starting", "running"}:
@@ -1260,7 +1805,8 @@ def run_capture_execution(
             sensor_commands,
             start=1,
         ):
-            output_path = _sensor_output_path(command)
+            expected_output_path = boundary.sensor_output_paths[sensor_position - 1]
+            output_path = expected_output_path
             metadata_path = output_path / FRAME_METADATA_JSONL
             command_name = str(command.get("name") or f"sensor_{sensor_position}")
             sensor_ready = False
@@ -1273,6 +1819,19 @@ def run_capture_execution(
                 command_array = _command_array(command)
                 log_stem = _safe_log_stem(command, index=index)
                 log_path = logs_dir / (f"{log_stem}_attempt_{startup_attempt:02d}.log")
+                _assert_run_config_digest(
+                    run_root_path,
+                    boundary.run_config_sha256,
+                    phase=(
+                        "immediately before camera child "
+                        f"{sensor_position} startup attempt {startup_attempt}"
+                    ),
+                )
+                output_path = _revalidate_sensor_output_path_before_spawn(
+                    command,
+                    run_root=run_root_path,
+                    expected_path=expected_output_path,
+                )
                 log_file = open(log_path, "w", buffering=1)
                 log_file.write(f"$ {shlex.join(command_array)}\n")
                 info: dict[str, Any] = {
@@ -1291,6 +1850,7 @@ def run_capture_execution(
                     "startup_attempt_limit": camera_startup_attempts,
                     "readiness_record_count": 0,
                     "output_mutated": False,
+                    "process_start_time": None,
                 }
                 process_infos.append(info)
                 try:
@@ -1302,10 +1862,11 @@ def run_capture_execution(
                             stdout=log_file,
                             stderr=subprocess.STDOUT,
                             text=True,
-                            start_new_session=(os.name != "nt"),
+                            start_new_session=False,
                         )
                         info["process"] = process
                         info["pid"] = getattr(process, "pid", None)
+                        info["process_start_time"] = _process_start_time(process.pid)
                 except CaptureExecutionCanceled:
                     raise
                 except Exception as exc:
@@ -1405,8 +1966,18 @@ def run_capture_execution(
                         )
 
                     if record_count >= MIN_CAMERA_READINESS_RECORDS:
+                        readiness_records = _valid_frame_metadata_records(
+                            metadata_path,
+                            limit=None,
+                        )
+                        baseline_record = readiness_records[-1]
                         info["output_mutated"] = True
                         info["termination_reason"] = "camera_ready"
+                        info["readiness_metadata_path"] = metadata_path
+                        info["readiness_baseline_record_count"] = len(readiness_records)
+                        info["readiness_baseline_timestamp_ns"] = int(
+                            baseline_record["host_received_timestamp_ns"]
+                        )
                         background_processes.append(info)
                         sensor_ready = True
                         record_status(
@@ -1420,9 +1991,10 @@ def run_capture_execution(
 
                     remaining_s = readiness_deadline - time.monotonic()
                     if remaining_s <= 0:
-                        _terminate_process_group(
+                        termination_incomplete = _terminate_process_tree(
                             process,
                             timeout_s=terminate_timeout_s,
+                            expected_start_time=info.get("process_start_time"),
                         )
                         _mark_process_ended(info)
                         info["returncode"] = process.returncode
@@ -1433,6 +2005,16 @@ def run_capture_execution(
                             output_path
                         )
                         log_file.close()
+                        if termination_incomplete:
+                            info["status"] = "failed"
+                            info["termination_reason"] = (
+                                "startup_termination_incomplete"
+                            )
+                            raise RuntimeError(
+                                f"Camera {command_name} readiness timed out and "
+                                "its verified process tree could not be fully "
+                                "terminated; refusing automatic retry."
+                            )
                         if (
                             not info["output_mutated"]
                             and startup_attempt < camera_startup_attempts
@@ -1447,6 +2029,19 @@ def run_capture_execution(
                                 "timed out and left no output evidence; retrying.",
                             )
                             time.sleep(camera_startup_retry_delay_s)
+                            info["output_mutated"] = _sensor_output_has_mutation(
+                                output_path
+                            )
+                            if info["output_mutated"]:
+                                info["status"] = "failed"
+                                info["termination_reason"] = (
+                                    "startup_late_output_no_retry"
+                                )
+                                raise RuntimeError(
+                                    f"Camera {command_name} published sensor output "
+                                    "after startup termination; preserving that raw "
+                                    "evidence and refusing automatic retry."
+                                )
                             retry_current = True
                             break
                         if info["output_mutated"]:
@@ -1487,19 +2082,31 @@ def run_capture_execution(
         startup_error = _camera_startup_exit(background_processes)
         if startup_error is not None:
             raise startup_error
-        missing_readiness = _missing_sensor_readiness(boundary.sensor_output_paths)
-        if missing_readiness:
-            raise RuntimeError(
-                "Camera readiness changed before robot START; missing sustained "
-                f"{FRAME_METADATA_JSONL} evidence: "
-                + ", ".join(path.as_posix() for path in missing_readiness)
-                + "."
+        final_readiness_deadline = time.monotonic() + startup_wait_s
+        while True:
+            startup_error = _camera_startup_exit(background_processes)
+            if startup_error is not None:
+                raise startup_error
+            readiness_failures = _camera_readiness_advancement_failures(
+                background_processes,
+                maximum_record_age_s=MAX_CAMERA_READINESS_RECORD_AGE_S,
             )
+            if not readiness_failures:
+                break
+            remaining_s = final_readiness_deadline - time.monotonic()
+            if remaining_s <= 0:
+                raise RuntimeError(
+                    "Camera readiness did not advance with recent committed "
+                    f"{FRAME_METADATA_JSONL} evidence before robot START: "
+                    + "; ".join(readiness_failures)
+                    + "."
+                )
+            time.sleep(min(RECEIVER_MONITOR_INTERVAL_S, remaining_s))
         record_status(
             "running",
-            "Every camera published sustained frame metadata; receiver may start.",
+            "Every camera advanced with recent committed frame metadata; "
+            "receiver may start.",
         )
-
         receiver_array = _command_array(receiver_command)
         receiver_array.extend(
             [
@@ -1530,7 +2137,13 @@ def run_capture_execution(
             "returncode": None,
             "status": "starting",
             "termination_reason": None,
+            "process_start_time": None,
         }
+        _assert_run_config_digest(
+            run_root_path,
+            boundary.run_config_sha256,
+            phase="immediately before robot receiver START",
+        )
         log_file = open(receiver_log, "w", buffering=1)
         receiver_info["log_file"] = log_file
         process_infos.append(receiver_info)
@@ -1544,10 +2157,13 @@ def run_capture_execution(
                     stdout=log_file,
                     stderr=subprocess.STDOUT,
                     text=True,
-                    start_new_session=(os.name != "nt"),
+                    start_new_session=False,
                 )
                 receiver_info["process"] = receiver_process
                 receiver_info["pid"] = getattr(receiver_process, "pid", None)
+                receiver_info["process_start_time"] = _process_start_time(
+                    receiver_process.pid
+                )
         except CaptureExecutionCanceled:
             raise
         except Exception:
@@ -1559,21 +2175,13 @@ def run_capture_execution(
         receiver_info["status"] = "running"
         record_status("running", "Robot pose receiver is running.")
         receiver_deadline = time.monotonic() + timeout_s
+        camera_failures: list[str] = []
         while True:
-            camera_error = _premature_camera_exit(background_processes)
-            if camera_error is not None:
-                raise camera_error
+            camera_failures.extend(_premature_camera_exit(background_processes))
             remaining_s = receiver_deadline - time.monotonic()
             if remaining_s <= 0:
-                _terminate_process_group(
-                    receiver_process,
-                    timeout_s=terminate_timeout_s,
-                )
-                _mark_process_ended(receiver_info)
-                receiver_info["returncode"] = receiver_process.returncode
                 receiver_info["status"] = "failed"
                 receiver_info["termination_reason"] = "receiver_timeout"
-                log_file.close()
                 raise RuntimeError(
                     f"Robot pose receiver exceeded timeout of {timeout_s} seconds."
                 )
@@ -1585,9 +2193,7 @@ def run_capture_execution(
             except subprocess.TimeoutExpired:
                 continue
 
-        camera_error = _premature_camera_exit(background_processes)
-        if camera_error is not None:
-            raise camera_error
+        camera_failures.extend(_premature_camera_exit(background_processes))
         log_file.close()
         receiver_info["returncode"] = returncode
         _mark_process_ended(receiver_info)
@@ -1599,12 +2205,49 @@ def run_capture_execution(
         )
         if returncode != 0:
             raise RuntimeError(f"Robot pose receiver exited with status {returncode}.")
+        _assert_run_config_digest(
+            run_root_path,
+            boundary.run_config_sha256,
+            phase="after robot receiver completion",
+        )
 
-        camera_failures: list[str] = []
         for info in background_processes:
             process = info["process"]
-            try:
-                process.wait(timeout=terminate_timeout_s)
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=0)
+                except subprocess.TimeoutExpired:
+                    pass
+
+        live_camera_infos = [
+            info for info in background_processes if info["process"].poll() is None
+        ]
+        live_camera_info_ids = {id(info) for info in live_camera_infos}
+        camera_survivors = _terminate_process_trees(
+            [
+                (info["process"], info.get("process_start_time"))
+                for info in live_camera_infos
+            ],
+            timeout_s=terminate_timeout_s,
+        )
+        for info in background_processes:
+            process = info["process"]
+            if info.get("termination_reason") == "camera_exited_while_receiver_active":
+                pass
+            elif id(info) in live_camera_info_ids:
+                _mark_process_ended(info)
+                if process.pid in camera_survivors or process.poll() is None:
+                    info["status"] = "failed"
+                    info["termination_reason"] = (
+                        "camera_termination_incomplete_after_receiver_exit"
+                    )
+                    camera_failures.append(
+                        f"{info['command'].get('name')} (termination incomplete)"
+                    )
+                else:
+                    info["status"] = "stopped"
+                    info["termination_reason"] = "stopped_after_receiver_exit"
+            else:
                 _mark_process_ended(info)
                 info["status"] = "succeeded" if process.returncode == 0 else "failed"
                 info["termination_reason"] = "exited_after_receiver"
@@ -1612,11 +2255,6 @@ def run_capture_execution(
                     camera_failures.append(
                         f"{info['command'].get('name')} (status {process.returncode})"
                     )
-            except subprocess.TimeoutExpired:
-                _terminate_process_group(process, timeout_s=terminate_timeout_s)
-                _mark_process_ended(info)
-                info["status"] = "stopped"
-                info["termination_reason"] = "stopped_after_receiver_exit"
 
             if info.get("log_file") is not None:
                 info["log_file"].close()
@@ -1626,7 +2264,9 @@ def run_capture_execution(
             )
         if camera_failures:
             raise RuntimeError(
-                "Camera capture command failure after receiver completion: "
+                "Camera capture command failure after receiver completion; "
+                "failures observed during robot motion were deferred so the pose "
+                "receiver and remaining cameras could continue through motion=end: "
                 + ", ".join(camera_failures)
                 + "."
             )
@@ -1687,23 +2327,40 @@ def run_capture_execution(
 
     elapsed_s = time.monotonic() - started_monotonic
     if status == "succeeded":
-        completion = build_capture_completion(
-            run_root_path,
-            load_run_config_for_run_root(run_root_path),
-            process_records,
-        )
-        if completion["status"] != "ok":
-            status = "failed"
-            failed_checks = [
-                str(check["name"])
-                for check in completion["checks"]
-                if check["status"] == "error"
-            ]
-            message = (
-                "Capture children exited, but completion validation failed: "
-                + ", ".join(failed_checks)
-                + ". Raw evidence was preserved."
+        try:
+            _assert_run_config_digest(
+                run_root_path,
+                boundary.run_config_sha256,
+                phase="before capture completion validation",
             )
+        except RuntimeError as exc:
+            status = "failed"
+            message = str(exc)
+            completion = {
+                "schema_version": "capture_completion.v1",
+                "status": "not_run",
+                "enabled_sensor_count": 0,
+                "checks": [],
+                "error_count": 0,
+            }
+        else:
+            completion = build_capture_completion(
+                run_root_path,
+                boundary.config_snapshot,
+                process_records,
+            )
+            if completion["status"] != "ok":
+                status = "failed"
+                failed_checks = [
+                    str(check["name"])
+                    for check in completion["checks"]
+                    if check["status"] == "error"
+                ]
+                message = (
+                    "Capture children exited, but completion validation failed: "
+                    + ", ".join(failed_checks)
+                    + ". Raw evidence was preserved."
+                )
     else:
         completion = {
             "schema_version": "capture_completion.v1",
@@ -1712,10 +2369,24 @@ def run_capture_execution(
             "checks": [],
             "error_count": 0,
         }
+    if status == "succeeded":
+        try:
+            _assert_run_config_digest(
+                run_root_path,
+                boundary.run_config_sha256,
+                phase="after capture completion validation",
+            )
+        except RuntimeError as exc:
+            status = "failed"
+            message = str(exc)
     report = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "generated_at": _now(),
         "run_root": run_root_path.as_posix(),
+        "execution_id": execution_id,
+        "execution_archive": logs_dir.relative_to(run_root_path).as_posix(),
+        "run_config_artifact": RUN_CONFIG,
+        "run_config_sha256": boundary.run_config_sha256,
         "status": status,
         "message": message,
         "mode": "full",
@@ -1728,6 +2399,8 @@ def run_capture_execution(
         "camera_readiness_contract": {
             "artifact": FRAME_METADATA_JSONL,
             "minimum_valid_committed_records": MIN_CAMERA_READINESS_RECORDS,
+            "required_post_readiness_record_advance": 1,
+            "maximum_latest_record_age_s": MAX_CAMERA_READINESS_RECORD_AGE_S,
             "deadline_s": startup_wait_s,
             "deadline_scope": "per_camera_startup_attempt",
             "startup_order": "one_camera_at_a_time_in_deterministic_plan_order",
@@ -1743,22 +2416,35 @@ def run_capture_execution(
         "elapsed_s": elapsed_s,
         "raw_pose_artifact": RAW_ROBOT_EE_POSES,
         "raw_pose_count": _raw_pose_count(run_root_path),
-        "log_dir": (run_root_path / CAPTURE_EXECUTION_LOGS_DIR).as_posix(),
+        "log_dir": logs_dir.as_posix(),
+        "run_config_binding_contract": {
+            "digest": "sha256_of_canonical_validated_run_config",
+            "checkpoints": [
+                "before_execution_evidence_publication",
+                "immediately_before_each_camera_child",
+                "immediately_before_robot_receiver_start",
+                "after_robot_receiver_completion",
+                "before_capture_completion_validation",
+                "after_capture_completion_validation",
+            ],
+            "completion_uses_accepted_snapshot": True,
+        },
         "supervisor_stop_policy": (
             "Background camera capture commands are allowed to run while "
             "the robot pose receiver is active. After the receiver exits, the "
-            "supervisor waits for them briefly and then stops remaining process "
-            "groups."
+            "supervisor cooperatively stops their verified descendant process "
+            "trees within one shared deadline."
         ),
         "robot_stop_policy": (
-            "Failure and cancellation cleanup terminate local child process "
-            "groups only; the supervisor never sends an iiwa STOP command."
+            "Failure and cancellation cleanup terminate local child process trees "
+            "only; the supervisor never sends an iiwa STOP command."
         ),
         "capture_execution_plan_artifact": CAPTURE_EXECUTION_PLAN,
         "capture_execution_plan": plan,
         "processes": process_records,
         "completion": completion,
     }
+    atomic_write_json(logs_dir / CAPTURE_EXECUTION_REPORT, report)
     report_path = write_capture_execution_report(run_root_path, report)
     status_path = record_status(status, message)
 
@@ -1780,7 +2466,7 @@ def run_capture_execution(
         CAPTURE_EXECUTION_REPORT: report_path,
         CAPTURE_EXECUTION_PLAN: plan_path,
         CAPTURE_EXECUTION_STATUS: status_path,
-        CAPTURE_EXECUTION_LOGS_DIR: logs_dir,
+        CAPTURE_EXECUTION_LOGS_DIR: logs_root,
     }
     raw_pose_path = run_root_path / RAW_ROBOT_EE_POSES
     if raw_pose_path.is_file():

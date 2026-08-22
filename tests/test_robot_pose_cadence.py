@@ -113,6 +113,18 @@ def test_cadence_fails_historical_roughly_16_hz_stream() -> None:
     }
 
 
+def test_cadence_includes_packet_loss_observed_at_stream_end() -> None:
+    raw_poses = dict(
+        pose_record(index, motion="move", host_ns=index * 10_000_000)
+        for index in range(4)
+    )
+    raw_poses["3"]["stream_end_source_packet"] = {"estimated_packets_lost": 2}
+
+    report = analyze_robot_pose_cadence(raw_poses)
+
+    assert report["estimated_packets_lost"] == 2
+
+
 def test_write_creates_only_derived_report_below_processed(tmp_path: Path) -> None:
     raw_poses = dict(
         pose_record(index, motion="move", host_ns=index * 10_000_000)

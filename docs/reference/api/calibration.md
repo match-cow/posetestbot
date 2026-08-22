@@ -37,16 +37,53 @@ An attempt retains `request.json`, `progress.json`, intermediate search and
 candidate files, ranking/check evidence, selected target, candidate profiles,
 and promotion evidence below `processed/calibration/<attempt_id>/`.
 
+The fixed current planar-PnP comparison uses IPPE and SQPnP. Iterative PnP is
+not generated as a third default candidate: after the common LM refinement it
+was a duplicate initializer on the repository corpus, not independent evidence.
+The API does not accept caller-selected solver lists. Retained attempt evidence
+can still identify an Iterative result for diagnosis; new attempts do not
+produce one.
+
 `GET /calibration/attempts/<attempt_id>` also derives a non-artifact
 `promotion_review` from the immutable candidate evidence. Alternative solver
 failures are diagnostic and do not block a complete selected bundle. For a
-multi-camera bundle, pairwise disagreement between the independently estimated
-common companion transforms is advisory above 10 mm or 5° and fails closed
-above 20 mm or 10°. A response status of `promotable_with_warnings` enables
-explicit promotion while preserving the exact warning evidence in the promoted
-profiles. The promotion transaction revalidates historical attempts under
-their recorded policy before applying this current retention rule; it does not
-rewrite `ranking.json`.
+complete, internally consistent per-camera candidate, mean closure residuals
+above 10 mm or 5° are retained as prominent quality warnings; values above the
+20 mm or 10° hard self-consistency ceiling remain contradictory and fail
+closed. For a multi-camera bundle, pairwise disagreement between the
+independently estimated common companion transforms uses the same advisory and
+hard limits. A response status of `promotable_with_warnings` enables explicit
+promotion while preserving the exact warning evidence in the promoted profiles.
+The promotion transaction revalidates historical attempts under their recorded
+policy before applying this current retention rule; it does not rewrite
+`ranking.json`.
+
+Creating a promotion request records a `calibration_promotion_request.v2`
+approval snapshot. Its `review_input_bindings` list size- and SHA-256-binds the
+complete attempt intent/status, synchronization and timing evidence, intrinsic,
+PnP, observation and extrinsic evidence, ranking/checks/candidate profiles, and
+the attempt-owned target bundle. Approval writes the request first and an
+`approved` status as its durable commit marker while holding the run mutation
+lock. Only successful queue submission plus durable job-ID binding changes that
+status to `queued`; an unbound approval cannot execute. Submission or binding
+failure records a terminal failure, and a submitted job whose binding fails is
+canceled. The queued promotion verifies the same binding set before changing
+promotion status, verifies the exact intrinsic projection and staged target
+bundle, and rechecks all source bindings before transaction commit. It fails
+closed if evidence is missing or changed. Promotion requests using the retired
+v1 schema are rejected and are not migrated in place; a fresh v2 approval may
+be recorded only through the normal failed-promotion retry flow.
+
+Promotion publishes its root profiles, target, run configuration, manifest,
+library state, and promotion evidence through one recoverable transaction. The
+hidden `.calibration_promotion.transaction.json` hash-binds staged, prior, and
+installed content. Recovery of a `prepared` transaction restores the complete
+prior generation; recovery of a `committed` transaction verifies and retains
+the complete new generation before removing backups. Attempt reads and later
+promotion starts perform this recovery, while missing or tampered transaction
+evidence fails closed. Staged files and directories are fsynced before journal
+publication, and installation and rollback use no-clobber renames so a raced
+path is preserved rather than overwritten.
 
 Typical submission shape:
 

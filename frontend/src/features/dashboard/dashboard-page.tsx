@@ -1,16 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useState } from "react"
 import { Link } from "react-router-dom"
-import { AlertTriangle, ArrowRight, Bot, Camera, CheckCircle2, CircleDot, Clock3, Cpu, HardDrive, ListChecks, Power, RefreshCw, Route, ShieldCheck, Square } from "lucide-react"
+import { AlertTriangle, ArrowRight, Camera, CheckCircle2, CircleDot, Clock3, Cpu, HardDrive, ListChecks, RefreshCw, Route, ShieldCheck, Square } from "lucide-react"
 import { toast } from "sonner"
 import { HelpTip } from "@/components/help-tip"
 import { PageHeader } from "@/components/page-header"
 import { StatusBadge, type StatusTone } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Checkbox } from "@/components/ui/checkbox"
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, errorMessage, query } from "@/lib/api"
 import type { BopAnnotationSetup, CaptureState, Job, Overview, RunStorage, SensorStatus } from "@/lib/contracts"
@@ -26,11 +22,13 @@ interface ConnectedCameraSummary {
   type: string
   identity: string
   usesAlias: boolean
+  captureReady: boolean
+  readinessReason: string
 }
 
 function connectedCameraSummaries(status: SensorStatus | undefined): ConnectedCameraSummary[] {
   return status?.families.flatMap((family) => family.devices
-    .filter((device) => device.connected !== false)
+    .filter((device) => device.connected === true)
     .map((device) => {
       const explicitAlias = device.alias?.trim()
       const effectiveName = device.effective_display_name?.trim()
@@ -42,15 +40,20 @@ function connectedCameraSummaries(status: SensorStatus | undefined): ConnectedCa
         type: family.display_name?.trim() || titleCase(device.sensor_type.replaceAll("_", " ")),
         identity: alias || device.device_id,
         usesAlias: Boolean(alias),
+        captureReady: device.capture_ready === true,
+        readinessReason: device.capture_readiness_reason?.trim().replaceAll("_", " ") || "capture readiness was not confirmed",
       }
     })) ?? []
 }
 
 function SensorSummaryCard({ status, failed }: { status?: SensorStatus; failed: boolean }) {
   const cameras = connectedCameraSummaries(status)
-  const value = failed ? "Unavailable" : `${status?.total_connected ?? cameras.length} connected`
-  const badgeStatus = failed ? "unavailable" : status?.all_expected_connected ? "connected" : "warning"
-  const tone: StatusTone = failed ? "destructive" : status?.all_expected_connected ? "informational" : "warning"
+  const connectedCount = cameras.length
+  const captureReadyCount = cameras.filter((camera) => camera.captureReady).length
+  const allDetectedReady = connectedCount > 0 && captureReadyCount === connectedCount
+  const value = failed ? "Unavailable" : connectedCount > 0 ? `${captureReadyCount} of ${connectedCount} capture-ready` : "0 cameras detected"
+  const badgeStatus = failed ? "unavailable" : connectedCount === 0 ? "none detected" : allDetectedReady ? "observed" : "needs attention"
+  const tone: StatusTone = failed ? "destructive" : connectedCount === 0 || !allDetectedReady ? "warning" : "informational"
 
   return (
     <Card data-testid="dashboard-sensor-summary">
@@ -59,22 +62,25 @@ function SensorSummaryCard({ status, failed }: { status?: SensorStatus; failed: 
         <div className="mt-5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Sensors</div>
         <div className="mt-1 font-display text-lg font-semibold">{value}</div>
         {failed
-          ? <p className="mt-2 text-xs text-muted-foreground">Camera status could not be loaded.</p>
+          ? <><p className="mt-2 text-xs text-destructive">Camera discovery could not be loaded. Missing status is not treated as capture-ready.</p><Link className="mt-2 inline-flex text-[11px] font-semibold text-primary-strong underline-offset-4 hover:underline" to="/devices">Open Devices</Link></>
           : cameras.length > 0
-            ? <ul aria-label="Connected cameras" className="mt-2 space-y-1.5 text-[11px] leading-snug text-muted-foreground" data-testid="dashboard-connected-cameras">
-              {cameras.map((camera) => <li className="flex min-w-0 items-baseline gap-1" data-testid="dashboard-connected-camera" key={camera.key}>
-                <span className="shrink-0 font-medium text-foreground">{camera.type}</span>
-                <span aria-hidden="true">·</span>
-                <span className={`min-w-0 break-all ${camera.usesAlias ? "font-medium" : "font-mono"}`}>{camera.identity}</span>
-              </li>)}
-            </ul>
-            : <p className="mt-2 text-xs text-muted-foreground">No cameras detected.</p>}
+            ? <><p className="mt-1 text-[11px] text-muted-foreground">{connectedCount} connected; this observation does not assert the configured run’s expected camera count.</p><ul aria-label="Connected cameras" className="mt-2 space-y-1.5 text-[11px] leading-snug text-muted-foreground" data-testid="dashboard-connected-cameras">
+                {cameras.map((camera) => <li className="flex min-w-0 flex-wrap items-baseline gap-1" data-testid="dashboard-connected-camera" key={camera.key}>
+                  <span className="shrink-0 font-medium text-foreground">{camera.type}</span>
+                  <span aria-hidden="true">·</span>
+                  <span className={`min-w-0 break-all ${camera.usesAlias ? "font-medium" : "font-mono"}`}>{camera.identity}</span>
+                  {!camera.captureReady && <span className="text-warning-foreground">· not capture-ready ({camera.readinessReason})</span>}
+                </li>)}
+              </ul>
+              {!allDetectedReady && <Link className="mt-2 inline-flex text-[11px] font-semibold text-primary-strong underline-offset-4 hover:underline" to="/devices">Review camera readiness in Devices</Link>}
+            </>
+            : <p className="mt-2 text-xs text-warning-foreground">No cameras were detected. <Link className="font-semibold text-primary-strong underline-offset-4 hover:underline" to="/devices">Open Devices</Link> to check SDK, USB, and permission status.</p>}
       </CardContent>
     </Card>
   )
 }
 
-function CompactStatusItem({ icon: Icon, label, value, status, tone, detail, className, testId }: { icon: typeof Bot; label: string; value: string; status?: string; tone: StatusTone; detail: string; className?: string; testId: string }) {
+function CompactStatusItem({ icon: Icon, label, value, status, tone, detail, className, testId }: { icon: typeof ShieldCheck; label: string; value: string; status?: string; tone: StatusTone; detail: string; className?: string; testId: string }) {
   return <div className={`flex min-w-0 items-center gap-3 ${className ?? ""}`} data-testid={testId}>
     <div className="grid size-8 shrink-0 place-items-center rounded-md bg-muted"><Icon className="size-3.5 text-primary-strong" /></div>
     <div className="min-w-0 flex-1">
@@ -159,11 +165,23 @@ function workflowStatuses(completed: boolean[]): WorkflowProgressStatus[] {
   return completed.map((value, index) => value ? "complete" : index === firstIncomplete ? "current" : "not_started")
 }
 
-function dashboardWorkflowEvidence(overview: Overview | undefined, annotationComplete = false): DashboardWorkflowEvidence | null {
+function configuredAnnotationComplete(overview: Overview, setup: BopAnnotationSetup | undefined) {
+  const configuredMode = overview.config?.bop.annotation_mode
+  const bopComplete = artifactComplete(overview, "bop/bop_export_manifest.json", "bop")
+  if (configuredMode === "none") return bopComplete
+  if (configuredMode !== "pose" && configuredMode !== "pose_and_masks") return false
+  const output = setup?.current_output
+  return setup?.configured_mode === configuredMode
+    && output?.mode === configuredMode
+    && output.verified === true
+    && (configuredMode !== "pose_and_masks" || output.evaluation_ready === true)
+}
+
+function dashboardWorkflowEvidence(overview: Overview | undefined, annotationSetup: BopAnnotationSetup | undefined): DashboardWorkflowEvidence | null {
   const config = overview?.config
   if (!overview || !config) return null
 
-  const journey: WorkflowJourneyId = config.dataset_mode === "pose_template" ? "dataset" : "calibration"
+  const journey: WorkflowJourneyId = config.capture.intent
   const metadata = workflowJourneyMetadata[journey]
   const readinessComplete = artifactComplete(overview, "run_preflight_report.json", "preflight")
   const captureComplete = artifactComplete(overview, "capture_execution_report.json", "capture")
@@ -195,7 +213,7 @@ function dashboardWorkflowEvidence(overview: Overview | undefined, annotationCom
       ]
   const requiredStatuses = workflowStatuses(requiredCompleted)
   const statuses: WorkflowProgressStatus[] = journey === "dataset"
-    ? [...requiredStatuses, annotationComplete ? "complete" : bopComplete ? "ready" : "not_started"]
+    ? [...requiredStatuses, configuredAnnotationComplete(overview, annotationSetup) ? "complete" : bopComplete ? "ready" : "not_started"]
     : requiredStatuses
   const evidenceSections = journey === "dataset"
     ? [["run_setup"], ["run_setup"], ["preflight"], ["capture"], ["sync", "calibration", "bop"], []]
@@ -348,80 +366,19 @@ function DashboardJobActivity({ jobs, pending, failed, selectedRun }: { jobs?: J
   </Card>
 }
 
-type IiwaCommand = "start" | "stop"
-const LAB_IIWA_TARGET = "172.31.1.147:30300"
-
-function IiwaQuickControls({ profileStatus }: { profileStatus: "checking" | "configured" | "error" }) {
-  const { selectedRun } = useOperator()
-  const queryClient = useQueryClient()
-  const [command, setCommand] = useState<IiwaCommand | null>(null)
-  const [startAuthorized, setStartAuthorized] = useState(false)
-  const [idleExitConfirmed, setIdleExitConfirmed] = useState(false)
-  const robotCommand = useMutation({
-    mutationFn: (nextCommand: IiwaCommand) => api<{ job_id: string }>("/robot/commands", {
-      method: "POST",
-      body: JSON.stringify(nextCommand === "start"
-        ? { command: "start", run_root: selectedRun, allow_real_robot: true, allow_cameras: true }
-        : { command: "stop", confirm_idle_program_exit: true }),
-    }),
-    onSuccess: (data, nextCommand) => {
-      toast.success(nextCommand === "start" ? "IIWA start queued" : "IIWA idle-program exit queued", { description: `Job ${data.job_id} continues after navigation; monitor it in Jobs.` })
-      setCommand(null)
-      setStartAuthorized(false)
-      setIdleExitConfirmed(false)
-      queryClient.invalidateQueries({ queryKey: ["jobs"] })
-    },
-    onError: (error) => toast.error("Robot command was not queued", { description: errorMessage(error) }),
-  })
-  const openCommand = (nextCommand: IiwaCommand) => {
-    setStartAuthorized(false)
-    setIdleExitConfirmed(false)
-    setCommand(nextCommand)
-  }
-  const setDialogOpen = (open: boolean) => {
-    if (open) return
-    setCommand(null)
-    setStartAuthorized(false)
-    setIdleExitConfirmed(false)
-  }
-  const confirmed = command === "start"
-    ? startAuthorized
-    : idleExitConfirmed
-
-  return (
-    <Card data-testid="iiwa-quick-controls">
-      <CardContent className="pt-5">
-        <div className="flex items-start justify-between"><div className="grid size-9 place-items-center rounded-lg bg-muted"><Bot className="size-4 text-primary-strong" /></div><StatusBadge status={profileStatus} tone={profileStatus === "configured" ? "informational" : profileStatus === "error" ? "destructive" : "neutral"}>{profileStatus}</StatusBadge></div>
-        <div className="mt-5 flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Manual robot control <HelpTip label="robot control status">Configured means the sole lab profile loaded. It does not contact the robot or prove that Sunrise is running.</HelpTip></div>
-        <div className="mt-1 font-display text-lg font-semibold">Lab IIWA</div>
-        <p className="mt-1 font-mono text-xs text-muted-foreground">{LAB_IIWA_TARGET}</p>
-        <div className="mt-4 grid grid-cols-2 gap-2"><Button size="sm" onClick={() => openCommand("start")} disabled={robotCommand.isPending}><Power />Start program</Button><Button size="sm" variant="destructive" onClick={() => openCommand("stop")} disabled={robotCommand.isPending}><Square />End program</Button></div>
-      </CardContent>
-      <Dialog open={command !== null} onOpenChange={setDialogOpen}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Confirm IIWA {command === "stop" ? "idle-program exit" : "start"}</DialogTitle><DialogDescription>The command is sent only to the fixed lab target <span className="font-mono">{LAB_IIWA_TARGET}</span>.</DialogDescription></DialogHeader>
-          {command === "stop" ? <><div className="flex items-start gap-3 rounded-lg border border-destructive/45 bg-destructive/10 p-4 text-sm"><AlertTriangle className="mt-0.5 size-5 shrink-0 text-destructive" /><div><div className="font-semibold text-destructive">This is not a motion stop</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">It cannot interrupt active motion. It exits only an idle waiting program and requires a manual Sunrise restart.</p></div></div><Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox data-testid="iiwa-idle-exit-confirmation" checked={idleExitConfirmed} onCheckedChange={(value) => setIdleExitConfirmed(value === true)} /><span>I confirm the IIWA program is idle and I intend to exit it.</span></Label></> : <><div className="rounded-lg border border-warning/40 bg-warning/10 p-4"><div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Target</div><div className="mt-1 font-mono text-lg font-semibold">{LAB_IIWA_TARGET}</div><div className="mt-3 text-xs"><span className="font-semibold">Manual test request:</span> 0.1 m/s (100 mm/s)</div></div><Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox data-testid="iiwa-start-acknowledgement" checked={startAuthorized} onCheckedChange={(value) => setStartAuthorized(value === true)} /><span>I confirm the workcell is clear, the selected cameras and pose receiver are ready, and I authorize real IIWA motion for this start.</span></Label></>}
-          <DialogFooter><Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button><Button variant={command === "stop" ? "destructive" : "default"} disabled={!confirmed || robotCommand.isPending || command === null} onClick={() => command && robotCommand.mutate(command)}>{command === "stop" ? <Square /> : <Power />}{robotCommand.isPending ? "Queueing…" : command === "stop" ? "Queue idle-program exit" : "Queue start"}</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </Card>
-  )
-}
-
 export function DashboardPage() {
   const { selectedRun } = useOperator()
   const queryClient = useQueryClient()
   const overview = useQuery({ queryKey: ["overview", selectedRun], queryFn: () => api<Overview>(query("/ui/overview", { run_root: selectedRun })) })
   const storage = useQuery({ queryKey: ["storage", selectedRun], queryFn: () => api<RunStorage>(query("/ui/storage", { run_root: selectedRun })), refetchInterval: 5_000 })
-  const sensors = useQuery({ queryKey: ["sensors", "status"], queryFn: () => api<SensorStatus>("/sensors/status"), staleTime: 10_000 })
-  const robot = useQuery({ queryKey: ["robot", "status"], queryFn: () => api<Record<string, unknown>>("/robot/status"), staleTime: 10_000 })
+  const sensors = useQuery({ queryKey: ["sensors", "status"], queryFn: () => api<SensorStatus>("/sensors/status"), staleTime: 10_000, retry: false })
   const runtime = useQuery({ queryKey: ["runtime", "status"], queryFn: () => api<Record<string, unknown>>("/runtime/status"), staleTime: 10_000 })
   const capture = useQuery({ queryKey: ["capture-jobs", selectedRun], queryFn: () => api<CaptureState>(query("/capture/jobs", { run_root: selectedRun })), refetchInterval: (state) => state.state.data?.active_count ? 1_000 : 5_000 })
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: () => api<{ jobs: Job[]; resources: Record<string, string> }>("/jobs"), refetchInterval: 1_000 })
   const annotationSetup = useQuery({
     queryKey: ["bop-annotations", "setup", selectedRun],
     queryFn: () => api<BopAnnotationSetup>(query("/bop/annotations/setup", { run_root: selectedRun })),
-    enabled: overview.data?.config?.dataset_mode === "pose_template",
+    enabled: overview.data?.config?.capture.intent === "dataset",
     retry: false,
   })
   const stopCapture = useMutation({
@@ -434,19 +391,18 @@ export function DashboardPage() {
   const sections = overview.data?.sidebar ?? []
   const preflight = sections.find((item) => item.id === "preflight")
   const runtimeItems = Array.isArray(runtime.data?.runtimes) ? runtime.data.runtimes as Array<{ available?: boolean }> : []
-  const workflowEvidence = dashboardWorkflowEvidence(overview.data, Boolean(annotationSetup.data?.current_output?.verified))
+  const workflowEvidence = dashboardWorkflowEvidence(overview.data, annotationSetup.data)
+  const sensorStatusFailed = sensors.isError || (!sensors.isPending && !sensors.data)
 
-  const refresh = () => queryClient.invalidateQueries({ predicate: (item) => ["overview", "storage", "sensors", "robot", "runtime", "capture-jobs", "jobs", "bop-annotations", "cluster-controller-service", "cluster-status"].includes(String(item.queryKey[0])) })
+  const refresh = () => queryClient.invalidateQueries({ predicate: (item) => ["overview", "storage", "sensors", "runtime", "capture-jobs", "jobs", "bop-annotations", "cluster-controller-service", "cluster-status"].includes(String(item.queryKey[0])) })
   const statusErrors = [
     overview.isError && "run evidence",
     storage.isError && "run storage",
-    sensors.isError && "sensor discovery",
-    robot.isError && "robot profile",
+    sensorStatusFailed && "sensor discovery",
     runtime.isError && "runtime status",
     capture.isError && "capture status",
     jobs.isError && "job status",
   ].filter(Boolean) as string[]
-  const robotProfileStatus = robot.isPending ? "checking" : robot.isError ? "error" : "configured"
 
   return (
     <div className="space-y-6">
@@ -458,16 +414,15 @@ export function DashboardPage() {
       <div data-testid="dashboard-status-overview" className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(360px,1fr)]">
         {overview.isPending || storage.isPending || sensors.isPending ? <>
           <div className="grid min-w-0 grid-rows-[1fr_auto] gap-4">
-            <div className="grid gap-4 md:grid-cols-3">{Array.from({ length: 3 }).map((_, index) => <Skeleton className="h-48" key={index} />)}</div>
+            <div className="grid gap-4 md:grid-cols-2">{Array.from({ length: 2 }).map((_, index) => <Skeleton className="h-48" key={index} />)}</div>
             <Skeleton className="h-16" />
           </div>
           <Skeleton className="min-h-72" />
         </> : <>
           <div className="grid min-w-0 grid-rows-[1fr_auto] gap-4">
-            <div className="grid gap-4 md:grid-cols-3">
+            <div className="grid gap-4 md:grid-cols-2">
               <StorageSummaryCard storage={storage.data} />
-              <SensorSummaryCard status={sensors.data} failed={sensors.isError} />
-              <IiwaQuickControls profileStatus={robotProfileStatus} />
+              <SensorSummaryCard status={sensors.data} failed={sensorStatusFailed} />
             </div>
             <SupportingStatusStrip preflightStatus={preflight?.status} runtimeItems={runtimeItems} runtimePending={runtime.isPending} runtimeFailed={runtime.isError} />
           </div>

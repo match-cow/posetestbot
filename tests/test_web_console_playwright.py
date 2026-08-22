@@ -437,7 +437,9 @@ def selected_sensor_status() -> dict:
             }
         ],
         "total_connected": 2,
+        "total_capture_ready": 2,
         "all_expected_connected": True,
+        "expected_counts_requested": False,
     }
 
 
@@ -598,6 +600,56 @@ def cluster_pose_job(*, state: str, with_result: bool = False) -> dict:
     }
 
 
+def bop_annotation_setup_payload(config_payload: dict) -> dict:
+    blocker = {
+        "code": "bop_export_missing",
+        "message": "Complete the base BOP export first.",
+    }
+    return {
+        "schema_version": "bop_annotation_setup.v1",
+        "run_root": RUN_ROOT,
+        "configured_mode": config_payload.get("bop", {}).get(
+            "annotation_mode", "none"
+        ),
+        "runtime": {
+            "available": True,
+            "required_version": "2.8.0",
+            "detected_version": "2.8.0",
+            "install_command": None,
+            "reason": None,
+        },
+        "toolkit": {
+            "available": True,
+            "status": "ready",
+            "revision": "renderer-revision",
+            "required_revision": "renderer-revision",
+            "environment_ready": True,
+            "renderer": "vispy",
+            "install_command": None,
+            "reason": None,
+        },
+        "readiness": {
+            "ready": False,
+            "blockers": [blocker],
+            "warnings": [],
+        },
+        "readiness_by_mode": {
+            "pose": {
+                "ready": False,
+                "blockers": [blocker],
+                "warnings": [],
+            },
+            "pose_and_masks": {
+                "ready": False,
+                "blockers": [blocker],
+                "warnings": [],
+            },
+        },
+        "current_output": None,
+        "counts": {"sensors": 0, "frames": 0, "instances": 0},
+    }
+
+
 def install_common_mocks(
     page,
     *,
@@ -605,12 +657,14 @@ def install_common_mocks(
     requests: list[dict] | None = None,
     generator_available: bool = False,
     config_payload: dict | None = None,
+    camera_contract: dict | None = None,
 ) -> None:
     requests = requests if requests is not None else []
     preflight_state = (
         preflight_state if preflight_state is not None else {"blocker": None}
     )
     config_payload = config_payload if config_payload is not None else run_config()
+    camera_contract = camera_contract or {"mutable": True, "blockers": []}
 
     page.route(
         "**/ui/bootstrap",
@@ -731,7 +785,9 @@ def install_common_mocks(
                 "schema_version": "sensor_status.v1",
                 "families": [],
                 "total_connected": 0,
+                "total_capture_ready": 0,
                 "all_expected_connected": True,
+                "expected_counts_requested": False,
             },
         ),
     )
@@ -806,64 +862,7 @@ def install_common_mocks(
     )
     page.route(
         "**/bop/annotations/setup?**",
-        lambda route: fulfill_json(
-            route,
-            {
-                "schema_version": "bop_annotation_setup.v1",
-                "run_root": RUN_ROOT,
-                "runtime": {
-                    "available": True,
-                    "required_version": "2.8.0",
-                    "detected_version": "2.8.0",
-                    "install_command": None,
-                    "reason": None,
-                },
-                "toolkit": {
-                    "available": True,
-                    "status": "ready",
-                    "revision": "renderer-revision",
-                    "required_revision": "renderer-revision",
-                    "environment_ready": True,
-                    "renderer": "vispy",
-                    "install_command": None,
-                    "reason": None,
-                },
-                "readiness": {
-                    "ready": False,
-                    "blockers": [
-                        {
-                            "code": "bop_export_missing",
-                            "message": "Complete the base BOP export first.",
-                        }
-                    ],
-                    "warnings": [],
-                },
-                "readiness_by_mode": {
-                    "pose": {
-                        "ready": False,
-                        "blockers": [
-                            {
-                                "code": "bop_export_missing",
-                                "message": "Complete the base BOP export first.",
-                            }
-                        ],
-                        "warnings": [],
-                    },
-                    "pose_and_masks": {
-                        "ready": False,
-                        "blockers": [
-                            {
-                                "code": "bop_export_missing",
-                                "message": "Complete the base BOP export first.",
-                            }
-                        ],
-                        "warnings": [],
-                    },
-                },
-                "current_output": None,
-                "counts": {"sensors": 0, "frames": 0, "instances": 0},
-            },
-        ),
+        lambda route: fulfill_json(route, bop_annotation_setup_payload(config_payload)),
     )
     page.route(
         "**/capture/jobs**",
@@ -936,6 +935,7 @@ def install_common_mocks(
                 {
                     "config": config_payload,
                     "preflight": {"queue_blocker": preflight_state["blocker"]},
+                    "camera_contract": camera_contract,
                 },
             )
 
@@ -1484,6 +1484,7 @@ def test_dashboard_lists_connected_camera_type_and_alias_or_device_id(
                         "effective_display_name": "OAK-D Pro oak-serial-77",
                         "alias": None,
                         "connected": True,
+                        "capture_ready": True,
                     }
                 ],
             },
@@ -1499,9 +1500,22 @@ def test_dashboard_lists_connected_camera_type_and_alias_or_device_id(
                     }
                 ],
             },
+            {
+                "sensor_type": "zed_2i",
+                "display_name": "Stereolabs ZED 2i",
+                "devices": [
+                    {
+                        "sensor_type": "zed_2i",
+                        "device_id": "missing-connection-contract",
+                        "display_name": "Malformed discovery record",
+                        "capture_ready": True,
+                    }
+                ],
+            },
         ]
     )
     sensor_status["total_connected"] = 3
+    sensor_status["total_capture_ready"] = 3
     page.route(
         "**/sensors/status", lambda route: fulfill_json(route, sensor_status)
     )
@@ -1509,7 +1523,11 @@ def test_dashboard_lists_connected_camera_type_and_alias_or_device_id(
     page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
 
     summary = page.get_by_test_id("dashboard-sensor-summary")
-    expect(summary).to_contain_text("3 connected")
+    expect(summary).to_contain_text("3 of 3 capture-ready")
+    expect(summary).to_contain_text(
+        "3 connected; this observation does not assert the configured run’s expected camera count."
+    )
+    expect(summary).to_contain_text("observed")
     rows = summary.get_by_test_id("dashboard-connected-camera")
     expect(rows).to_have_count(3)
     expect(rows.nth(0)).to_have_text("Intel RealSense D435·Wrist RGB-D")
@@ -1517,12 +1535,179 @@ def test_dashboard_lists_connected_camera_type_and_alias_or_device_id(
     expect(rows.nth(2)).to_have_text("Luxonis OAK-D Pro·oak-serial-77")
     expect(summary).not_to_contain_text("wrist-1")
     expect(summary).not_to_contain_text("zed-offline")
+    expect(summary).not_to_contain_text("missing-connection-contract")
     expect(summary).not_to_contain_text(
         "RealSense, OAK-D Pro, and ZED discovery."
     )
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
     )
+
+
+def test_dashboard_camera_summary_distinguishes_connection_from_capture_readiness(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    sensor_status = selected_sensor_status()
+    unready = sensor_status["families"][0]["devices"][1]
+    unready["capture_ready"] = False
+    unready["capture_readiness_reason"] = "usb_connection_below_superspeed"
+    sensor_status["total_capture_ready"] = 1
+    page.route(
+        "**/sensors/status", lambda route: fulfill_json(route, sensor_status)
+    )
+
+    page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
+
+    summary = page.get_by_test_id("dashboard-sensor-summary")
+    expect(summary).to_contain_text("1 of 2 capture-ready")
+    expect(summary).to_contain_text(
+        "Static RGB-D· not capture-ready (usb connection below superspeed)"
+    )
+    expect(summary).to_contain_text("needs attention")
+    expect(
+        summary.get_by_role("link", name="Review camera readiness in Devices")
+    ).to_have_attribute("href", "#/devices")
+
+
+def test_sensor_discovery_errors_fail_closed_across_operator_surfaces(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    page.route(
+        "**/sensors/status",
+        lambda route: fulfill_json(
+            route, {"error": "mock camera discovery offline"}, status=503
+        ),
+    )
+
+    page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
+    expect(page.get_by_role("alert").filter(has_text="sensor discovery")).to_contain_text(
+        "Missing responses are not treated as ready"
+    )
+    dashboard_summary = page.get_by_test_id("dashboard-sensor-summary")
+    expect(dashboard_summary).to_contain_text("Unavailable")
+    expect(dashboard_summary).to_contain_text(
+        "Missing status is not treated as capture-ready"
+    )
+    expect(dashboard_summary.get_by_role("link", name="Open Devices")).to_have_attribute(
+        "href", "#/devices"
+    )
+
+    page.goto(f"{console_server.url}/#/devices", wait_until="networkidle")
+    discovery_error = page.get_by_test_id("sensor-discovery-error")
+    expect(discovery_error).to_be_visible()
+    expect(discovery_error).to_contain_text(
+        "Missing status is not treated as an empty lab or as capture readiness"
+    )
+    expect(page.get_by_text("No RGB-D sensors were detected", exact=False)).to_have_count(0)
+    expect(page.get_by_test_id("sensor-card")).to_have_count(0)
+
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=configure",
+        wait_until="networkidle",
+    )
+    setup_error = page.get_by_test_id("run-sensor-status-error")
+    expect(setup_error).to_be_visible()
+    expect(setup_error).to_contain_text(
+        "none are treated as connected or capture-ready"
+    )
+    expect(page.get_by_role("button", name="Save setup")).to_be_disabled()
+    expect(setup_error.get_by_role("link", name="Open Devices")).to_have_attribute(
+        "href", "#/devices"
+    )
+
+
+def test_dashboard_workflow_journey_uses_capture_intent_not_dataset_mode(
+    console_server, page
+) -> None:
+    configured = run_config(intent="dataset")
+    assert configured["dataset_mode"] == "objectless"
+    install_common_mocks(page, config_payload=configured)
+
+    page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
+
+    workflow = page.get_by_test_id("dashboard-workflow-overview")
+    expect(workflow).to_have_attribute("data-workflow-journey", "dataset")
+    expect(workflow.get_by_role("heading", name="Object dataset workflow")).to_be_visible()
+    expect(workflow.locator("[data-workflow-step]")).to_have_count(6)
+    expect(
+        workflow.get_by_role(
+            "link", name="Open object dataset step 1: Configure cameras and select calibration"
+        )
+    ).to_have_attribute("href", "#/workflow/dataset?step=configure")
+
+
+def test_dashboard_requires_matching_verified_annotation_outcome_for_completion(
+    console_server, page
+) -> None:
+    configured = run_config(intent="dataset", annotation_mode="pose_and_masks")
+    overview = overview_payload(configured)
+    next(section for section in overview["sidebar"] if section["id"] == "bop")[
+        "artifacts"
+    ] = [
+        {
+            "path": "bop/bop_export_manifest.json",
+            "exists": True,
+            "status": "complete",
+        }
+    ]
+    annotation_setup = bop_annotation_setup_payload(configured)
+    annotation_setup["current_output"] = {
+        "mode": "pose_and_masks",
+        "state": "complete",
+        "verified": True,
+        "evaluation_ready": False,
+        "annotation_count": 10,
+        "mask_count": 10,
+        "visible_mask_count": 10,
+        "integrity_error": None,
+        "manifest_sha256": "a" * 64,
+        "blenderproc_version": "2.8.0",
+        "toolkit_revision": "renderer-revision",
+    }
+    install_common_mocks(page, config_payload=configured)
+    page.route("**/ui/overview**", lambda route: fulfill_json(route, overview))
+    page.route(
+        "**/bop/annotations/setup?**",
+        lambda route: fulfill_json(route, annotation_setup),
+    )
+
+    page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
+    annotation_step = page.get_by_test_id("dashboard-workflow-overview").locator(
+        '[data-workflow-step="export"]'
+    )
+    expect(annotation_step).to_contain_text("Optional · ready")
+
+    annotation_setup["current_output"].update(
+        {"mode": "pose", "evaluation_ready": True}
+    )
+    page.reload(wait_until="networkidle")
+    expect(annotation_step).to_contain_text("Optional · ready")
+
+    annotation_setup["current_output"].update(
+        {"mode": "pose_and_masks", "evaluation_ready": True}
+    )
+    page.reload(wait_until="networkidle")
+    expect(annotation_step).to_contain_text("Complete")
+
+    configured["bop"]["annotation_mode"] = "retired_mode"
+    annotation_setup["configured_mode"] = "retired_mode"
+    annotation_setup["current_output"].update(
+        {"mode": "retired_mode", "verified": True, "evaluation_ready": True}
+    )
+    page.reload(wait_until="networkidle")
+    expect(annotation_step).to_contain_text("Optional · ready")
+
+    page.goto(
+        f"{console_server.url}/#/workflow/dataset?step=export",
+        wait_until="networkidle",
+    )
+    export_step = page.get_by_role("navigation", name="Workflow steps").get_by_role(
+        "button"
+    ).filter(has_text="Add optional BOP ground-truth evidence")
+    expect(export_step.get_by_text("Ready", exact=True)).to_be_visible()
+    expect(export_step.get_by_text("Complete", exact=True)).to_have_count(0)
 
 
 @pytest.mark.parametrize("viewport", [(1920, 1080), (1440, 900)])
@@ -1923,6 +2108,15 @@ def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
     expect(page.get_by_role("link", name="Cluster storage")).to_have_attribute(
         "href", "#/run-folders"
     )
+    expect(
+        page.get_by_role("link", name="Review required BOP evidence")
+    ).to_have_attribute("href", "#/workflow/dataset?step=export")
+    expect(pose_page).to_contain_text(
+        "verified pose_and_masks BOP export: bop_export_manifest.v5 declares complete BlenderProc annotations with capabilities.bop19_evaluation set to true"
+    )
+    expect(pose_page).to_contain_text(
+        "every scene has matching scene_gt.json and scene_gt_info.json plus complete mask/ and mask_visib/ evidence"
+    )
     expect(pose_page).to_contain_text("1 blocker")
     expect(pose_page).to_contain_text(
         "The pinned FoundationPose runtime has not been qualified."
@@ -1932,6 +2126,14 @@ def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
     expect(
         page.get_by_role("button", name="Submit FoundationPose job")
     ).to_be_disabled()
+    submit_blockers = page.get_by_test_id("pose-estimation-submit-blockers")
+    expect(submit_blockers).to_contain_text(
+        "The pinned FoundationPose runtime has not been qualified."
+    )
+    expect(submit_blockers).to_contain_text(
+        "No qualified server-owned resource profile is available"
+    )
+    expect(submit_blockers).to_contain_text("Enter the operator or submitter")
 
     ready_setup = cluster_pose_setup(ready=True)
     megapose = json.loads(json.dumps(ready_setup["estimator"]))
@@ -1953,17 +2155,40 @@ def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
     )
     ready_setup["estimators"].append(megapose)
     ready_setup["controller"]["estimators"].append(megapose)
+    contradictory_blocker = {
+        "code": "controller_contract_contradiction",
+        "message": "Controller reported ready while retaining a blocker.",
+    }
+    ready_setup["blockers"] = [contradictory_blocker]
     setup.clear()
     setup.update(ready_setup)
+    page.get_by_role("button", name="Refresh evidence").click()
+    expect(pose_page).to_contain_text(
+        "Controller reported ready while retaining a blocker."
+    )
+    expect(pose_page.get_by_text("Ready to submit", exact=True)).to_have_count(0)
+    expect(
+        page.get_by_role("button", name="Submit FoundationPose job")
+    ).to_be_disabled()
+
+    setup["blockers"] = []
     page.get_by_role("button", name="Refresh evidence").click()
     expect(pose_page).to_contain_text("Ready to submit")
     expect(pose_page).to_contain_text("foundationpose-a1b694b8")
     expect(pose_page).to_contain_text("gpu:a100:1")
+    expect(submit_blockers).to_have_count(1)
+    expect(submit_blockers).to_contain_text("Enter the operator or submitter")
+    expect(
+        page.get_by_role("button", name="Submit FoundationPose job")
+    ).to_be_disabled()
     page.get_by_label("Estimator method").click()
     page.get_by_role("option", name="MegaPose · ready").click()
-    expect(page.get_by_role("button", name="Submit MegaPose job")).to_be_visible()
+    submit_button = page.get_by_role("button", name="Submit MegaPose job")
+    expect(submit_button).to_be_disabled()
     page.get_by_label("Operator / submitter").fill("Test Operator")
-    page.get_by_role("button", name="Submit MegaPose job").click()
+    expect(submit_blockers).to_have_count(0)
+    expect(submit_button).to_be_enabled()
+    submit_button.click()
 
     expect(page.get_by_text("MegaPose job accepted")).to_be_visible()
     current = page.get_by_test_id("pose-estimation-current-job")
@@ -2732,6 +2957,76 @@ def test_workflow_step_one_owns_camera_selection_and_ignores_retired_device_draf
     }
 
 
+def test_acquired_run_disables_every_run_setup_control(
+    console_server, page
+) -> None:
+    install_common_mocks(
+        page,
+        config_payload=eye_in_hand_calibration_config(),
+        camera_contract={
+            "mutable": False,
+            "blockers": ["capture_execution_plan.json"],
+        },
+    )
+    page.route(
+        "**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status())
+    )
+
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=configure",
+        wait_until="networkidle",
+    )
+
+    lock = page.get_by_test_id("camera-contract-lock")
+    expect(lock).to_contain_text("Run setup fixed for this acquired run")
+    expect(lock).to_contain_text(
+        "will not replace run_config.json after a capture execution attempt"
+    )
+    expect(lock).to_contain_text("camera identities and aliases")
+    expect(lock).to_contain_text("annotation outcome")
+    expect(lock).to_contain_text("motion speed")
+    expect(lock).to_contain_text("capture_execution_plan.json")
+    expect(page.get_by_test_id("run-camera-selection").first).to_be_disabled()
+    expect(page.get_by_test_id("run-camera-alias").first).to_be_disabled()
+    expect(page.locator("#run-name")).to_be_disabled()
+    expect(page.locator("#resolution")).to_be_disabled()
+    expect(page.locator("#fps")).to_be_disabled()
+    expect(page.locator("#velocity")).to_be_disabled()
+    save = page.get_by_role("button", name="Save setup")
+    expect(save).to_be_disabled()
+    assert "camera-contract-lock-reason" in (
+        save.get_attribute("aria-describedby") or ""
+    ).split()
+
+
+def test_acquired_dataset_run_keeps_step_one_annotation_outcome_read_only(
+    console_server, page
+) -> None:
+    configured = run_config(intent="dataset", annotation_mode="pose_and_masks")
+    install_common_mocks(
+        page,
+        config_payload=configured,
+        camera_contract={
+            "mutable": False,
+            "blockers": ["capture_execution_report.json"],
+        },
+    )
+    page.route(
+        "**/sensors/status", lambda route: fulfill_json(route, selected_sensor_status())
+    )
+
+    page.goto(
+        f"{console_server.url}/#/workflow/dataset?step=configure",
+        wait_until="networkidle",
+    )
+
+    lock = page.get_by_test_id("camera-contract-lock")
+    expect(lock).to_contain_text("annotation outcome")
+    expect(lock).to_contain_text("Start a fresh run")
+    expect(page.locator("#annotation-mode")).to_be_disabled()
+    expect(page.get_by_role("button", name="Save setup")).to_be_disabled()
+
+
 def test_run_config_preflight_blocker_and_fresh_capture_gates(
     console_server, page
 ) -> None:
@@ -2878,7 +3173,7 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
                     },
                 ],
                 "solver": {
-                    "default_pnp_methods": ["IPPE", "ITERATIVE", "SQPNP"],
+                    "default_pnp_methods": ["IPPE", "SQPNP"],
                     "default_extrinsic_methods": ["tsai", "park"],
                     "intrinsics_policy": "compare_factory_opencv",
                     "intrinsics_policies": [],
@@ -3337,7 +3632,7 @@ def test_dataset_processing_is_one_ordered_operator_action(
         "One queued job runs the fixed four-command recipe below"
     )
     expect(processing).to_contain_text(
-        "Ground-truth generation is chosen separately in optional step 6"
+        "optional ground-truth outcome is configured in step 1 and queued separately in step 6"
     )
     expect(processing).to_contain_text(
         "Calibration validation is automatic here; there is no second operator preflight."
@@ -3415,24 +3710,263 @@ def test_dataset_processing_is_one_ordered_operator_action(
     expect(export_outcome).to_contain_text(
         "base export has populated calibrated scenes, models, and object targets"
     )
+    annotation_outcome = export_outcome.get_by_test_id("bop-ground-truth-generation")
+    base_only = annotation_outcome.get_by_test_id("bop-base-only-outcome")
+    expect(base_only).to_contain_text("Base BOP dataset only")
+    expect(base_only).to_contain_text("configured outcome complete")
+    expect(base_only).to_contain_text(
+        "Because this run has been acquired, its setup is now read-only"
+    )
+    expect(base_only.get_by_role("link", name="Review Workflow step 1")).to_have_attribute(
+        "href", "#/workflow/dataset?step=configure"
+    )
+    expect(annotation_outcome.get_by_text("BlenderProc runtime", exact=True)).to_have_count(0)
+    expect(annotation_outcome.get_by_text("Pinned rendering toolkit", exact=True)).to_have_count(0)
+    expect(annotation_outcome.get_by_text("Generation is disabled", exact=True)).to_have_count(0)
+    expect(annotation_outcome.get_by_role("button", name=re.compile(r"^Generate"))).to_have_count(0)
 
 
-def test_robot_controls_are_dashboard_only_fixed_target_and_acknowledged(
+@pytest.mark.parametrize(
+    ("annotation_mode", "configured_label", "action_label", "shows_toolkit"),
+    [
+        ("pose", "Plain pose ground truth", "Generate pose GT", False),
+        (
+            "pose_and_masks",
+            "Pose + object masks and visibility",
+            "Generate pose + masks",
+            True,
+        ),
+    ],
+)
+def test_optional_bop_annotation_step_is_read_only_for_the_configured_mode(
+    console_server,
+    page,
+    annotation_mode: str,
+    configured_label: str,
+    action_label: str,
+    shows_toolkit: bool,
+) -> None:
+    configured = run_config(intent="dataset", annotation_mode=annotation_mode)
+    configured["dataset_mode"] = "pose_template"
+    overview = overview_payload(configured)
+    next(section for section in overview["sidebar"] if section["id"] == "bop")[
+        "artifacts"
+    ] = [
+        {
+            "path": "bop/bop_export_manifest.json",
+            "exists": True,
+            "status": "complete",
+        }
+    ]
+    install_common_mocks(page, config_payload=configured)
+    page.route("**/ui/overview**", lambda route: fulfill_json(route, overview))
+
+    page.goto(
+        f"{console_server.url}/#/workflow/dataset?step=export",
+        wait_until="networkidle",
+    )
+
+    annotation = page.get_by_test_id("bop-ground-truth-generation")
+    configured_mode = annotation.get_by_test_id("bop-configured-annotation-mode")
+    expect(configured_mode).to_contain_text(configured_label)
+    expect(configured_mode).to_contain_text("Configured in Workflow step 1")
+    expect(configured_mode).to_contain_text(
+        "after any capture attempt, a different run-owned outcome requires a fresh run"
+    )
+    expect(annotation.get_by_role("radio")).to_have_count(0)
+    expect(annotation.get_by_role("radiogroup")).to_have_count(0)
+    expect(annotation.get_by_role("button", name=action_label)).to_have_count(1)
+    expect(annotation.get_by_test_id("bop-rendering-toolkit")).to_have_count(
+        1 if shows_toolkit else 0
+    )
+    if annotation_mode == "pose":
+        expect(configured_mode).to_contain_text("not evaluation-ready")
+        expect(configured_mode).to_contain_text(
+            "Without scene_gt_info.json and verified visible-mask evidence"
+        )
+    else:
+        expect(configured_mode).to_contain_text("verification required")
+        expect(configured_mode).not_to_contain_text("evaluation-ready")
+        expect(configured_mode).to_contain_text("scene_gt.json")
+        expect(configured_mode).to_contain_text("scene_gt_info.json")
+        expect(configured_mode).to_contain_text("mask_visib/")
+
+
+def test_bop_annotation_setup_and_mode_readiness_fail_closed(
     console_server, page
 ) -> None:
-    commands: list[dict] = []
+    configured = run_config(intent="dataset", annotation_mode="pose")
+    overview = overview_payload(configured)
+    next(section for section in overview["sidebar"] if section["id"] == "bop")[
+        "artifacts"
+    ] = [
+        {
+            "path": "bop/bop_export_manifest.json",
+            "exists": True,
+            "status": "complete",
+        }
+    ]
+    setup = bop_annotation_setup_payload(configured)
+    setup.pop("configured_mode")
+    install_common_mocks(page, config_payload=configured)
+    page.route("**/ui/overview**", lambda route: fulfill_json(route, overview))
+    page.route(
+        "**/bop/annotations/setup?**", lambda route: fulfill_json(route, setup)
+    )
+
+    page.goto(
+        f"{console_server.url}/#/workflow/dataset?step=export",
+        wait_until="networkidle",
+    )
+
+    annotation = page.get_by_test_id("bop-ground-truth-generation")
+    contract_error = annotation.get_by_test_id("bop-annotation-contract-error")
+    expect(contract_error).to_contain_text("Annotation setup contract is invalid")
+    expect(contract_error).to_contain_text(
+        "No annotation outcome or generation action is assumed"
+    )
+    expect(annotation.get_by_test_id("bop-base-only-outcome")).to_have_count(0)
+    expect(annotation.get_by_role("button", name=re.compile(r"^Generate"))).to_have_count(
+        0
+    )
+
+    setup["configured_mode"] = "pose"
+    setup["readiness_by_mode"].pop("pose")
+    contract_error.get_by_role("button", name="Retry").click()
+    disabled_reasons = annotation.get_by_test_id("bop-annotation-disabled-reasons")
+    expect(disabled_reasons).to_contain_text(
+        "Readiness for the configured pose ground truth outcome was not returned or was malformed"
+    )
+    generate = annotation.get_by_role("button", name="Generate pose GT")
+    expect(generate).to_be_disabled()
+
+    setup["readiness_by_mode"]["pose"] = {
+        "ready": True,
+        "blockers": "not-a-list",
+        "warnings": [],
+    }
+    annotation.get_by_role("button", name="Refresh readiness").click()
+    expect(disabled_reasons).to_contain_text("was not returned or was malformed")
+    expect(generate).to_be_disabled()
+
+
+def test_bop_annotation_evaluation_flags_require_literal_true(
+    console_server, page
+) -> None:
+    configured = run_config(intent="dataset", annotation_mode="pose_and_masks")
+    overview = overview_payload(configured)
+    next(section for section in overview["sidebar"] if section["id"] == "bop")[
+        "artifacts"
+    ] = [
+        {
+            "path": "bop/bop_export_manifest.json",
+            "exists": True,
+            "status": "complete",
+        }
+    ]
+    setup = bop_annotation_setup_payload(configured)
+    setup["current_output"] = {
+        "mode": "pose_and_masks",
+        "state": "complete",
+        "verified": "false",
+        "evaluation_ready": "false",
+        "annotation_count": 10,
+        "mask_count": 10,
+        "visible_mask_count": 10,
+        "integrity_error": None,
+        "manifest_sha256": "a" * 64,
+        "blenderproc_version": "2.8.0",
+        "toolkit_revision": "renderer-revision",
+    }
+    install_common_mocks(page, config_payload=configured)
+    page.route("**/ui/overview**", lambda route: fulfill_json(route, overview))
+    page.route(
+        "**/bop/annotations/setup?**", lambda route: fulfill_json(route, setup)
+    )
+
+    page.goto(
+        f"{console_server.url}/#/workflow/dataset?step=export",
+        wait_until="networkidle",
+    )
+
+    annotation = page.get_by_test_id("bop-ground-truth-generation")
+    configured_mode = annotation.get_by_test_id("bop-configured-annotation-mode")
+    expect(configured_mode.get_by_text("verification required", exact=True)).to_be_visible()
+    expect(annotation.get_by_role("link", name="Inspect BOP metrics")).to_have_count(0)
+
+    setup["current_output"].update({"verified": True, "evaluation_ready": True})
+    annotation.get_by_role("button", name="Refresh readiness").click()
+    expect(configured_mode.get_by_text("evaluation-ready", exact=True)).to_be_visible()
+    expect(annotation.get_by_role("link", name="Inspect BOP metrics")).to_have_attribute(
+        "href", "#/bop-evaluation"
+    )
+
+
+def test_bop_annotation_stale_output_cannot_enable_inspect_handoff(
+    console_server, page
+) -> None:
+    configured = run_config(intent="dataset", annotation_mode="pose")
+    overview = overview_payload(configured)
+    next(section for section in overview["sidebar"] if section["id"] == "bop")[
+        "artifacts"
+    ] = [
+        {
+            "path": "bop/bop_export_manifest.json",
+            "exists": True,
+            "status": "complete",
+        }
+    ]
+    setup = bop_annotation_setup_payload(configured)
+    setup["current_output"] = {
+        "mode": "pose_and_masks",
+        "state": "complete",
+        "verified": True,
+        "evaluation_ready": True,
+        "annotation_count": 10,
+        "mask_count": 10,
+        "visible_mask_count": 10,
+        "integrity_error": None,
+        "manifest_sha256": "a" * 64,
+        "blenderproc_version": "2.8.0",
+        "toolkit_revision": "renderer-revision",
+    }
+    install_common_mocks(page, config_payload=configured)
+    page.route("**/ui/overview**", lambda route: fulfill_json(route, overview))
+    page.route(
+        "**/bop/annotations/setup?**", lambda route: fulfill_json(route, setup)
+    )
+
+    page.goto(
+        f"{console_server.url}/#/workflow/dataset?step=export",
+        wait_until="networkidle",
+    )
+
+    evidence = page.get_by_test_id("bop-annotation-evidence")
+    expect(evidence).to_contain_text("does not match configured mode")
+    expect(evidence).to_contain_text("It is not offered to Inspect")
+    expect(page.get_by_role("link", name="Inspect BOP metrics")).to_have_count(0)
+
+
+def test_dashboard_omits_manual_robot_commands_and_hands_off_to_workflow(
+    console_server, page
+) -> None:
+    robot_requests: list[str] = []
     install_common_mocks(page)
 
-    def command_handler(route) -> None:
-        commands.append(route.request.post_data_json)
-        fulfill_json(
-            route, {"job_id": f"robot-{len(commands)}", "status": "queued"}, status=202
-        )
+    def robot_status_handler(route) -> None:
+        robot_requests.append("status")
+        fulfill_json(route, {"schema_version": "robot_status.v2"})
 
+    def command_handler(route) -> None:
+        robot_requests.append("command")
+        fulfill_json(route, {"job_id": "unexpected", "status": "queued"}, status=202)
+
+    page.route("**/robot/status", robot_status_handler)
     page.route("**/robot/commands", command_handler)
     page.goto(f"{console_server.url}/#/devices", wait_until="networkidle")
     expect(page.get_by_test_id("iiwa-quick-controls")).to_have_count(0)
     expect(page.get_by_role("button", name="Start program")).to_have_count(0)
+    expect(page.get_by_role("button", name="End program")).to_have_count(0)
     expect(page.get_by_label("Robot IP")).to_have_count(0)
     expect(page.get_by_label("Command port")).to_have_count(0)
     expect(
@@ -3440,42 +3974,16 @@ def test_robot_controls_are_dashboard_only_fixed_target_and_acknowledged(
     ).to_be_visible()
 
     page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
-    controls = page.get_by_test_id("iiwa-quick-controls")
-    expect(controls).to_contain_text("172.31.1.147:30300")
-    expect(controls).not_to_contain_text("Stop cannot interrupt active motion")
-    page.get_by_role("button", name="Start program").click()
-    expect(page.get_by_role("dialog")).to_contain_text("172.31.1.147:30300")
-    expect(page.get_by_role("dialog")).to_contain_text(
-        "Manual test request: 0.1 m/s (100 mm/s)"
-    )
-    expect(page.get_by_role("button", name="Queue start")).to_be_disabled()
-    expect(page.get_by_role("dialog").get_by_role("checkbox")).to_have_count(1)
-    page.get_by_test_id("iiwa-start-acknowledgement").click()
-    expect(page.get_by_role("button", name="Queue start")).to_be_enabled()
-    page.get_by_role("button", name="Queue start").click()
-    expect(page.get_by_text("IIWA start queued")).to_be_visible()
-
-    page.get_by_role("button", name="End program").click()
-    expect(page.get_by_role("dialog")).to_contain_text("not a motion stop")
-    expect(page.get_by_role("dialog")).to_contain_text(
-        "requires a manual Sunrise restart"
-    )
-    expect(page.get_by_role("button", name="Queue idle-program exit")).to_be_disabled()
-    expect(page.get_by_role("dialog").get_by_role("checkbox")).to_have_count(1)
-    assert [item["command"] for item in commands] == ["start"]
-    page.get_by_test_id("iiwa-idle-exit-confirmation").click()
-    page.get_by_role("button", name="Queue idle-program exit").click()
-    expect(page.get_by_text("IIWA idle-program exit queued")).to_be_visible()
-
-    assert commands == [
-        {
-            "command": "start",
-            "run_root": RUN_ROOT,
-            "allow_real_robot": True,
-            "allow_cameras": True,
-        },
-        {"command": "stop", "confirm_idle_program_exit": True},
-    ]
+    expect(page.get_by_test_id("iiwa-quick-controls")).to_have_count(0)
+    expect(page.get_by_role("button", name="Start program")).to_have_count(0)
+    expect(page.get_by_role("button", name="End program")).to_have_count(0)
+    expect(page.get_by_text("Manual robot control", exact=True)).to_have_count(0)
+    expect(
+        page.get_by_role(
+            "link", name="Open camera calibration step 4: Record calibration images"
+        )
+    ).to_have_attribute("href", "#/workflow/calibration?step=capture")
+    assert robot_requests == []
 
 
 def test_jobs_log_cancel_and_removed_artifacts_route(console_server, page) -> None:
@@ -3674,7 +4182,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
             },
         ],
         "solver": {
-            "default_pnp_methods": ["IPPE", "ITERATIVE", "SQPNP"],
+            "default_pnp_methods": ["IPPE", "SQPNP"],
             "default_extrinsic_methods": [
                 "tsai",
                 "park",
@@ -4511,7 +5019,7 @@ def calibration_time_alignment_setup(
             },
         ],
         "solver": {
-            "default_pnp_methods": ["IPPE", "ITERATIVE", "SQPNP"],
+            "default_pnp_methods": ["IPPE", "SQPNP"],
             "default_extrinsic_methods": ["shah", "li"],
             "intrinsics_policy": "compare_factory_opencv",
             "intrinsics_policies": [],

@@ -5,7 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
+import posetestbot.pipeline.orchestration as orchestration
 from posetestbot.pipeline.capture_completion import build_capture_completion
 from posetestbot.pipeline.orchestration import (
     capture_job_recipe,
@@ -19,6 +21,7 @@ from posetestbot.pipeline.orchestration import (
 from posetestbot.pipeline.preflight import write_run_preflight_report
 from posetestbot.pipeline.run_config import (
     create_run_config,
+    run_config_sha256,
     sensor_config_from_token,
     write_run_config,
 )
@@ -34,16 +37,13 @@ CALIBRATION_PROFILES = (
     "processed/calibration_inputs/" + "a" * 64 + "/calibration_profiles.json"
 )
 INTRINSIC_PROFILES = (
-    "processed/calibration_inputs/"
-    + "a" * 64
-    + "/intrinsic_calibration_profiles.json"
+    "processed/calibration_inputs/" + "a" * 64 + "/intrinsic_calibration_profiles.json"
 )
+CAPTURE_IMAGE_SIZE = (1280, 720)
 
 
 def _sensor():
-    return sensor_config_from_token(
-        f"realsense_d435:{SENSOR_ID}:static:Cell RealSense"
-    )
+    return sensor_config_from_token(f"realsense_d435:{SENSOR_ID}:static:Cell RealSense")
 
 
 def _write_config(run_root: Path, *, intent: str) -> dict:
@@ -79,8 +79,8 @@ def _write_current_capture_evidence(run_root: Path, config: dict) -> None:
             sensor_root,
             CameraIntrinsics(
                 cam_k=(100.0, 0.0, 4.0, 0.0, 100.0, 4.0, 0.0, 0.0, 1.0),
-                width=8,
-                height=8,
+                width=CAPTURE_IMAGE_SIZE[0],
+                height=CAPTURE_IMAGE_SIZE[1],
                 distortion=(0.0, 0.0, 0.0, 0.0, 0.0),
                 depth_scale_to_mm=1.0,
             ),
@@ -89,8 +89,12 @@ def _write_current_capture_evidence(run_root: Path, config: dict) -> None:
     for index in range(2):
         rgb_path = f"rgb/{index}.png"
         depth_path = f"depth/{index}.png"
-        (sensor_root / rgb_path).write_bytes(b"rgb")
-        (sensor_root / depth_path).write_bytes(b"depth")
+        Image.new("RGB", CAPTURE_IMAGE_SIZE, color=(index, 0, 0)).save(
+            sensor_root / rgb_path
+        )
+        Image.new("I;16", CAPTURE_IMAGE_SIZE, color=index + 1).save(
+            sensor_root / depth_path
+        )
         records.append(
             {
                 "schema_version": "frame_metadata.v1",
@@ -131,6 +135,21 @@ def _write_current_capture_evidence(run_root: Path, config: dict) -> None:
                         "sequence_delta": 0,
                         "estimated_packets_lost": 0,
                     },
+                    "stream_end_source_packet": {
+                        "schema_version": "robot_pose.v1",
+                        "packet_kind": "end",
+                        "sequence": 1,
+                        "sender_monotonic_ns": 2,
+                        "sender_wall_timestamp_ms": 2,
+                        "run_id": config["run_id"],
+                        "from_frame": "robot_flange",
+                        "to_frame": "template_base",
+                        "sunrise_reference_frame_path": (
+                            "/PoseTestBot/PoseTemplateBase"
+                        ),
+                        "sequence_delta": 1,
+                        "estimated_packets_lost": 0,
+                    },
                 }
             }
         )
@@ -152,6 +171,47 @@ def _completed_processes() -> list[dict]:
             "ended_at": "2026-08-18T10:00:59+00:00",
         },
     ]
+
+
+def _write_successful_capture_report(run_root: Path, config: dict) -> None:
+    completion = build_capture_completion(run_root, config, _completed_processes())
+    assert completion["status"] == "ok"
+    execution_id = "1" * 32
+    archive_relative = f"capture_execution_logs/{execution_id}"
+    config_digest = run_config_sha256(config)
+    plan = {
+        "schema_version": "capture_execution_plan.v2",
+        "execution_id": execution_id,
+        "execution_archive": archive_relative,
+        "run_config_sha256": config_digest,
+        "preflight_report": {"config": config},
+    }
+    report = {
+        "schema_version": "capture_execution_report.v2",
+        "execution_id": execution_id,
+        "execution_archive": archive_relative,
+        "run_config_sha256": config_digest,
+        "status": "succeeded",
+        "capture_execution_plan": plan,
+        "processes": _completed_processes(),
+        "completion": completion,
+    }
+    status = {
+        "schema_version": "capture_execution_status.v2",
+        "execution_id": execution_id,
+        "execution_archive": archive_relative,
+        "run_config_sha256": config_digest,
+        "status": "succeeded",
+    }
+    archive_root = run_root / archive_relative
+    archive_root.mkdir(parents=True)
+    for filename, value in (
+        ("capture_execution_plan.json", plan),
+        ("capture_execution_report.json", report),
+        ("capture_execution_status.json", status),
+    ):
+        (archive_root / filename).write_text(json.dumps(value))
+        (run_root / filename).write_text(json.dumps(value))
 
 
 def test_plan_and_job_recipes_are_fixed_and_purpose_scoped(tmp_path: Path) -> None:
@@ -212,6 +272,7 @@ def test_plan_and_job_recipes_are_fixed_and_purpose_scoped(tmp_path: Path) -> No
 
 def test_capture_rechecks_camera_before_writing_capture_artifacts(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run_root = tmp_path / "blocked-before-plan"
     config = _write_config(run_root, intent="calibration")
@@ -221,6 +282,13 @@ def test_capture_rechecks_camera_before_writing_capture_artifacts(
             "schema_version": "run_preflight.v2",
             "overall_status": "ok",
             "config": config,
+            "checks": [
+                {
+                    "name": "saved_ok",
+                    "status": "ok",
+                    "message": "Saved preflight passed.",
+                }
+            ],
             "selected_sensor_readiness": {
                 "schema_version": "selected_sensor_readiness.v1",
                 "selected_count": 1,
@@ -242,6 +310,11 @@ def test_capture_rechecks_camera_before_writing_capture_artifacts(
                 ],
             },
         },
+    )
+    monkeypatch.setattr(
+        orchestration,
+        "current_intent_preflight_checks",
+        lambda _root, _config: [],
     )
     blocked_readiness = {
         "schema_version": "selected_sensor_readiness.v1",
@@ -275,6 +348,167 @@ def test_capture_rechecks_camera_before_writing_capture_artifacts(
     assert not (run_root / f"realsense_{SENSOR_ID}").exists()
 
 
+def test_capture_refreshes_current_intent_evidence_before_camera_probe(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "stale-static-preflight"
+    config = _write_config(run_root, intent="calibration")
+    readiness = {
+        "schema_version": "selected_sensor_readiness.v1",
+        "selected_count": 1,
+        "ready_count": 1,
+        "all_ready": True,
+        "probe_contract": {
+            "record": False,
+            "frames_per_camera": 1,
+            "timeout_s_per_camera": 15.0,
+        },
+        "probes": [
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": SENSOR_ID,
+                "capture_ready": True,
+                "status": "ready",
+                "recorded_output": False,
+            }
+        ],
+    }
+    write_run_preflight_report(
+        run_root,
+        {
+            "schema_version": "run_preflight.v2",
+            "overall_status": "ok",
+            "config": config,
+            "checks": [
+                {
+                    "name": "saved_ok",
+                    "status": "ok",
+                    "message": "Saved preflight passed before its target changed.",
+                }
+            ],
+            "selected_sensor_readiness": readiness,
+        },
+    )
+
+    def forbidden_probe(_config):
+        raise AssertionError("static evidence must be refreshed before camera access")
+
+    with pytest.raises(ValueError, match="selected immutable target"):
+        execute_capture(
+            run_root,
+            intent="calibration",
+            allow_cameras=True,
+            allow_real_robot=True,
+            probe_selected_sensors=forbidden_probe,
+        )
+
+    assert not (run_root / "capture_plan.json").exists()
+    assert not (run_root / "capture_execution_plan.json").exists()
+
+
+def test_capture_reuses_one_adjacent_sensor_status_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root = tmp_path / "status-snapshot"
+    config = _write_config(run_root, intent="calibration")
+    readiness = {
+        "schema_version": "selected_sensor_readiness.v1",
+        "selected_count": 1,
+        "ready_count": 1,
+        "all_ready": True,
+        "probe_contract": {
+            "record": False,
+            "frames_per_camera": 1,
+            "timeout_s_per_camera": 15.0,
+        },
+        "probes": [
+            {
+                "sensor_type": "realsense_d435",
+                "device_id": SENSOR_ID,
+                "capture_ready": True,
+                "status": "ready",
+                "recorded_output": False,
+            }
+        ],
+    }
+    write_run_preflight_report(
+        run_root,
+        {
+            "schema_version": "run_preflight.v2",
+            "overall_status": "ok",
+            "config": config,
+            "checks": [
+                {
+                    "name": "saved_ok",
+                    "status": "ok",
+                    "message": "Saved preflight passed.",
+                }
+            ],
+            "selected_sensor_readiness": readiness,
+        },
+    )
+    sensor_status = {"schema_version": "sensor_status.v1", "families": []}
+    discovery_calls = 0
+
+    def collect_once() -> dict:
+        nonlocal discovery_calls
+        discovery_calls += 1
+        return sensor_status
+
+    def assert_cached(kwargs: dict) -> None:
+        assert kwargs["collect_sensors"]() is sensor_status
+
+    monkeypatch.setattr(
+        orchestration,
+        "plan_capture",
+        lambda root: (root / "capture_plan.json", {}),
+    )
+    monkeypatch.setattr(
+        orchestration,
+        "current_intent_preflight_checks",
+        lambda _root, _config: [],
+    )
+
+    def write_preflight(root, **kwargs):
+        assert_cached(kwargs)
+        assert kwargs["selected_sensor_readiness"] is readiness
+        return root / "capture_plan_preflight_report.json", {"overall_status": "ok"}
+
+    def write_execution_plan(root, **kwargs):
+        assert_cached(kwargs)
+        return root / "capture_execution_plan.json", {"ready_to_execute": True}
+
+    def run_execution(root, **kwargs):
+        assert_cached(kwargs)
+        return root / "capture_execution_report.json", {"status": "succeeded"}
+
+    monkeypatch.setattr(
+        orchestration,
+        "write_capture_plan_preflight_with_manifest",
+        write_preflight,
+    )
+    monkeypatch.setattr(
+        orchestration,
+        "write_capture_execution_plan_with_manifest",
+        write_execution_plan,
+    )
+    monkeypatch.setattr(orchestration, "run_capture_execution", run_execution)
+
+    report_path, report = execute_capture(
+        run_root,
+        intent="calibration",
+        allow_cameras=True,
+        allow_real_robot=True,
+        probe_selected_sensors=lambda _config: readiness,
+        collect_sensors=collect_once,
+    )
+
+    assert discovery_calls == 1
+    assert report_path == run_root / "capture_execution_report.json"
+    assert report["status"] == "succeeded"
+
+
 def test_capture_completion_requires_only_current_raw_contracts(tmp_path: Path) -> None:
     run_root = tmp_path / "capture"
     config = _write_config(run_root, intent="calibration")
@@ -295,10 +529,19 @@ def test_capture_completion_requires_only_current_raw_contracts(tmp_path: Path) 
         check for check in report["checks"] if check["name"].startswith("sensor:")
     )
 
+    assert report["status"] == "ok"
+    assert sensor_check["details"]["sensor_timestamp_count"] == len(records) - 1
+    assert sensor_check["details"]["sensor_timestamp_missing_count"] == 1
+
+    records[0]["sensor_timestamp_ns"] = -1
+    metadata_path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    report = build_capture_completion(run_root, config, _completed_processes())
+    sensor_check = next(
+        check for check in report["checks"] if check["name"].startswith("sensor:")
+    )
+
     assert report["status"] == "error"
-    assert "requires positive sensor_timestamp_ns" in sensor_check["details"][
-        "metadata_error"
-    ]
+    assert "null or a positive integer" in sensor_check["details"]["metadata_error"]
 
     _write_current_capture_evidence(run_root, config)
     poses = json.loads((run_root / "raw_robot_ee_poses.json").read_text())
@@ -310,6 +553,29 @@ def test_capture_completion_requires_only_current_raw_contracts(tmp_path: Path) 
     )
     assert report["status"] == "error"
     assert "must use robot_pose.v1" in pose_check["details"]["error"]
+
+    _write_current_capture_evidence(run_root, config)
+    poses = json.loads((run_root / "raw_robot_ee_poses.json").read_text())
+    poses["0"]["stream_end_source_packet"]["sequence"] = 3
+    poses["0"]["stream_end_source_packet"]["sequence_delta"] = 3
+    poses["0"]["stream_end_source_packet"]["estimated_packets_lost"] = 2
+    (run_root / "raw_robot_ee_poses.json").write_text(json.dumps(poses))
+    report = build_capture_completion(run_root, config, _completed_processes())
+    pose_check = next(
+        check for check in report["checks"] if check["name"] == "robot_pose_stream"
+    )
+    assert report["status"] == "ok"
+    assert pose_check["details"]["robot_pose_packet_loss_count"] == 2
+    assert pose_check["details"]["terminal_packet_loss_audited"] is True
+
+    del poses["0"]["stream_end_source_packet"]
+    (run_root / "raw_robot_ee_poses.json").write_text(json.dumps(poses))
+    report = build_capture_completion(run_root, config, _completed_processes())
+    pose_check = next(
+        check for check in report["checks"] if check["name"] == "robot_pose_stream"
+    )
+    assert report["status"] == "error"
+    assert "missing stream-end" in pose_check["details"]["error"]
 
 
 def test_capture_completion_rejects_mismatched_paths_and_child_count(
@@ -357,15 +623,194 @@ def test_capture_completion_rejects_mismatched_paths_and_child_count(
     assert sensor_check["details"]["sidecars_ok"] is False
 
 
+@pytest.mark.parametrize(
+    "contradiction",
+    (
+        "configured_pixels",
+        "sidecar_dimensions",
+        "sidecar_intrinsics",
+        "sidecar_distortion",
+    ),
+)
+def test_capture_completion_rejects_config_pixel_and_sidecar_contradictions(
+    tmp_path: Path,
+    contradiction: str,
+) -> None:
+    run_root = tmp_path / contradiction
+    config = _write_config(run_root, intent="calibration")
+    _write_current_capture_evidence(run_root, config)
+    sensor_root = run_root / "realsense_123"
+
+    if contradiction == "configured_pixels":
+        for index in range(2):
+            Image.new("RGB", (64, 48), color=(index, 0, 0)).save(
+                sensor_root / "rgb" / f"{index}.png"
+            )
+            Image.new("I;16", (64, 48), color=index + 1).save(
+                sensor_root / "depth" / f"{index}.png"
+            )
+    elif contradiction == "sidecar_dimensions":
+        camera_data_path = sensor_root / "camera_data.json"
+        camera_data = json.loads(camera_data_path.read_text())
+        camera_data["resolution"] = [48, 64]
+        camera_data_path.write_text(json.dumps(camera_data))
+    elif contradiction == "sidecar_intrinsics":
+        camera_path = sensor_root / "camera.json"
+        camera = json.loads(camera_path.read_text())
+        camera["cam_K"][0] += 1.0
+        camera_path.write_text(json.dumps(camera))
+    else:
+        camera_data_path = sensor_root / "camera_data.json"
+        camera_data = json.loads(camera_data_path.read_text())
+        camera_data["distortion"][0] += 0.25
+        camera_data_path.write_text(json.dumps(camera_data))
+
+    report = build_capture_completion(run_root, config, _completed_processes())
+    sensor_check = next(
+        check for check in report["checks"] if check["name"].startswith("sensor:")
+    )
+
+    assert report["status"] == "error"
+    if contradiction == "configured_pixels":
+        assert sensor_check["details"]["configured_dimensions_ok"] is False
+        assert sensor_check["details"]["sidecar_dimensions_match_pixels"] is False
+    elif contradiction == "sidecar_dimensions":
+        assert sensor_check["details"]["sidecar_dimensions_match_config"] is False
+        assert sensor_check["details"]["sidecar_dimensions_match_pixels"] is False
+    elif contradiction == "sidecar_intrinsics":
+        assert (
+            "intrinsics disagree" in sensor_check["details"]["sidecar_validation_error"]
+        )
+    else:
+        assert (
+            "distortion evidence disagrees"
+            in sensor_check["details"]["sidecar_validation_error"]
+        )
+
+
+def test_capture_completion_accepts_current_extended_sdk_distortion(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "extended-distortion"
+    config = _write_config(run_root, intent="calibration")
+    _write_current_capture_evidence(run_root, config)
+    sensor_root = run_root / "realsense_123"
+    distortion = [float(index) / 100.0 for index in range(14)]
+    for filename in ("camera.json", "camera_data.json"):
+        path = sensor_root / filename
+        value = json.loads(path.read_text())
+        value["distortion"] = distortion
+        path.write_text(json.dumps(value))
+    cam_k_path = sensor_root / "cam_K.txt"
+    cam_k_path.write_text("\n".join(cam_k_path.read_text().splitlines()[:3]) + "\n")
+
+    report = build_capture_completion(run_root, config, _completed_processes())
+
+    assert report["status"] == "ok"
+
+
+@pytest.mark.parametrize(
+    ("cam_k", "error"),
+    (
+        ([0.0] * 9, "focal lengths must be positive"),
+        (
+            [100.0, 0.0, 50.0, 0.0, 101.0, 51.0, 0.0, 1.0, 0.0],
+            "bottom row must be [0, 0, 1]",
+        ),
+    ),
+)
+def test_capture_completion_rejects_consistently_invalid_intrinsics(
+    tmp_path: Path,
+    cam_k: list[float],
+    error: str,
+) -> None:
+    run_root = tmp_path / "invalid-consistent-intrinsics"
+    config = _write_config(run_root, intent="calibration")
+    _write_current_capture_evidence(run_root, config)
+    sensor_root = run_root / "realsense_123"
+
+    camera_path = sensor_root / "camera.json"
+    camera = json.loads(camera_path.read_text())
+    camera["cam_K"] = cam_k
+    camera_path.write_text(json.dumps(camera))
+    camera_data_path = sensor_root / "camera_data.json"
+    camera_data = json.loads(camera_data_path.read_text())
+    camera_data["K"] = [cam_k[0:3], cam_k[3:6], cam_k[6:9]]
+    camera_data_path.write_text(json.dumps(camera_data))
+    (sensor_root / "cam_K.txt").write_text(
+        "".join(
+            " ".join(str(value) for value in row) + "\n"
+            for row in camera_data["K"]
+        )
+    )
+
+    report = build_capture_completion(run_root, config, _completed_processes())
+    sensor_check = next(
+        check for check in report["checks"] if check["name"].startswith("sensor:")
+    )
+
+    assert report["status"] == "error"
+    assert error in sensor_check["details"]["sidecar_validation_error"]
+
+
+@pytest.mark.parametrize("symlinked_artifact", ("sensor_root", "rgb_root", "poses"))
+def test_capture_completion_rejects_symlinked_raw_evidence(
+    tmp_path: Path,
+    symlinked_artifact: str,
+) -> None:
+    run_root = tmp_path / f"symlinked-{symlinked_artifact}"
+    config = _write_config(run_root, intent="calibration")
+    _write_current_capture_evidence(run_root, config)
+    sensor_root = run_root / "realsense_123"
+
+    if symlinked_artifact == "sensor_root":
+        external = tmp_path / "external-sensor-root"
+        sensor_root.rename(external)
+        sensor_root.symlink_to(external, target_is_directory=True)
+    elif symlinked_artifact == "rgb_root":
+        rgb_root = sensor_root / "rgb"
+        external = tmp_path / "external-rgb-root"
+        rgb_root.rename(external)
+        rgb_root.symlink_to(external, target_is_directory=True)
+    else:
+        pose_path = run_root / "raw_robot_ee_poses.json"
+        external = tmp_path / "external-robot-poses.json"
+        pose_path.rename(external)
+        pose_path.symlink_to(external)
+
+    report = build_capture_completion(run_root, config, _completed_processes())
+
+    assert report["status"] == "error"
+    if symlinked_artifact == "poses":
+        pose_check = next(
+            check for check in report["checks"] if check["name"] == "robot_pose_stream"
+        )
+        assert "not a regular file" in pose_check["details"]["error"]
+    else:
+        sensor_check = next(
+            check for check in report["checks"] if check["name"].startswith("sensor:")
+        )
+        field = (
+            "sensor_output_directory_ok"
+            if symlinked_artifact == "sensor_root"
+            else "image_directories_ok"
+        )
+        assert sensor_check["details"][field] is False
+
+
 def test_dataset_processing_is_exactly_four_fail_fast_commands(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run_root = tmp_path / "dataset"
-    _write_config(run_root, intent="dataset")
+    config = _write_config(run_root, intent="dataset")
+    _write_current_capture_evidence(run_root, config)
+    _write_successful_capture_report(run_root, config)
     monkeypatch.setattr(
         "posetestbot.pipeline.orchestration.verify_calibration_profile_selection",
-        lambda *_args, **_kwargs: {"schema_version": "calibration_profile_selection.v2"},
+        lambda *_args, **_kwargs: {
+            "schema_version": "calibration_profile_selection.v2"
+        },
     )
 
     commands = dataset_processing_commands(run_root)
@@ -436,6 +881,185 @@ def test_dataset_processing_is_exactly_four_fail_fast_commands(
     assert calls == list(commands[:2])
 
 
+def test_dataset_processing_job_recipe_defers_exhaustive_capture_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "dataset-queued-completion-scan"
+    config = _write_config(run_root, intent="dataset")
+    _write_current_capture_evidence(run_root, config)
+    _write_successful_capture_report(run_root, config)
+    monkeypatch.setattr(
+        "posetestbot.pipeline.orchestration.verify_calibration_profile_selection",
+        lambda *_args, **_kwargs: {
+            "schema_version": "calibration_profile_selection.v2"
+        },
+    )
+    original_completion = orchestration.build_capture_completion
+    calls = 0
+
+    def count_completion_scan(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_completion(*args, **kwargs)
+
+    monkeypatch.setattr(
+        orchestration,
+        "build_capture_completion",
+        count_completion_scan,
+    )
+
+    dataset_processing_job_recipe(run_root)
+    assert calls == 0
+
+    dataset_processing_commands(run_root)
+    assert calls == 1
+
+
+def test_dataset_processing_requires_current_successful_capture_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "dataset-capture-gate"
+    config = _write_config(run_root, intent="dataset")
+    monkeypatch.setattr(
+        "posetestbot.pipeline.orchestration.verify_calibration_profile_selection",
+        lambda *_args, **_kwargs: {
+            "schema_version": "calibration_profile_selection.v2"
+        },
+    )
+
+    with pytest.raises(ValueError, match="successful supervised capture report"):
+        dataset_processing_commands(run_root)
+
+    _write_current_capture_evidence(run_root, config)
+    _write_successful_capture_report(run_root, config)
+    dataset_processing_commands(run_root)
+
+    metadata_path = run_root / "realsense_123" / "frame_metadata.jsonl"
+    records = metadata_path.read_text().splitlines()
+    metadata_path.write_text("\n".join(records[:-1]) + "\n")
+    with pytest.raises(ValueError, match="no longer passes completion validation"):
+        dataset_processing_commands(run_root)
+
+
+def test_dataset_processing_rejects_run_config_changed_after_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "dataset-config-binding"
+    config = _write_config(run_root, intent="dataset")
+    _write_current_capture_evidence(run_root, config)
+    _write_successful_capture_report(run_root, config)
+    monkeypatch.setattr(
+        "posetestbot.pipeline.orchestration.verify_calibration_profile_selection",
+        lambda *_args, **_kwargs: {
+            "schema_version": "calibration_profile_selection.v2"
+        },
+    )
+    changed = json.loads((run_root / "run_config.json").read_text())
+    changed["run_name"] = "changed after capture"
+    (run_root / "run_config.json").write_text(json.dumps(changed))
+
+    with pytest.raises(ValueError, match="bound to the exact current run_config"):
+        dataset_processing_commands(run_root)
+
+
+def test_dataset_processing_rechecks_config_after_completion_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "dataset-config-mutated-during-validation"
+    config = _write_config(run_root, intent="dataset")
+    _write_current_capture_evidence(run_root, config)
+    _write_successful_capture_report(run_root, config)
+    monkeypatch.setattr(
+        "posetestbot.pipeline.orchestration.verify_calibration_profile_selection",
+        lambda *_args, **_kwargs: {
+            "schema_version": "calibration_profile_selection.v2"
+        },
+    )
+    original_completion = orchestration.build_capture_completion
+
+    def mutate_after_completion(*args, **kwargs):
+        completion = original_completion(*args, **kwargs)
+        changed = json.loads((run_root / "run_config.json").read_text())
+        changed["run_name"] = "changed during capture verification"
+        (run_root / "run_config.json").write_text(json.dumps(changed))
+        return completion
+
+    monkeypatch.setattr(
+        orchestration,
+        "build_capture_completion",
+        mutate_after_completion,
+    )
+
+    with pytest.raises(ValueError, match="changed while successful capture evidence"):
+        dataset_processing_commands(run_root)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "capture_execution_plan.json",
+        "capture_execution_status.json",
+        "capture_execution_report.json",
+    ],
+)
+def test_dataset_processing_rejects_tampered_capture_execution_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+) -> None:
+    run_root = tmp_path / f"dataset-archive-{filename}"
+    config = _write_config(run_root, intent="dataset")
+    _write_current_capture_evidence(run_root, config)
+    _write_successful_capture_report(run_root, config)
+    monkeypatch.setattr(
+        "posetestbot.pipeline.orchestration.verify_calibration_profile_selection",
+        lambda *_args, **_kwargs: {
+            "schema_version": "calibration_profile_selection.v2"
+        },
+    )
+    archive_path = run_root / "capture_execution_logs" / ("1" * 32) / filename
+    value = json.loads(archive_path.read_text())
+    value["tampered"] = True
+    archive_path.write_text(json.dumps(value))
+
+    with pytest.raises(ValueError, match="archive"):
+        dataset_processing_commands(run_root)
+
+
+def test_dataset_processing_rejects_status_redirect_even_when_current_matches_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "dataset-status-archive-redirect"
+    config = _write_config(run_root, intent="dataset")
+    _write_current_capture_evidence(run_root, config)
+    _write_successful_capture_report(run_root, config)
+    monkeypatch.setattr(
+        "posetestbot.pipeline.orchestration.verify_calibration_profile_selection",
+        lambda *_args, **_kwargs: {
+            "schema_version": "calibration_profile_selection.v2"
+        },
+    )
+    current_status = run_root / "capture_execution_status.json"
+    archived_status = (
+        run_root
+        / "capture_execution_logs"
+        / ("1" * 32)
+        / "capture_execution_status.json"
+    )
+    status = json.loads(current_status.read_text())
+    status["execution_archive"] = "capture_execution_logs/" + ("2" * 32)
+    current_status.write_text(json.dumps(status))
+    archived_status.write_text(json.dumps(status))
+
+    with pytest.raises(ValueError, match="invalid final status evidence"):
+        dataset_processing_commands(run_root)
+
+
 class _FakeRunner:
     def __init__(self) -> None:
         self.submissions: list[dict] = []
@@ -466,7 +1090,9 @@ def test_purpose_specific_apis_reject_extra_fields_and_queue_exact_recipes(
     calibration_root = tmp_path / "calibration"
     dataset_root = tmp_path / "dataset"
     _write_config(calibration_root, intent="calibration")
-    _write_config(dataset_root, intent="dataset")
+    dataset_config = _write_config(dataset_root, intent="dataset")
+    _write_current_capture_evidence(dataset_root, dataset_config)
+    _write_successful_capture_report(dataset_root, dataset_config)
     runner = _FakeRunner()
     monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", tmp_path.as_posix())
     monkeypatch.setattr(route_support, "job_runner", runner)
@@ -480,7 +1106,9 @@ def test_purpose_specific_apis_reject_extra_fields_and_queue_exact_recipes(
     )
     monkeypatch.setattr(
         "posetestbot.pipeline.orchestration.verify_calibration_profile_selection",
-        lambda *_args, **_kwargs: {"schema_version": "calibration_profile_selection.v2"},
+        lambda *_args, **_kwargs: {
+            "schema_version": "calibration_profile_selection.v2"
+        },
     )
     client = create_app().test_client()
 
@@ -506,21 +1134,30 @@ def test_purpose_specific_apis_reject_extra_fields_and_queue_exact_recipes(
         assert "Unsupported fields" in response.get_json()["output"]
     assert runner.submissions == []
 
-    assert client.post(
-        "/preflight/jobs", json={"run_root": calibration_root.as_posix()}
-    ).status_code == 202
-    assert client.post(
-        "/capture/jobs",
-        json={
-            "run_root": calibration_root.as_posix(),
-            "intent": "calibration",
-            "allow_cameras": True,
-            "allow_real_robot": True,
-        },
-    ).status_code == 202
-    assert client.post(
-        "/dataset-processing/jobs", json={"run_root": dataset_root.as_posix()}
-    ).status_code == 202
+    assert (
+        client.post(
+            "/preflight/jobs", json={"run_root": calibration_root.as_posix()}
+        ).status_code
+        == 202
+    )
+    assert (
+        client.post(
+            "/capture/jobs",
+            json={
+                "run_root": calibration_root.as_posix(),
+                "intent": "calibration",
+                "allow_cameras": True,
+                "allow_real_robot": True,
+            },
+        ).status_code
+        == 202
+    )
+    assert (
+        client.post(
+            "/dataset-processing/jobs", json={"run_root": dataset_root.as_posix()}
+        ).status_code
+        == 202
+    )
 
     target_override = client.post(
         "/robot/commands",
@@ -534,19 +1171,25 @@ def test_purpose_specific_apis_reject_extra_fields_and_queue_exact_recipes(
     )
     assert target_override.status_code == 400
     assert "robot_ip" in target_override.get_json()["output"]
-    assert client.post(
-        "/robot/commands",
-        json={
-            "command": "start",
-            "run_root": calibration_root.as_posix(),
-            "allow_cameras": True,
-            "allow_real_robot": True,
-        },
-    ).status_code == 202
-    assert client.post(
-        "/robot/commands",
-        json={"command": "stop", "confirm_idle_program_exit": True},
-    ).status_code == 202
+    assert (
+        client.post(
+            "/robot/commands",
+            json={
+                "command": "start",
+                "run_root": calibration_root.as_posix(),
+                "allow_cameras": True,
+                "allow_real_robot": True,
+            },
+        ).status_code
+        == 202
+    )
+    assert (
+        client.post(
+            "/robot/commands",
+            json={"command": "stop", "confirm_idle_program_exit": True},
+        ).status_code
+        == 202
+    )
 
     assert [item["parameters"]["purpose"] for item in runner.submissions] == [
         "preflight",

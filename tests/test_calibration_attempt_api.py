@@ -276,7 +276,6 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
     assert payload["solver"]["default_policy"] == "auto_compare"
     assert payload["solver"]["default_pnp_methods"] == [
         "IPPE",
-        "ITERATIVE",
         "SQPNP",
     ]
     assert payload["solver"]["intrinsics_policy"] == ("compare_factory_opencv")
@@ -361,6 +360,8 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
         "warning_nearest_pose_delta_ms": 20.0,
         "max_mean_translation_mm": 10.0,
         "max_mean_rotation_deg": 5.0,
+        "hard_max_mean_translation_mm": 20.0,
+        "hard_max_mean_rotation_deg": 10.0,
         "max_outlier_ratio": 0.25,
         "warning_pairwise_companion_translation_mm": 10.0,
         "warning_pairwise_companion_rotation_deg": 5.0,
@@ -991,6 +992,76 @@ def test_parent_queue_conflict_is_recorded_on_the_immutable_attempt(
     ).get_json()
     assert attempt["progress"]["status"] == "failed"
     assert attempt["progress"]["failure_stage"] == "job_submission"
+
+
+@pytest.mark.parametrize("failure_boundary", ["submit", "job_binding"])
+def test_promotion_submission_failures_leave_terminal_evidence_and_cancel_bound_job(
+    calibration_client,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_boundary: str,
+) -> None:
+    client, _runner, run_root, _bundle, _library = calibration_client
+    attempt_id = "a" * 32
+    attempt_root = run_root / "processed" / "calibration" / attempt_id
+    attempt_root.mkdir(parents=True)
+
+    def create_approval(*_args, **_kwargs):
+        (attempt_root / attempt_module.PROMOTION_FILE).write_text(
+            json.dumps(
+                {
+                    "schema_version": attempt_module.PROMOTION_SCHEMA_VERSION,
+                    "attempt_id": attempt_id,
+                    "status": "approved",
+                    "selections": {"realsense_d435:1": "candidate"},
+                }
+            )
+        )
+        return {"selections": {"realsense_d435:1": "candidate"}}
+
+    class BoundaryRunner:
+        canceled: list[str] = []
+
+        def submit(self, **_kwargs):
+            if failure_boundary == "submit":
+                raise RuntimeError("injected runner submission failure")
+            return FakeJob(id="promotionjob")
+
+        def cancel(self, job_id: str):
+            self.canceled.append(job_id)
+            return FakeJob(id=job_id, status="canceled")
+
+    runner = BoundaryRunner()
+    monkeypatch.setattr(routes, "job_runner", runner)
+    monkeypatch.setattr(
+        routes,
+        "load_calibration_attempt",
+        lambda *_args, **_kwargs: {"promotion": None},
+    )
+    monkeypatch.setattr(routes, "create_promotion_request", create_approval)
+    if failure_boundary == "job_binding":
+        monkeypatch.setattr(
+            routes,
+            "record_attempt_job",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("injected durable binding failure")
+            ),
+        )
+
+    response = client.post(
+        f"/calibration/attempts/{attempt_id}/promote",
+        json={"run_root": run_root.as_posix()},
+    )
+
+    assert response.status_code == 400
+    promotion = json.loads((attempt_root / attempt_module.PROMOTION_FILE).read_text())
+    assert promotion["status"] == "failed"
+    assert promotion["failure_stage"] == "job_submission"
+    if failure_boundary == "submit":
+        assert "injected runner submission failure" in response.get_json()["output"]
+        assert runner.canceled == []
+    else:
+        assert "Promotion job binding failed" in response.get_json()["output"]
+        assert runner.canceled == ["promotionjob"]
 
 
 def test_camera_discovery_rejects_escaped_folders_and_all_duplicate_identities(

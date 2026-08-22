@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from posetestbot.pipeline.preflight import (
     _calibration_arrangement_check,
     build_run_preflight,
@@ -202,6 +204,13 @@ def test_preflight_queue_summary_rejects_missing_failed_and_stale_evidence(
         "schema_version": "run_preflight.v2",
         "overall_status": "error",
         "config": config,
+        "checks": [
+            {
+                "name": "saved_failure",
+                "status": "error",
+                "message": "Saved preflight failed.",
+            }
+        ],
     }
     write_run_preflight_report(run_root, failed)
     assert (
@@ -213,6 +222,13 @@ def test_preflight_queue_summary_rejects_missing_failed_and_stale_evidence(
         "schema_version": "run_preflight.v2",
         "overall_status": "warning",
         "config": config,
+        "checks": [
+            {
+                "name": "saved_warning",
+                "status": "warning",
+                "message": "Saved preflight has a quality warning.",
+            }
+        ],
         "selected_sensor_readiness": {
             "schema_version": "selected_sensor_readiness.v1",
             "selected_count": 1,
@@ -254,9 +270,94 @@ def test_preflight_queue_summary_rejects_missing_failed_and_stale_evidence(
         "schema_version": "run_preflight.v2",
         "overall_status": "ok",
         "config": config,
+        "checks": [
+            {
+                "name": "saved_ok",
+                "status": "ok",
+                "message": "Saved preflight passed.",
+            }
+        ],
     }
     write_run_preflight_report(run_root, missing_active_probe)
     assert (
         run_preflight_queue_summary(run_root, config)["queue_blocker"]
         == "invalid_preflight"
     )
+
+
+@pytest.mark.parametrize("overall_status", [None, "bogus", {}, 1, True])
+def test_preflight_queue_summary_rejects_unknown_status_shape(
+    tmp_path: Path,
+    overall_status,
+) -> None:
+    run_root = tmp_path / "invalid-status"
+    config = _write_config(run_root, intent="dataset")
+    write_run_preflight_report(
+        run_root,
+        {
+            "schema_version": "run_preflight.v2",
+            "overall_status": overall_status,
+            "config": config,
+            "checks": [
+                {
+                    "name": "saved_ok",
+                    "status": "ok",
+                    "message": "Saved preflight passed.",
+                }
+            ],
+            "selected_sensor_readiness": {
+                "schema_version": "selected_sensor_readiness.v1",
+                "selected_count": 1,
+                "ready_count": 1,
+                "all_ready": True,
+                "probe_contract": {
+                    "record": False,
+                    "frames_per_camera": 1,
+                    "timeout_s_per_camera": 15.0,
+                },
+                "probes": [
+                    {
+                        "sensor_type": "realsense_d435",
+                        "device_id": "123",
+                        "capture_ready": True,
+                        "status": "ready",
+                        "recorded_output": False,
+                    }
+                ],
+            },
+        },
+    )
+
+    summary = run_preflight_queue_summary(run_root, config)
+
+    assert summary["ready_for_queue"] is False
+    assert summary["queue_blocker"] == "invalid_preflight"
+    assert "overall_status must be one of" in summary["error"]
+
+
+def test_preflight_queue_summary_rejects_status_inconsistent_with_checks(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "inconsistent-status"
+    config = _write_config(run_root, intent="dataset")
+    write_run_preflight_report(
+        run_root,
+        {
+            "schema_version": "run_preflight.v2",
+            "overall_status": "ok",
+            "config": config,
+            "checks": [
+                {
+                    "name": "hidden_error",
+                    "status": "error",
+                    "message": "This error must not be hidden by overall_status.",
+                }
+            ],
+        },
+    )
+
+    summary = run_preflight_queue_summary(run_root, config)
+
+    assert summary["ready_for_queue"] is False
+    assert summary["queue_blocker"] == "invalid_preflight"
+    assert "does not match its checks" in summary["error"]

@@ -182,12 +182,12 @@ recommendations or explicit passing candidate IDs. Failed alternative solver
 combinations remain diagnostic evidence and do not invalidate a selected
 passing combination. Multi-camera attempts retain the common algorithm bundle
 whose independently estimated companion transform is most suitable under the
-recorded ranking policy. Pairwise companion disagreement above 10 mm or 5° is
-promotable with a preserved quality warning; disagreement above 20 mm or 10°
-is contradictory and blocks promotion. The doubled hard limit accounts for two
-independently accepted estimates lying at opposite sides of the per-camera
-10 mm / 5° residual bound. Missing, malformed, or individually failed selected
-candidates still fail closed.
+recorded ranking policy. Complete per-camera candidates with mean closure
+residuals above 10 mm or 5° remain promotable with preserved quality warnings;
+residuals above the 20 mm or 10° hard self-consistency ceiling are contradictory
+and block promotion. Pairwise companion disagreement uses the same warning and
+hard limits. Missing, malformed, non-reproducible, or otherwise internally
+failed selected candidates still fail closed.
 
 The attempt response includes a derived `promotion_review` under the current
 retention policy. This lets an immutable attempt calculated under the former
@@ -198,6 +198,17 @@ before writing profiles, and stores the warning evidence in each promoted
 profile. The parent job has five
 operator-visible phases: prepare data, estimate target poses, estimate time
 alignment, compare robot-camera solutions, and validate/rank.
+
+The multi-artifact publish is crash-recoverable through the hidden
+`.calibration_promotion.transaction.json` journal. A `prepared` interruption
+rolls every managed target back to the hash-bound prior generation. Once the
+journal is `committed`, recovery verifies and retains the complete new
+generation, including promotion status, before cleaning staging and backups;
+tampered recovery evidence blocks further mutation. Approval and queue binding
+are serialized with run mutation: the request-first `approved` pair becomes
+`queued` only after its job ID is durable, and an unbound worker fails closed.
+Staged content is fsynced before journal publication, and no-clobber renames
+prevent install or rollback from overwriting a raced path.
 
 Request bodies are capped at 256 KiB. Generation queues `cpu` and `disk_io`;
 selection queues `disk_io`. Commands use fixed argument arrays and appear in

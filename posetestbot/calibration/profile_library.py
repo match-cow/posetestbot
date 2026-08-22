@@ -33,6 +33,10 @@ from posetestbot.io.artifacts import (
     BOP_DIR,
     CALIBRATION_PROFILES,
     CALIBRATION_PROFILE_SELECTION,
+    CAPTURE_EXECUTION_LOGS_DIR,
+    CAPTURE_EXECUTION_PLAN,
+    CAPTURE_EXECUTION_REPORT,
+    CAPTURE_EXECUTION_STATUS,
     CAMERA_RECTIFICATION_REPORT,
     DEPTH_DIR,
     INTRINSIC_CALIBRATION_PROFILES,
@@ -1680,6 +1684,9 @@ def calibration_selection_replacement_blockers(run_root: str | Path) -> list[str
 
     root = Path(run_root).resolve()
     candidates = (
+        root / CAPTURE_EXECUTION_PLAN,
+        root / CAPTURE_EXECUTION_STATUS,
+        root / CAPTURE_EXECUTION_REPORT,
         root / RAW_ROBOT_EE_POSES,
         root / MATCH_ROBOT_EE_POSES,
         root / SYNC_REPORT,
@@ -1691,6 +1698,7 @@ def calibration_selection_replacement_blockers(run_root: str | Path) -> list[str
         path.relative_to(root).as_posix() for path in candidates if path.is_file()
     ]
     material_directories = (
+        root / CAPTURE_EXECUTION_LOGS_DIR,
         root / PROCESSED_DIR / SYNCHRONIZED_DIR,
         root / PROCESSED_DIR / "rectified",
         root / BOP_DIR,
