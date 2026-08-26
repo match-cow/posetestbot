@@ -469,6 +469,16 @@ export interface ClusterJob {
   }
 }
 
+export interface ClusterResultCollectionResponse {
+  result: BopResultSubmission
+  created: boolean
+  evaluation_url: string
+  inspection_url: string
+  download_url: string
+  package_url: string
+  provenance_url: string
+}
+
 export interface ClusterArchive {
   schema_version: "posetestbot_cluster_archive.v1"
   archive_id: string

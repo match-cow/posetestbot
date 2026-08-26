@@ -2545,7 +2545,7 @@ def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
         }
     ]
 
-    current.get_by_role("link", name="View logs and all cluster jobs").click()
+    current.get_by_role("link", name="View logs and manage all cluster jobs").click()
     expect(page).to_have_url(f"{console_server.url}/#/jobs")
     cluster_section = page.get_by_test_id("cluster-jobs-section")
     expect(cluster_section).to_contain_text("Durable estimator and SLURM state")
@@ -2561,16 +2561,37 @@ def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
     )
 
 
-def test_pose_estimation_explicit_collection_survives_reload(
-    console_server, page
+@pytest.mark.parametrize(
+    "viewport",
+    [{"width": 1920, "height": 1080}, {"width": 1440, "height": 900}],
+    ids=["1920x1080", "1440x900"],
+)
+def test_pose_estimation_selects_historical_jobs_collects_and_survives_reload(
+    console_server, page, viewport
 ) -> None:
     install_common_mocks(page)
-    page.set_viewport_size({"width": 1920, "height": 1080})
+    page.set_viewport_size(viewport)
     setup = cluster_pose_setup(ready=True)
     result = bop_result_fixture("a")
-    job = cluster_pose_job(state="succeeded", with_result=True)
-    job["payload"].pop("run_root", None)
-    job["collection"] = {"state": "available", "result": None}
+    latest_job = cluster_pose_job(state="succeeded", with_result=True)
+    latest_job["job_id"] = "pose-22222222-2222-4222-8222-222222222222"
+    latest_job["updated_at"] = "2026-08-04T10:02:00Z"
+    latest_job["payload"]["estimator_settings"] = {
+        "schema_version": "posetestbot_cluster_job_settings.v1",
+        "execution_mode": "continuous_tracking",
+        "selected_scene_ids": [1, 2],
+    }
+    latest_job["collection"] = {"state": "available", "result": None}
+    historical_job = cluster_pose_job(state="succeeded", with_result=True)
+    historical_job["payload"]["estimator_settings"] = {
+        "schema_version": "posetestbot_cluster_job_settings.v1",
+        "execution_mode": "independent_registration",
+        "selected_scene_ids": [1],
+    }
+    historical_job["collection"] = {"state": "available", "result": None}
+    jobs = [latest_job, historical_job]
+    for item in jobs:
+        item["payload"].pop("run_root", None)
     collected = {"value": False}
     collection_requests: list[dict] = []
     list_queries: list[dict[str, list[str]]] = []
@@ -2582,15 +2603,19 @@ def test_pose_estimation_explicit_collection_survives_reload(
 
     def list_handler(route) -> None:
         list_queries.append(parse_qs(urlparse(route.request.url).query))
-        current = json.loads(json.dumps(job))
+        current_jobs = json.loads(json.dumps(jobs))
         if collected["value"]:
-            current["collection"] = {"state": "collected", "result": result}
-        fulfill_json(route, {"jobs": [current], "next_cursor": None})
+            current_jobs[1]["collection"] = {
+                "state": "collected",
+                "result": result,
+            }
+        fulfill_json(route, {"jobs": current_jobs, "next_cursor": None})
 
     def detail_or_collect_handler(route) -> None:
         path = urlparse(route.request.url).path
         if path.endswith("/import-result"):
             collection_requests.append(route.request.post_data_json)
+            assert historical_job["job_id"] in path
             collected["value"] = True
             fulfill_json(
                 route,
@@ -2606,7 +2631,11 @@ def test_pose_estimation_explicit_collection_survives_reload(
                 status=201,
             )
             return
-        current = json.loads(json.dumps(job))
+        current = next(
+            json.loads(json.dumps(item))
+            for item in jobs
+            if item["job_id"] in path
+        )
         current.pop("collection", None)
         fulfill_json(route, {"job": current, "log": "complete\n"})
 
@@ -2615,6 +2644,16 @@ def test_pose_estimation_explicit_collection_survives_reload(
     page.goto(f"{console_server.url}/#/pose-estimation", wait_until="networkidle")
 
     current = page.get_by_test_id("pose-estimation-current-job")
+    expect(current).to_contain_text("Selected estimator job")
+    expect(current).to_contain_text(latest_job["job_id"])
+    metrics = page.get_by_test_id("pose-estimation-job-metrics")
+    expect(metrics).to_contain_text("Continuous Tracking")
+    expect(metrics).not_to_contain_text("continuous_tracking")
+    assert metrics.evaluate("node => node.scrollWidth <= node.clientWidth")
+    page.get_by_label("Estimator job for active run").click()
+    page.get_by_role("option", name=re.compile("Independent Registration")).click()
+    expect(current).to_contain_text(historical_job["job_id"])
+    expect(metrics).to_contain_text("Independent Registration")
     collect = current.get_by_role("button", name="Collect result")
     expect(collect).to_be_visible()
     page.wait_for_timeout(250)
@@ -2639,11 +2678,126 @@ def test_pose_estimation_explicit_collection_survives_reload(
     assert collection_requests == [{"run_root": RUN_ROOT}]
 
     page.reload(wait_until="networkidle")
+    expect(current).to_contain_text(latest_job["job_id"])
+    page.get_by_label("Estimator job for active run").click()
+    page.get_by_role("option", name=re.compile("Independent Registration")).click()
     retained = page.get_by_test_id("pose-estimation-collected-result")
     expect(retained).to_be_visible()
     expect(retained).to_contain_text(result["result_id"])
     expect(page.get_by_role("button", name="Collect result")).to_have_count(0)
     assert collection_requests == [{"run_root": RUN_ROOT}]
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
+def test_jobs_collects_and_hands_off_each_active_run_estimator_result(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    page.set_viewport_size({"width": 1440, "height": 900})
+    result_a = bop_result_fixture("a")
+    result_b = bop_result_fixture("b")
+    available_job = cluster_pose_job(state="succeeded", with_result=True)
+    available_job["collection"] = {"state": "available", "result": None}
+    collected_job = cluster_pose_job(state="succeeded", with_result=True)
+    collected_job["job_id"] = "pose-22222222-2222-4222-8222-222222222222"
+    collected_job["updated_at"] = "2026-08-04T09:01:00Z"
+    collected_job["collection"] = {"state": "collected", "result": result_b}
+    other_run_job = cluster_pose_job(state="succeeded", with_result=True)
+    other_run_job["job_id"] = "pose-33333333-3333-4333-8333-333333333333"
+    other_run_job["updated_at"] = "2026-08-04T08:01:00Z"
+    for job in (available_job, collected_job, other_run_job):
+        job["payload"].pop("run_root", None)
+    active_jobs = [available_job, collected_job]
+    global_jobs = [available_job, collected_job, other_run_job]
+    collection_requests: list[dict] = []
+    active_list_queries: list[dict[str, list[str]]] = []
+
+    def list_handler(route) -> None:
+        params = parse_qs(urlparse(route.request.url).query)
+        if "run_root" in params:
+            active_list_queries.append(params)
+            response_jobs = active_jobs
+        else:
+            response_jobs = global_jobs
+        fulfill_json(
+            route,
+            {"jobs": json.loads(json.dumps(response_jobs)), "next_cursor": None},
+        )
+
+    def detail_or_collect_handler(route) -> None:
+        path = urlparse(route.request.url).path
+        if path.endswith("/import-result"):
+            assert available_job["job_id"] in path
+            collection_requests.append(route.request.post_data_json)
+            available_job["collection"] = {
+                "state": "collected",
+                "result": result_a,
+            }
+            fulfill_json(
+                route,
+                {
+                    "result": result_a,
+                    "created": True,
+                    "evaluation_url": (
+                        f"/bop-evaluation?result_id={result_a['result_id']}"
+                    ),
+                    "inspection_url": (
+                        f"/pose-results?result_id={result_a['result_id']}"
+                    ),
+                    "download_url": f"/mock/{result_a['result_id']}.csv",
+                    "package_url": f"/mock/{result_a['result_id']}.zip",
+                    "provenance_url": (
+                        f"/mock/{result_a['result_id']}-provenance.json"
+                    ),
+                },
+                status=201,
+            )
+            return
+        current = next(
+            json.loads(json.dumps(job))
+            for job in global_jobs
+            if job["job_id"] in path
+        )
+        current.pop("collection", None)
+        fulfill_json(route, {"job": current, "log": "completed safely\n"})
+
+    page.route("**/cluster/jobs?**", list_handler)
+    page.route("**/cluster/jobs/**", detail_or_collect_handler)
+    page.goto(f"{console_server.url}/#/jobs", wait_until="networkidle")
+
+    section = page.get_by_test_id("cluster-jobs-section")
+    expect(section).to_contain_text("Active-run jobs include explicit collection")
+    available_row = page.get_by_test_id(
+        f"cluster-job-{available_job['job_id']}"
+    )
+    collected_row = page.get_by_test_id(
+        f"cluster-job-{collected_job['job_id']}"
+    )
+    other_row = page.get_by_test_id(f"cluster-job-{other_run_job['job_id']}")
+    expect(available_row).to_contain_text("Active run")
+    expect(other_row).to_contain_text("Other run")
+    expect(other_row.get_by_role("button", name="Collect result")).to_have_count(0)
+    expect(collected_row.get_by_role("link", name="Inspect poses")).to_have_attribute(
+        "href", f"#/pose-results?result_id={result_b['result_id']}"
+    )
+    expect(collected_row.get_by_role("link", name="Evaluate")).to_have_attribute(
+        "href", f"#/bop-evaluation?result_id={result_b['result_id']}"
+    )
+
+    available_row.get_by_role("button", name="Collect result").click()
+    expect(page.get_by_text("Cluster result collected")).to_be_visible()
+    expect(available_row.get_by_role("link", name="Inspect poses")).to_have_attribute(
+        "href", f"#/pose-results?result_id={result_a['result_id']}"
+    )
+    expect(available_row.get_by_role("link", name="Evaluate")).to_have_attribute(
+        "href", f"#/bop-evaluation?result_id={result_a['result_id']}"
+    )
+    assert collection_requests == [{"run_root": RUN_ROOT}]
+    assert active_list_queries
+    assert active_list_queries[0]["run_root"] == [RUN_ROOT]
+    assert active_list_queries[0]["limit"] == ["50"]
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
     )

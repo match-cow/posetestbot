@@ -1,6 +1,6 @@
 import { useDeferredValue, useMemo, useState } from "react"
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Ban, ChevronDown, Clock3, Copy, Cpu, FileText, LockKeyhole, RefreshCw, Search, Server, Square, Terminal, X } from "lucide-react"
+import { ArrowRight, Ban, ChevronDown, Clock3, Copy, Cpu, Download, FileText, LoaderCircle, LockKeyhole, RefreshCw, ScanSearch, Search, Server, Square, Terminal, X } from "lucide-react"
 import { Link } from "react-router-dom"
 import { toast } from "sonner"
 
@@ -17,14 +17,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, errorMessage, query } from "@/lib/api"
-import type { ClusterJob, Job, JobPage } from "@/lib/contracts"
+import type { ClusterJob, ClusterResultCollectionResponse, Job, JobPage } from "@/lib/contracts"
 import { jobStatusTone } from "@/lib/jobs"
-import { formatDate } from "@/lib/utils"
+import { formatDate, titleCase } from "@/lib/utils"
 import { activeWorkflowHref } from "@/lib/workflow-session"
 import { useOperator } from "@/providers/operator-provider"
 
 const ACTIVE = new Set(["queued", "running", "canceling"])
 const CLUSTER_ACTIVE = new Set(["preparing", "transferring", "submitted", "pending", "running", "collecting", "canceling"])
+const CLUSTER_SUCCESS = new Set(["succeeded", "succeeded-with-warning"])
 const PAGE_SIZE = 20
 type StatusFilter = "all" | "active" | "failed" | "finished"
 type ScopeFilter = "all" | "active_run" | "run" | "library" | "global"
@@ -120,6 +121,39 @@ function estimatorLabel(job: ClusterJob) {
   return estimatorId.split(/[-_]/).filter(Boolean).map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" ")
 }
 
+function estimatorMode(job: ClusterJob) {
+  return titleCase(job.payload.estimator_settings?.execution_mode ?? "legacy_independent")
+}
+
+function ClusterJobActions({
+  job,
+  activeRun,
+  collectPending,
+  collectingJobId,
+  cancelPending,
+  onCollect,
+  onCancel,
+  onLog,
+}: {
+  job: ClusterJob
+  activeRun: boolean
+  collectPending: boolean
+  collectingJobId?: string
+  cancelPending: boolean
+  onCollect: () => void
+  onCancel: () => void
+  onLog?: () => void
+}) {
+  const collecting = collectPending && collectingJobId === job.job_id
+  const retained = activeRun && job.collection?.state === "collected" ? job.collection.result : null
+  return <>
+    {activeRun && job.collection?.state === "available" && CLUSTER_SUCCESS.has(job.state) && <Button variant="outline" size="sm" onClick={onCollect} disabled={collectPending}>{collecting ? <LoaderCircle className="animate-spin" /> : <Download />}{collecting ? "Collecting…" : "Collect result"}</Button>}
+    {retained && <><Button asChild size="sm"><Link to={`/pose-results?result_id=${retained.result_id}`}><ScanSearch />Inspect poses</Link></Button><Button asChild variant="outline" size="sm"><Link to={`/bop-evaluation?result_id=${retained.result_id}`}>Evaluate<ArrowRight /></Link></Button></>}
+    {onLog && <Button variant="outline" size="sm" onClick={onLog}><FileText />Log</Button>}
+    {CLUSTER_ACTIVE.has(job.state) && <Button variant="destructive" size="sm" onClick={onCancel} disabled={cancelPending || job.state === "canceling"}><Ban />{job.state === "canceling" ? "Canceling…" : "Cancel"}</Button>}
+  </>
+}
+
 function ClusterJobsSection() {
   const queryClient = useQueryClient()
   const { selectedRun } = useOperator()
@@ -127,8 +161,15 @@ function ClusterJobsSection() {
   const [search, setSearch] = useState("")
   const [detailId, setDetailId] = useState<string | null>(null)
   const jobs = useQuery({
-    queryKey: ["cluster-jobs", status],
+    queryKey: ["cluster-jobs", "global", status],
     queryFn: () => api<{ jobs: ClusterJob[]; next_cursor: string | null }>(query("/cluster/jobs", { limit: 50, state: status === "all" ? undefined : status })),
+    retry: false,
+    refetchInterval: (state) => state.state.data?.jobs.some((job) => CLUSTER_ACTIVE.has(job.state)) ? 2_000 : 10_000,
+  })
+  const activeRunJobs = useQuery({
+    queryKey: ["cluster-jobs", "active-run", selectedRun, status],
+    queryFn: () => api<{ jobs: ClusterJob[]; next_cursor: null }>(query("/cluster/jobs", { run_root: selectedRun, limit: 50, state: status === "all" ? undefined : status })),
+    enabled: Boolean(selectedRun),
     retry: false,
     refetchInterval: (state) => state.state.data?.jobs.some((job) => CLUSTER_ACTIVE.has(job.state)) ? 2_000 : 10_000,
   })
@@ -150,18 +191,47 @@ function ClusterJobsSection() {
     },
     onError: (error) => toast.error("Cluster job could not be canceled", { description: errorMessage(error) }),
   })
+  const collect = useMutation({
+    mutationFn: ({ jobId, runRoot }: { jobId: string; runRoot: string }) => api<ClusterResultCollectionResponse>(`/cluster/jobs/${jobId}/import-result`, {
+      method: "POST",
+      body: JSON.stringify({ run_root: runRoot }),
+    }),
+    onSuccess: async (value, variables) => {
+      toast.success(value.created ? "Cluster result collected" : "Collected result verified")
+      await queryClient.invalidateQueries({ queryKey: ["cluster-jobs"] })
+      void queryClient.invalidateQueries({ queryKey: ["bop-evaluation", "setup", variables.runRoot] })
+      void queryClient.invalidateQueries({ queryKey: ["bop-inspection"] })
+    },
+    onError: (error) => toast.error("Cluster result was not collected", { description: errorMessage(error) }),
+  })
+  const activeRunIds = useMemo(
+    () => new Set((activeRunJobs.data?.jobs ?? []).map((job) => job.job_id)),
+    [activeRunJobs.data?.jobs],
+  )
+  const combined = useMemo(() => {
+    const byId = new Map<string, ClusterJob>()
+    for (const item of jobs.data?.jobs ?? []) byId.set(item.job_id, item)
+    for (const item of activeRunJobs.data?.jobs ?? []) byId.set(item.job_id, { ...byId.get(item.job_id), ...item })
+    return [...byId.values()].sort((left, right) => right.updated_at.localeCompare(left.updated_at) || right.job_id.localeCompare(left.job_id))
+  }, [activeRunJobs.data?.jobs, jobs.data?.jobs])
   const normalizedSearch = search.trim().toLowerCase()
-  const filtered = (jobs.data?.jobs ?? []).filter((job) => !normalizedSearch
+  const filtered = combined.filter((job) => !normalizedSearch
     || job.job_id.toLowerCase().includes(normalizedSearch)
-    || String(job.payload.run_root ?? "").toLowerCase().includes(normalizedSearch)
+    || String(job.payload.dataset_alias ?? "").toLowerCase().includes(normalizedSearch)
+    || String(job.payload.estimator_id ?? "").toLowerCase().includes(normalizedSearch)
+    || String(job.collection?.result?.result_id ?? "").toLowerCase().includes(normalizedSearch)
     || String(job.slurm_job_id ?? "").includes(normalizedSearch))
-  const current = detail.data?.job ?? jobs.data?.jobs.find((job) => job.job_id === detailId)
+  const listedCurrent = combined.find((job) => job.job_id === detailId)
+  const currentBase = detail.data?.job ?? listedCurrent
+  const current = currentBase && listedCurrent
+    ? { ...currentBase, collection: listedCurrent.collection ?? currentBase.collection }
+    : currentBase
 
   return <Card data-testid="cluster-jobs-section" className="border-primary/25">
     <CardHeader className="pb-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div><CardTitle className="flex items-center gap-2"><Server className="size-5 text-primary-strong" />Cluster provider</CardTitle><CardDescription className="mt-1">Durable estimator and SLURM state from the loopback companion controller. The bounded view loads at most 50 recent jobs.</CardDescription></div>
-        <div className="flex gap-2"><Button asChild variant="outline" size="sm"><Link to="/pose-estimation"><Cpu />Pose Estimation</Link></Button><Button variant="outline" size="sm" onClick={() => jobs.refetch()} disabled={jobs.isFetching}><RefreshCw className={jobs.isFetching ? "animate-spin" : undefined} />Refresh</Button></div>
+        <div><CardTitle className="flex items-center gap-2"><Server className="size-5 text-primary-strong" />Cluster provider</CardTitle><CardDescription className="mt-1">Durable estimator and SLURM state from the loopback companion controller. Active-run jobs include explicit collection and retained-result handoffs; choose another active run to manage its results.</CardDescription></div>
+        <div className="flex gap-2"><Button asChild variant="outline" size="sm"><Link to="/pose-estimation"><Cpu />Pose Estimation</Link></Button><Button variant="outline" size="sm" onClick={() => { void jobs.refetch(); void activeRunJobs.refetch() }} disabled={jobs.isFetching || activeRunJobs.isFetching}><RefreshCw className={jobs.isFetching || activeRunJobs.isFetching ? "animate-spin" : undefined} />Refresh</Button></div>
       </div>
     </CardHeader>
     <CardContent className="space-y-3">
@@ -169,26 +239,35 @@ function ClusterJobsSection() {
         ? <div className="rounded-lg border border-muted bg-muted/25 p-3 text-xs text-muted-foreground">Cluster provider unavailable: {errorMessage(jobs.error)}. Local job history below remains unaffected.</div>
         : <>
           <div className="grid gap-2 lg:grid-cols-[minmax(220px,1fr)_220px_auto]">
-            <div className="relative"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input aria-label="Search cluster jobs" className="pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Job ID, SLURM ID, run…" /></div>
+            <div className="relative"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input aria-label="Search cluster jobs" className="pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Job ID, SLURM ID, dataset, result…" /></div>
             <Select value={status} onValueChange={setStatus}><SelectTrigger aria-label="Filter cluster jobs by state"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All remote states</SelectItem><SelectItem value="running">Running</SelectItem><SelectItem value="pending">Pending</SelectItem><SelectItem value="collecting">Collecting</SelectItem><SelectItem value="succeeded">Succeeded</SelectItem><SelectItem value="succeeded-with-warning">Succeeded with warning</SelectItem><SelectItem value="failed">Failed</SelectItem><SelectItem value="canceled">Canceled</SelectItem></SelectContent></Select>
-            <div className="self-center text-right text-xs text-muted-foreground">{filtered.length} loaded</div>
+            <div className="self-center text-right text-xs text-muted-foreground">{filtered.length} loaded · {activeRunIds.size} active run</div>
           </div>
+          {activeRunJobs.isError && <p className="rounded-lg border border-warning/35 bg-warning/5 p-3 text-xs text-warning-foreground">Active-run collection state is unavailable: {errorMessage(activeRunJobs.error)}. Global controller history remains read-only.</p>}
           {jobs.isPending
             ? <Skeleton className="h-24" />
             : filtered.length === 0
               ? <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">No matching cluster jobs.</p>
               : <div className="max-h-[440px] space-y-2 overflow-y-auto pr-1">
-                {filtered.map((job) => <div key={job.job_id} data-testid={`cluster-job-${job.job_id}`} className="grid items-center gap-3 rounded-lg border bg-muted/15 p-3 xl:grid-cols-[minmax(0,1fr)_150px_190px_auto]">
-                  <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{estimatorLabel(job)}</span><StatusBadge status={job.state} tone={clusterTone(job.state)} /></div><div className="mt-1 truncate font-mono text-[11px] text-muted-foreground" title={job.job_id}>{job.job_id}</div><div className="mt-1 truncate font-mono text-[10px] text-muted-foreground" title={String(job.payload.run_root ?? "")}>{job.payload.run_root === selectedRun ? "Active run · " : "Other run · "}{String(job.payload.run_root ?? "unknown")}</div></div>
+                {filtered.map((job) => <div key={job.job_id} data-testid={`cluster-job-${job.job_id}`} className="grid min-w-0 items-center gap-3 rounded-lg border bg-muted/15 p-3 xl:grid-cols-[minmax(240px,1fr)_130px_180px_minmax(250px,auto)]">
+                  <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{estimatorLabel(job)}</span><StatusBadge status={job.state} tone={clusterTone(job.state)} /></div><div className="mt-1 truncate font-mono text-[11px] text-muted-foreground" title={job.job_id}>{job.job_id}</div><div className="mt-1 min-w-0 break-words text-[10px] text-muted-foreground">{activeRunIds.has(job.job_id) ? "Active run" : "Other run"} · {String(job.payload.dataset_alias ?? "dataset unavailable")} · {estimatorMode(job)}</div></div>
                   <div><div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">SLURM</div><div className="mt-1 font-mono text-xs">{job.slurm_job_id ?? "not assigned"}</div></div>
                   <div><div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Updated</div><div className="mt-1 text-xs">{formatDate(job.updated_at)}</div>{job.result && <div className="mt-1 text-[10px] text-muted-foreground">{job.result.estimate_count} estimates · {job.result.failure_count} failures</div>}</div>
-                  <div className="flex gap-2 xl:justify-end"><Button variant="outline" size="sm" onClick={() => setDetailId(job.job_id)}><FileText />Log</Button>{CLUSTER_ACTIVE.has(job.state) && <Button variant="destructive" size="sm" onClick={() => cancel.mutate(job)} disabled={cancel.isPending || job.state === "canceling"}><Ban />{job.state === "canceling" ? "Canceling…" : "Cancel"}</Button>}</div>
+                  <div className="flex min-w-0 flex-wrap gap-2 xl:justify-end" data-testid="cluster-job-actions">
+                    <ClusterJobActions job={job} activeRun={activeRunIds.has(job.job_id)} collectPending={collect.isPending} collectingJobId={collect.variables?.jobId} cancelPending={cancel.isPending} onCollect={() => collect.mutate({ jobId: job.job_id, runRoot: selectedRun })} onCancel={() => cancel.mutate(job)} onLog={() => setDetailId(job.job_id)} />
+                  </div>
                 </div>)}
               </div>}
         </>}
     </CardContent>
     <Sheet open={Boolean(detailId)} onOpenChange={(open) => !open && setDetailId(null)}>
-      <SheetContent><SheetHeader><SheetTitle>Cluster job log</SheetTitle><SheetDescription>{current?.job_id} · SLURM {current?.slurm_job_id ?? "not assigned"}</SheetDescription></SheetHeader><div className="flex items-center justify-between gap-3"><StatusBadge status={current?.state} tone={clusterTone(current?.state ?? "unknown")} /><span className="text-xs text-muted-foreground">Controller state survives UI and PoseTestBot restarts.</span></div><pre className="min-h-0 flex-1 overflow-auto rounded-lg bg-[#11130d] p-4 text-xs leading-relaxed text-[#dce4c4]">{detail.isError ? `Log unavailable: ${errorMessage(detail.error)}` : detail.data?.log || "Waiting for controller log output…"}</pre>{current?.error && <p className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{current.error}</p>}{current && CLUSTER_ACTIVE.has(current.state) && <Button variant="destructive" onClick={() => cancel.mutate(current)} disabled={cancel.isPending || current.state === "canceling"}><Ban />Cancel exact job</Button>}</SheetContent>
+      <SheetContent>
+        <SheetHeader><SheetTitle>Cluster job log</SheetTitle><SheetDescription>{current?.job_id} · SLURM {current?.slurm_job_id ?? "not assigned"}</SheetDescription></SheetHeader>
+        <div className="flex items-center justify-between gap-3"><StatusBadge status={current?.state} tone={clusterTone(current?.state ?? "unknown")} /><span className="text-xs text-muted-foreground">Controller state survives UI and PoseTestBot restarts.</span></div>
+        <pre className="min-h-0 flex-1 overflow-auto rounded-lg bg-[#11130d] p-4 text-xs leading-relaxed text-[#dce4c4]">{detail.isError ? `Log unavailable: ${errorMessage(detail.error)}` : detail.data?.log || "Waiting for controller log output…"}</pre>
+        {current?.error && <p className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{current.error}</p>}
+        {current && <div className="flex flex-wrap gap-2"><ClusterJobActions job={current} activeRun={activeRunIds.has(current.job_id)} collectPending={collect.isPending} collectingJobId={collect.variables?.jobId} cancelPending={cancel.isPending} onCollect={() => collect.mutate({ jobId: current.job_id, runRoot: selectedRun })} onCancel={() => cancel.mutate(current)} /></div>}
+      </SheetContent>
     </Sheet>
   </Card>
 }

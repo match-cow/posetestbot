@@ -111,9 +111,13 @@ proxies only those typed settings, and exposes an explicit, idempotent
 existing BOP19 validator and independently verifies the selected-scene target
 hash and external-job/container/input/output provenance. Sensor-subset
 evaluation uses an immutable filtered target list and is explicitly not
-presented as directly comparable to a full-dataset result. **Inspect → Pose
-Results** then provides a read-only, URL-addressable RGB/depth, mask, geometry,
-and numeric comparison against GT; it writes no visualization artifacts.
+presented as directly comparable to a full-dataset result. Multiple jobs may
+target the same unchanged run: **Pose Estimation** selects among its bounded
+per-estimator history, while **Jobs** exposes collection and result handoffs
+only for entries proven to belong to the active run. Every collected job keeps
+a distinct immutable result ID. **Inspect → Pose Results** then provides a
+read-only, URL-addressable RGB/depth, mask, geometry, and numeric comparison
+against GT; it writes no visualization artifacts.
 Retained results also expose hash-checked CSV/provenance downloads and a
 deterministic path-free package.
 It never becomes an acquisition stage. The browser never receives a controller

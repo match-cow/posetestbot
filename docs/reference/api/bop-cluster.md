@@ -121,7 +121,12 @@ recomputed selected-target hash to agree.
 
 The UI labels the import endpoint **Collect result** and never invokes it as a
 mount/reload side effect. Collection state is recovered by matching the
-controller job's opaque ID against retained result records. FoundationPose v2
+controller job's opaque ID against retained result records. Pose Estimation
+uses the run- and estimator-filtered response as a bounded job selector. Jobs
+keeps its global path-redacted history and separately requests the active run's
+filtered history, exposing collect/inspect/evaluate actions only where that
+second response proves ownership. Repeated same-run submissions and their
+collected immutable result IDs remain distinct. FoundationPose v2
 retention includes bounded track segments, fixed registration/tracking
 iterations, per-image timings, and failure identities. Retention is capped at
 200 recorded segments, 200 failure identities, and 10,000 image timings, with

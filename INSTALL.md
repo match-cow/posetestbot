@@ -425,11 +425,13 @@ archive transfer does not depend on estimator readiness.
 
 A controller result is collected only through the explicit **Collect result**
 action and only when the local dataset identity still matches its staged
-snapshot. Collection is idempotent and its status is recovered from retained
-external-job provenance after reload. An intact historical CSV, sanitized
-provenance, and deterministic result package remain downloadable after dataset
-drift, but evaluation remains blocked until the matching snapshot is selected
-or restored.
+snapshot. The action is available for the selected same-run job on **Pose
+Estimation** and for each eligible active-run entry on **Jobs**. Collection is
+idempotent and its status is recovered from retained external-job provenance
+after reload. Multiple jobs for one unchanged dataset retain separate immutable
+result IDs. An intact historical CSV, sanitized provenance, and deterministic
+result package remain downloadable after dataset drift, but evaluation remains
+blocked until the matching snapshot is selected or restored.
 
 Imported results must already use the BOP filename convention and the exact
 `scene_id,im_id,obj_id,score,R,t,time` header. Each result is copied and

@@ -172,14 +172,25 @@ target frame resets it, and a tracker error causes same-frame registration
 recovery. These oracle masks are initialization/recovery inputs, so the result
 must not be presented as an unconstrained detector benchmark.
 
-When the controller job succeeds, use the explicit **Collect result** action.
+Every submission creates a distinct durable controller job, even when several
+jobs use the same unchanged run. **Pose Estimation** retains a bounded selector
+for the selected estimator's jobs on the active run; changing that selector
+changes the exact job shown and never mutates it. The **Jobs** page combines
+global path-redacted monitoring with a separate active-run lookup. Only jobs
+proven by that lookup to belong to the active run expose result actions; select
+another run through the normal run context before managing its results.
+
+When a selected controller job succeeds, use the explicit **Collect result**
+action on **Pose Estimation** or **Jobs**.
 Collection rechecks controller provenance, the staged and local dataset hashes,
 the standard BOP19 CSV, and the result hash before retaining it below
 `processed/bop_evaluation/results/`. Collection is idempotent, and its state is
 recovered from the retained external job ID after a browser or service restart;
 no automatic page effect downloads a result. The retained-result actions expose
 the CSV, sanitized controller provenance, a deterministic package, **Pose
-Results**, and **BOP Evaluation**.
+Results**, and **BOP Evaluation**. Each successfully collected job receives a
+separate immutable result ID, and the result selectors switch among all results
+that remain compatible with the unchanged BOP dataset.
 
 **Pose Results** is a read-only x-ray diagnostic. Select the retained result,
 operator-labelled sensor scene, and frame; then compare the exact-aspect RGB or

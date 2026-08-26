@@ -15,30 +15,21 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, errorMessage, query } from "@/lib/api"
-import type { BopResultSubmission, ClusterEstimatorSettings, ClusterJob, ClusterPoseSetup } from "@/lib/contracts"
-import { formatDate } from "@/lib/utils"
+import type { ClusterEstimatorSettings, ClusterJob, ClusterPoseSetup, ClusterResultCollectionResponse } from "@/lib/contracts"
+import { formatDate, titleCase } from "@/lib/utils"
 import { useOperator } from "@/providers/operator-provider"
 
 const ACTIVE = new Set(["preparing", "transferring", "submitted", "pending", "running", "collecting", "canceling"])
 const SUCCESS = new Set(["succeeded", "succeeded-with-warning"])
 
-interface ImportedResult {
-  result: BopResultSubmission
-  created: boolean
-  evaluation_url: string
-  inspection_url: string
-  download_url: string
-  package_url: string
-  provenance_url: string
-}
-
-interface ScopedSubmission {
+interface ScopedJobSelection {
   runRoot: string
+  estimatorId: string
   jobId: string
 }
 
-interface ScopedImport extends ScopedSubmission {
-  value: ImportedResult
+interface ScopedImport extends ScopedJobSelection {
+  value: ClusterResultCollectionResponse
 }
 
 interface SettingsDraft {
@@ -58,11 +49,20 @@ function stateTone(state?: string) {
 }
 
 function Metric({ label, value, detail }: { label: string; value: React.ReactNode; detail?: string }) {
-  return <div className="rounded-lg border bg-muted/20 px-3 py-2.5">
+  return <div className="min-w-0 rounded-lg border bg-muted/20 px-3 py-2.5">
     <div className="text-[9px] font-bold uppercase tracking-[0.14em] text-muted-foreground">{label}</div>
-    <div className="mt-1 font-mono text-sm font-semibold tabular-nums">{value}</div>
-    {detail && <div className="mt-1 text-[10px] leading-relaxed text-muted-foreground">{detail}</div>}
+    <div className="mt-1 min-w-0 break-words font-mono text-sm font-semibold tabular-nums">{value}</div>
+    {detail && <div className="mt-1 min-w-0 break-words text-[10px] leading-relaxed text-muted-foreground">{detail}</div>}
   </div>
+}
+
+function jobMode(job: ClusterJob) {
+  return titleCase(job.payload.estimator_settings?.execution_mode ?? "legacy_independent")
+}
+
+function jobOptionLabel(job: ClusterJob) {
+  const identity = `Job …${job.job_id.slice(-8)}${job.slurm_job_id ? ` / SLURM ${job.slurm_job_id}` : ""}`
+  return `${formatDate(job.updated_at)} · ${jobMode(job)} · ${titleCase(job.state)} · ${identity}`
 }
 
 export function PoseEstimationPage() {
@@ -72,7 +72,7 @@ export function PoseEstimationPage() {
   const [estimatorId, setEstimatorId] = useState("")
   const [profileId, setProfileId] = useState("")
   const [settingsDraft, setSettingsDraft] = useState<SettingsDraft | null>(null)
-  const [submittedJob, setSubmittedJob] = useState<ScopedSubmission | null>(null)
+  const [jobSelection, setJobSelection] = useState<ScopedJobSelection | null>(null)
   const [importedResult, setImportedResult] = useState<ScopedImport | null>(null)
 
   const setup = useQuery({
@@ -96,28 +96,34 @@ export function PoseEstimationPage() {
     () => history.data?.jobs[0] ?? null,
     [history.data],
   )
-  const submittedJobId = submittedJob?.runRoot === selectedRun ? submittedJob.jobId : null
-  const selectedJobId = submittedJobId ?? latestRunJob?.job_id ?? null
+  const selectedJobId = jobSelection?.runRoot === selectedRun && jobSelection.estimatorId === effectiveEstimatorId
+    ? jobSelection.jobId
+    : latestRunJob?.job_id ?? null
+  const selectedHistoryJob = history.data?.jobs.find((item) => item.job_id === selectedJobId) ?? null
   const job = useQuery({
     queryKey: ["cluster-job", selectedJobId],
     queryFn: () => api<{ job: ClusterJob }>(query(`/cluster/jobs/${selectedJobId}`, { include_log: true })),
     enabled: Boolean(selectedJobId),
     refetchInterval: (state) => ACTIVE.has(state.state.data?.job.state ?? "") ? 1_500 : false,
   })
-  const currentJobBase = job.data?.job ?? (latestRunJob?.job_id === selectedJobId ? latestRunJob : null)
+  const currentJobBase = job.data?.job ?? selectedHistoryJob
   const currentJob = currentJobBase
     ? {
         ...currentJobBase,
-        collection: latestRunJob?.job_id === currentJobBase.job_id
-          ? latestRunJob.collection
+        collection: selectedHistoryJob?.job_id === currentJobBase.job_id
+          ? selectedHistoryJob.collection
           : currentJobBase.collection,
       }
     : null
+  const jobOptions = [...(history.data?.jobs ?? [])]
+  if (currentJob && !jobOptions.some((item) => item.job_id === currentJob.job_id)) jobOptions.unshift(currentJob)
   const enabledProfiles = setup.data?.enabled_profiles ?? []
   const effectiveProfileId = enabledProfiles.some((profile) => profile.profile_id === profileId)
     ? profileId
     : enabledProfiles[0]?.profile_id ?? ""
-  const collectedResponse = importedResult?.runRoot === selectedRun && importedResult.jobId === currentJob?.job_id
+  const collectedResponse = importedResult?.runRoot === selectedRun
+    && importedResult.estimatorId === effectiveEstimatorId
+    && importedResult.jobId === currentJob?.job_id
     ? importedResult.value
     : null
   const collectedResult = collectedResponse?.result ?? currentJob?.collection?.result ?? null
@@ -165,7 +171,7 @@ export function PoseEstimationPage() {
     }),
     onSuccess: ({ job: submitted }) => {
       localStorage.setItem("posetestbot.clusterOperator", operator.trim())
-      setSubmittedJob({ runRoot: selectedRun, jobId: submitted.job_id })
+      setJobSelection({ runRoot: selectedRun, estimatorId: effectiveEstimatorId, jobId: submitted.job_id })
       setImportedResult(null)
       toast.success(`${selectedEstimator?.display_name ?? effectiveEstimatorId} job accepted`, { description: "Work continues after navigation. Monitor it from Jobs." })
       queryClient.invalidateQueries({ queryKey: ["cluster-jobs", selectedRun, effectiveEstimatorId] })
@@ -173,12 +179,12 @@ export function PoseEstimationPage() {
     onError: (error) => toast.error("Estimator job was not submitted", { description: errorMessage(error) }),
   })
   const collectResult = useMutation({
-    mutationFn: (jobId: string) => api<ImportedResult>(`/cluster/jobs/${jobId}/import-result`, {
+    mutationFn: (jobId: string) => api<ClusterResultCollectionResponse>(`/cluster/jobs/${jobId}/import-result`, {
       method: "POST",
       body: JSON.stringify({ run_root: selectedRun }),
     }),
     onSuccess: (value, jobId) => {
-      setImportedResult({ runRoot: selectedRun, jobId, value })
+      setImportedResult({ runRoot: selectedRun, estimatorId: effectiveEstimatorId, jobId, value })
       toast.success(value.created ? "Cluster result collected" : "Collected result verified")
       void queryClient.invalidateQueries({ queryKey: ["cluster-jobs", selectedRun, effectiveEstimatorId] })
       void queryClient.invalidateQueries({ queryKey: ["bop-evaluation", "setup", selectedRun] })
@@ -313,22 +319,32 @@ export function PoseEstimationPage() {
 
           {currentJob && <Card data-testid="pose-estimation-current-job" className={ACTIVE.has(currentJob.state) ? "border-primary/35" : undefined}>
             <CardHeader className="pb-3">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div><CardTitle className="flex items-center gap-2"><Cpu className="size-5 text-primary-strong" />Latest job for active run</CardTitle><CardDescription className="mt-1 font-mono">{currentJob.job_id}</CardDescription></div>
-                <StatusBadge status={currentJob.state} tone={stateTone(currentJob.state)} />
+              <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.7fr)] xl:items-end">
+                <div className="min-w-0"><CardTitle className="flex items-center gap-2"><Cpu className="size-5 text-primary-strong" />Selected estimator job</CardTitle><CardDescription className="mt-1">Choose among the 50 most recent {selectedEstimator?.display_name ?? effectiveEstimatorId} jobs for the active run. Collection and handoffs apply only to the selected immutable job.</CardDescription></div>
+                <div className="min-w-0 space-y-1.5">
+                  <Label htmlFor="pose-estimator-job-selection">Estimator job for active run</Label>
+                  <Select value={currentJob.job_id} onValueChange={(jobId) => { setJobSelection({ runRoot: selectedRun, estimatorId: effectiveEstimatorId, jobId }); setImportedResult(null) }}>
+                    <SelectTrigger id="pose-estimator-job-selection" className="min-w-0"><SelectValue /></SelectTrigger>
+                    <SelectContent>{jobOptions.map((item) => <SelectItem key={item.job_id} value={item.job_id}>{jobOptionLabel(item)}</SelectItem>)}</SelectContent>
+                  </Select>
+                </div>
               </div>
             </CardHeader>
-            <CardContent className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.7fr)]">
-              <div className="grid grid-cols-2 gap-2 lg:grid-cols-3 2xl:grid-cols-7">
+            <CardContent className="space-y-4">
+              <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/10 px-3 py-2">
+                <span className="min-w-0 break-all font-mono text-[10px] text-muted-foreground">{currentJob.job_id}</span>
+                <StatusBadge status={currentJob.state} tone={stateTone(currentJob.state)} />
+              </div>
+              <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-4" data-testid="pose-estimation-job-metrics">
                 <Metric label="SLURM job" value={currentJob.slurm_job_id ?? "pending"} />
                 <Metric label="Estimator" value={String(currentJob.payload.estimator_id ?? "unreported")} />
                 <Metric label="Profile" value={String(currentJob.payload.profile_id ?? "—")} />
                 <Metric label="Updated" value={formatDate(currentJob.updated_at)} />
                 <Metric label="Estimates" value={currentJob.result?.estimate_count ?? "—"} detail={currentJob.result ? `${currentJob.result.failure_count} target failures retained` : undefined} />
-                <Metric label="Mode" value={currentJob.payload.estimator_settings?.execution_mode ?? "legacy independent"} />
+                <Metric label="Mode" value={jobMode(currentJob)} />
                 <Metric label="Sensor scenes" value={currentJob.payload.estimator_settings?.selected_scene_ids.join(", ") ?? "all"} detail={currentJob.result?.profile_excluded_target_count ? `${currentJob.result.profile_excluded_target_count} profile-bounded targets excluded` : undefined} />
               </div>
-              <div className="flex flex-col justify-center gap-2">
+              <div className="flex min-w-0 flex-col gap-2 rounded-lg border bg-card p-3">
                 {ACTIVE.has(currentJob.state) && <div className="flex items-center gap-2 text-sm"><LoaderCircle className="size-4 animate-spin text-primary-strong" />Remote work is durable and still running.</div>}
                 {currentJob.error && <p className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{currentJob.error}</p>}
                 {SUCCESS.has(currentJob.state) && !collectedResult && <Button variant="outline" onClick={() => collectResult.mutate(currentJob.job_id)} disabled={collectResult.isPending}>{collectResult.isPending ? <LoaderCircle className="animate-spin" /> : <Download />}{collectResult.isPending ? "Collecting result…" : collectResult.isError ? "Retry result collection" : "Collect result"}</Button>}
@@ -343,7 +359,7 @@ export function PoseEstimationPage() {
                     {collectedResult.provenance_available && <Button asChild size="sm" variant="outline"><a href={collectedResponse?.provenance_url ?? query(`/bop/evaluation/results/${collectedResult.result_id}/provenance`, { run_root: selectedRun })}><FileJson />Provenance</a></Button>}
                   </div>
                 </div>}
-                <Button asChild variant="ghost" size="sm"><Link to="/jobs">View logs and all cluster jobs<ExternalLink /></Link></Button>
+                <Button asChild variant="ghost" size="sm"><Link to="/jobs">View logs and manage all cluster jobs<ExternalLink /></Link></Button>
               </div>
             </CardContent>
           </Card>}
