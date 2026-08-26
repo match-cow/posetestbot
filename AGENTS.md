@@ -34,6 +34,14 @@ arguments must never enter this repository or a browser response.
   negative. Before reporting that GitHub authentication is invalid, rerun the
   same read-only authentication check outside the sandbox; do not ask the
   operator to log in again based only on the sandboxed result.
+- When the operator explicitly asks to commit and push work that includes
+  cluster integration, runtime, or orchestration changes, also inspect the
+  `match-cow/posetestbot-cluster` companion checkout (normally
+  `/mnt/working_data_ssd/posetestbot-cluster`). Commit and push relevant work
+  in each repository on its own branch, and report both commit identities.
+  Never stage companion `.env` files or backups, SSH material, credentials,
+  controller state, SIFs, weights, build trees, or cluster job data. A request
+  explicitly scoped to only one repository remains scoped to that repository.
 - Browser UI regressions should use Playwright tests. Keep Playwright in the dev
   dependency group, and install browser binaries only when explicitly requested.
 - Production frontend builds and localhost-only Playwright regressions are
