@@ -498,7 +498,7 @@ def cluster_pose_setup(*, ready: bool = True) -> dict:
         "profiles": [profile],
     }
     return {
-        "schema_version": "cluster_estimation_setup.v2",
+        "schema_version": "cluster_estimation_setup.v3",
         "run_root": RUN_ROOT,
         "ready": ready,
         "dataset": {
@@ -548,12 +548,93 @@ def cluster_pose_setup(*, ready: bool = True) -> dict:
         "estimator_id": "foundationpose",
         "estimator": estimator,
         "estimators": [estimator],
+        "sensor_sequences": [],
         "runtime": runtime,
         "profiles": [profile],
         "enabled_profiles": [profile] if ready else [],
         "blockers": [] if ready else [blocker],
         "warnings": [],
     }
+
+
+def cluster_tracking_setup() -> dict:
+    setup = cluster_pose_setup(ready=True)
+    descriptor = {
+        "schema_version": "posetestbot_cluster_job_settings_descriptor.v1",
+        "value_schema_version": "posetestbot_cluster_job_settings.v1",
+        "additional_properties": False,
+        "fields": [
+            {
+                "key": "execution_mode",
+                "control": "enum",
+                "label": "Execution mode",
+                "description": "Choose tracking or the independent baseline.",
+                "required": True,
+                "default": "continuous_tracking",
+                "options": [
+                    {"value": "continuous_tracking", "label": "Continuous tracking"},
+                    {
+                        "value": "independent_registration",
+                        "label": "Independent registration",
+                    },
+                ],
+            },
+            {
+                "key": "selected_scene_ids",
+                "control": "sensor_scene_multiselect",
+                "label": "Sensor sequences",
+                "description": "Select exported camera-local sequences.",
+                "required": True,
+                "minimum_selected": 1,
+                "default": "all_eligible",
+            },
+        ],
+    }
+    runtime_id = "foundationpose-a1b694b8-bop-cea62d65-tracking-v1"
+    estimator = setup["estimator"]
+    estimator["driver_id"] = "foundationpose.v2"
+    estimator["job_settings"] = descriptor
+    estimator["runtime"]["driver_id"] = "foundationpose.v2"
+    estimator["runtime"]["runtime_id"] = runtime_id
+    setup["runtime"] = estimator["runtime"]
+    setup["controller"]["runtime"] = estimator["runtime"]
+    setup["execution_contract"] = "driver_advertised_immutable_job_settings.v1"
+    setup["sensor_sequences"] = [
+        {
+            "scene_id": 1,
+            "sensor_id": "realsense_d435:033422071805",
+            "operator_alias": "Center",
+            "display_name": "Center",
+            "mounting_mode": "fixed",
+            "frame_count": 24,
+            "target_count": 12,
+            "tracking_eligible": True,
+            "tracking_blocker": None,
+        },
+        {
+            "scene_id": 2,
+            "sensor_id": "oak_d_pro:19443010",
+            "operator_alias": "Right",
+            "display_name": "Right",
+            "mounting_mode": "fixed",
+            "frame_count": 24,
+            "target_count": 11,
+            "tracking_eligible": True,
+            "tracking_blocker": None,
+        },
+        {
+            "scene_id": 3,
+            "sensor_id": "zed_2i:fixture",
+            "operator_alias": "Wrist",
+            "display_name": "Wrist",
+            "mounting_mode": "robot",
+            "frame_count": 24,
+            "target_count": 8,
+            "tracking_eligible": False,
+            "tracking_blocker": "Exact target-to-instance identity is incomplete.",
+        },
+    ]
+    return setup
 
 
 def cluster_pose_job(*, state: str, with_result: bool = False) -> dict:
@@ -1852,6 +1933,87 @@ def test_dashboard_starts_and_stops_managed_cluster_controller(
     )
 
 
+def test_pose_estimation_tracking_defaults_sensor_selection_and_payload(
+    console_server,
+    page,
+) -> None:
+    install_common_mocks(page)
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    setup = cluster_tracking_setup()
+    submissions: list[dict] = []
+    page.route(
+        "**/cluster/pose-estimation/setup?**",
+        lambda route: fulfill_json(route, setup),
+    )
+    page.route(
+        "**/cluster/jobs?**",
+        lambda route: fulfill_json(route, {"jobs": [], "next_cursor": None}),
+    )
+
+    def submit_handler(route) -> None:
+        submission = route.request.post_data_json
+        submissions.append(submission)
+        job = cluster_pose_job(state="running")
+        job["payload"].update(
+            {
+                "driver_id": "foundationpose.v2",
+                "runtime_id": (
+                    "foundationpose-a1b694b8-bop-cea62d65-tracking-v1"
+                ),
+                "estimator_settings": submission["estimator_settings"],
+            }
+        )
+        fulfill_json(route, {"job": job}, status=202)
+
+    page.route("**/cluster/pose-estimation/jobs", submit_handler)
+    page.goto(f"{console_server.url}/#/pose-estimation", wait_until="networkidle")
+
+    form = page.get_by_test_id("estimator-settings-form")
+    expect(form).to_contain_text("Browser-local draft")
+    expect(page.get_by_test_id("estimator-setting-execution_mode")).to_contain_text(
+        "Continuous tracking"
+    )
+    center = page.get_by_label("Select Center scene 1")
+    right = page.get_by_label("Select Right scene 2")
+    wrist = page.get_by_label("Select Wrist scene 3")
+    expect(center).to_be_checked()
+    expect(right).to_be_checked()
+    expect(wrist).to_be_disabled()
+    page.get_by_label("Operator / submitter").fill("Tracking Operator")
+    submit = page.get_by_role("button", name="Submit FoundationPose job")
+    expect(submit).to_be_enabled()
+
+    center.uncheck()
+    right.uncheck()
+    expect(submit).to_be_disabled()
+    expect(form.get_by_role("alert")).to_contain_text(
+        "Select at least one eligible sensor sequence."
+    )
+    center.check()
+    page.get_by_test_id("estimator-setting-execution_mode").click()
+    page.get_by_role("option", name="Independent registration").click()
+    expect(submit).to_be_enabled()
+    submit.click()
+
+    expect(page.get_by_text("FoundationPose job accepted")).to_be_visible()
+    assert submissions == [
+        {
+            "run_root": RUN_ROOT,
+            "estimator_id": "foundationpose",
+            "profile_id": "smoke-a100",
+            "operator": "Tracking Operator",
+            "estimator_settings": {
+                "schema_version": "posetestbot_cluster_job_settings.v1",
+                "execution_mode": "independent_registration",
+                "selected_scene_ids": [1],
+            },
+        }
+    ]
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
 def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
     console_server,
     page,
@@ -1928,7 +2090,7 @@ def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
         "The pinned FoundationPose runtime has not been qualified."
     )
     expect(pose_page).to_contain_text("Oracle-mask qualification")
-    expect(pose_page).to_contain_text("without tracking across images or cameras")
+    expect(pose_page).to_contain_text("camera-local tracks are never fused")
     expect(
         page.get_by_role("button", name="Submit FoundationPose job")
     ).to_be_disabled()

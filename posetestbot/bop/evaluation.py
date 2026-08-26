@@ -66,6 +66,9 @@ DEFAULT_VSD_DELTA_MM = 15.0
 DEFAULT_RENDERER = "vispy"
 MAX_RESULT_BYTES = 128 * 1024 * 1024
 MAX_RESULT_ROWS = 10_000_000
+CLUSTER_JOB_SETTINGS_SCHEMA = "posetestbot_cluster_job_settings.v1"
+RESULT_SENSOR_SCOPE_SCHEMA = "bop_result_sensor_scope.v1"
+SCOPED_TARGETS_FILENAME = "selected_test_targets_bop19.json"
 
 
 def _utc_now() -> str:
@@ -894,6 +897,241 @@ def _parse_result_filename(path: Path) -> dict[str, str | None]:
     return match.groupdict()
 
 
+def _canonical_target_inventory(
+    inventory: Mapping[str, Any],
+    *,
+    selected_scene_ids: Iterable[int] | None = None,
+) -> list[dict[str, int]]:
+    selected = set(selected_scene_ids) if selected_scene_ids is not None else None
+    rows = [
+        {
+            "scene_id": int(target["scene_id"]),
+            "im_id": int(target["im_id"]),
+            "obj_id": int(target["obj_id"]),
+            "inst_count": int(target["inst_count"]),
+        }
+        for target in inventory["targets"]
+        if selected is None or int(target["scene_id"]) in selected
+    ]
+    return sorted(
+        rows,
+        key=lambda item: (item["scene_id"], item["im_id"], item["obj_id"]),
+    )
+
+
+def _target_inventory_sha256(rows: Iterable[Mapping[str, Any]]) -> str:
+    serialized = json.dumps(
+        list(rows),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _normalize_selected_scene_ids(
+    values: Any,
+    *,
+    eligible_scene_ids: Iterable[int],
+    label: str,
+) -> list[int]:
+    eligible = sorted(set(eligible_scene_ids))
+    if not isinstance(values, list) or not values:
+        raise ValueError(f"{label} must be a nonempty JSON array")
+    if any(isinstance(item, bool) or not isinstance(item, int) or item < 1 for item in values):
+        raise ValueError(f"{label} must contain positive integer BOP scene IDs")
+    if len(set(values)) != len(values):
+        raise ValueError(f"{label} must not contain duplicate BOP scene IDs")
+    unknown = sorted(set(values) - set(eligible))
+    if unknown:
+        raise ValueError(
+            f"{label} contains unknown BOP scene IDs: "
+            + ", ".join(str(item) for item in unknown)
+        )
+    return sorted(values)
+
+
+def _validated_sensor_scope(
+    value: Any,
+    *,
+    inventory: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_version",
+        "scope_kind",
+        "execution_mode",
+        "selected_scene_ids",
+        "eligible_scene_ids",
+        "selected_target_inventory_sha256",
+        "selected_target_count",
+        "full_dataset_target_count",
+        "excluded_target_count",
+        "is_sensor_scoped",
+    }:
+        raise ValueError("Stored result sensor scope is invalid")
+    if (
+        value.get("schema_version") != RESULT_SENSOR_SCOPE_SCHEMA
+        or value.get("scope_kind") != "selected_bop_sensor_scenes"
+        or value.get("execution_mode")
+        not in {"continuous_tracking", "independent_registration"}
+    ):
+        raise ValueError("Stored result sensor scope is unsupported")
+    eligible = sorted(
+        {int(target["scene_id"]) for target in inventory["targets"]}
+    )
+    if value.get("eligible_scene_ids") != eligible:
+        raise ValueError("Stored result sensor scope no longer matches the dataset")
+    selected = _normalize_selected_scene_ids(
+        value.get("selected_scene_ids"),
+        eligible_scene_ids=eligible,
+        label="Stored result selected_scene_ids",
+    )
+    rows = _canonical_target_inventory(
+        inventory,
+        selected_scene_ids=selected,
+    )
+    selected_count = sum(row["inst_count"] for row in rows)
+    full_count = sum(
+        row["inst_count"] for row in _canonical_target_inventory(inventory)
+    )
+    expected = {
+        "schema_version": RESULT_SENSOR_SCOPE_SCHEMA,
+        "scope_kind": "selected_bop_sensor_scenes",
+        "execution_mode": value["execution_mode"],
+        "selected_scene_ids": selected,
+        "eligible_scene_ids": eligible,
+        "selected_target_inventory_sha256": _target_inventory_sha256(rows),
+        "selected_target_count": selected_count,
+        "full_dataset_target_count": full_count,
+        "excluded_target_count": full_count - selected_count,
+        "is_sensor_scoped": selected != eligible,
+    }
+    if dict(value) != expected:
+        raise ValueError("Stored result sensor scope evidence is inconsistent")
+    return expected
+
+
+def _foundationpose_v2_scope(
+    value: Mapping[str, Any],
+    *,
+    inventory: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Recompute and validate FoundationPose v2 scope from the local export."""
+
+    estimator = value.get("estimator")
+    if not isinstance(estimator, Mapping):
+        return None, None
+    driver_id = estimator.get("driver_id")
+    estimator_id = estimator.get("estimator_id")
+    if driver_id != "foundationpose.v2":
+        return None, None
+    if estimator_id != "foundationpose":
+        raise ValueError("FoundationPose v2 provenance has another estimator identity")
+    settings = value.get("estimator_settings")
+    if not isinstance(settings, Mapping) or set(settings) != {
+        "schema_version",
+        "execution_mode",
+        "selected_scene_ids",
+    }:
+        raise ValueError("FoundationPose v2 provenance has invalid estimator settings")
+    execution_mode = settings.get("execution_mode")
+    if (
+        settings.get("schema_version") != CLUSTER_JOB_SETTINGS_SCHEMA
+        or execution_mode
+        not in {"continuous_tracking", "independent_registration"}
+    ):
+        raise ValueError("FoundationPose v2 estimator settings are unsupported")
+    eligible = sorted(
+        {int(target["scene_id"]) for target in inventory["targets"]}
+    )
+    selected = _normalize_selected_scene_ids(
+        settings.get("selected_scene_ids"),
+        eligible_scene_ids=eligible,
+        label="FoundationPose selected_scene_ids",
+    )
+    normalized_settings = {
+        "schema_version": CLUSTER_JOB_SETTINGS_SCHEMA,
+        "execution_mode": execution_mode,
+        "selected_scene_ids": selected,
+    }
+    if dict(settings) != normalized_settings:
+        raise ValueError("FoundationPose v2 estimator settings are not canonical")
+
+    selected_rows = _canonical_target_inventory(
+        inventory,
+        selected_scene_ids=selected,
+    )
+    all_rows = _canonical_target_inventory(inventory)
+    selected_count = sum(row["inst_count"] for row in selected_rows)
+    full_count = sum(row["inst_count"] for row in all_rows)
+    count_fields = (
+        "registration_count",
+        "tracking_count",
+        "reinitialization_count",
+        "selected_target_count",
+        "processed_target_count",
+        "selected_scope_excluded_target_count",
+        "profile_excluded_target_count",
+        "estimate_count",
+        "failure_count",
+    )
+    counts = {field: value.get(field) for field in count_fields}
+    if any(
+        isinstance(count, bool) or not isinstance(count, int) or count < 0
+        for count in counts.values()
+    ):
+        raise ValueError("FoundationPose v2 provenance has invalid tracking counts")
+    if (
+        value.get("registration_iterations") != 5
+        or value.get("tracking_iterations") != 2
+        or value.get("selected_target_inventory_sha256")
+        != _target_inventory_sha256(selected_rows)
+        or counts["selected_target_count"] != selected_count
+        or counts["selected_scope_excluded_target_count"]
+        != full_count - selected_count
+        or counts["processed_target_count"]
+        + counts["profile_excluded_target_count"]
+        != selected_count
+        or counts["estimate_count"] + counts["failure_count"]
+        != counts["processed_target_count"]
+        or counts["registration_count"] + counts["tracking_count"]
+        - counts["reinitialization_count"]
+        != counts["processed_target_count"]
+        or counts["reinitialization_count"] > counts["registration_count"]
+        or (
+            execution_mode == "independent_registration"
+            and (
+                counts["tracking_count"] != 0
+                or counts["reinitialization_count"] != 0
+                or counts["registration_count"]
+                != counts["processed_target_count"]
+            )
+        )
+    ):
+        raise ValueError(
+            "FoundationPose v2 provenance does not match the selected target inventory"
+        )
+    scope = {
+        "schema_version": RESULT_SENSOR_SCOPE_SCHEMA,
+        "scope_kind": "selected_bop_sensor_scenes",
+        "execution_mode": execution_mode,
+        "selected_scene_ids": selected,
+        "eligible_scene_ids": eligible,
+        "selected_target_inventory_sha256": _target_inventory_sha256(selected_rows),
+        "selected_target_count": selected_count,
+        "full_dataset_target_count": full_count,
+        "excluded_target_count": full_count - selected_count,
+        "is_sensor_scoped": selected != eligible,
+    }
+    tracking = {
+        "registration_iterations": 5,
+        "tracking_iterations": 2,
+        **counts,
+    }
+    return scope, tracking
+
+
 def _finite_float(value: str, *, label: str, row_number: int) -> float:
     try:
         parsed = float(value)
@@ -926,6 +1164,7 @@ def validate_bop_result_csv(
     path: str | Path,
     *,
     dataset: Mapping[str, Any],
+    selected_scene_ids: Iterable[int] | None = None,
 ) -> dict[str, Any]:
     """Validate a standard BOP19 CSV against one exact exported target list."""
 
@@ -954,8 +1193,22 @@ def validate_bop_result_csv(
         )
 
     inventory = _dataset_inventory(str(dataset["run_root"]))
-    target_counts: dict[tuple[int, int, int], int] = inventory["target_counts"]
-    object_ids: set[int] = inventory["object_ids"]
+    all_target_counts: dict[tuple[int, int, int], int] = inventory["target_counts"]
+    selected = (
+        _normalize_selected_scene_ids(
+            list(selected_scene_ids),
+            eligible_scene_ids={key[0] for key in all_target_counts},
+            label="selected_scene_ids",
+        )
+        if selected_scene_ids is not None
+        else None
+    )
+    target_counts = {
+        key: count
+        for key, count in all_target_counts.items()
+        if selected is None or key[0] in selected
+    }
+    object_ids = {key[2] for key in target_counts}
     scene_ids = {key[0] for key in target_counts}
     image_keys = {(key[0], key[1]) for key in target_counts}
     estimates_per_target: Counter[tuple[int, int, int]] = Counter()
@@ -1063,6 +1316,13 @@ def validate_bop_result_csv(
         "target_estimate_count": matched,
         "target_required_count": required,
         "target_coverage": matched / required if required else 0.0,
+        "selected_scene_ids": sorted(scene_ids),
+        "target_inventory_sha256": _target_inventory_sha256(
+            _canonical_target_inventory(
+                inventory,
+                selected_scene_ids=sorted(scene_ids),
+            )
+        ),
         "timings_available": timings_available,
         "average_time_per_image": (
             sum(timings.values()) / len(timings)
@@ -1130,6 +1390,9 @@ def _generic_external_result_provenance(
     source_provenance_sha256: str,
     source_path: Path,
     validation: Mapping[str, Any],
+    estimator_settings: Mapping[str, Any] | None = None,
+    sensor_scope: Mapping[str, Any] | None = None,
+    tracking_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     estimator = value.get("estimator")
     if not isinstance(estimator, Mapping) or set(estimator) != {
@@ -1332,7 +1595,7 @@ def _generic_external_result_provenance(
     except ValueError as exc:
         raise ValueError("Controller provenance has invalid collection time") from exc
 
-    return {
+    normalized = {
         "schema_version": "posetestbot_external_result_provenance.v1",
         "source_schema_version": value["schema_version"],
         "source_provenance_sha256": _required_sha256(
@@ -1368,6 +1631,13 @@ def _generic_external_result_provenance(
         },
         "collected_at": collected_at,
     }
+    if estimator_settings is not None:
+        normalized["estimator_settings"] = dict(estimator_settings)
+    if sensor_scope is not None:
+        normalized["sensor_scope"] = dict(sensor_scope)
+    if tracking_provenance is not None:
+        normalized["tracking"] = dict(tracking_provenance)
+    return normalized
 
 
 def _external_result_provenance(
@@ -1378,6 +1648,9 @@ def _external_result_provenance(
     source_provenance_sha256: str,
     source_path: Path,
     validation: Mapping[str, Any],
+    estimator_settings: Mapping[str, Any] | None = None,
+    sensor_scope: Mapping[str, Any] | None = None,
+    tracking_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate controller evidence and retain only local inspection metadata."""
 
@@ -1396,6 +1669,9 @@ def _external_result_provenance(
         source_provenance_sha256=source_provenance_sha256,
         source_path=source_path,
         validation=validation,
+        estimator_settings=estimator_settings,
+        sensor_scope=sensor_scope,
+        tracking_provenance=tracking_provenance,
     )
 
 
@@ -1599,7 +1875,29 @@ def import_external_bop_result(
                 "The local BOP export changed after this cluster job was staged. "
                 "Restore or select the matching dataset snapshot before importing."
             )
-        validation = validate_bop_result_csv(source, dataset=dataset)
+        inventory = _dataset_inventory(run_root)
+        sensor_scope, tracking_provenance = _foundationpose_v2_scope(
+            controller_provenance,
+            inventory=inventory,
+        )
+        estimator_settings = (
+            {
+                "schema_version": CLUSTER_JOB_SETTINGS_SCHEMA,
+                "execution_mode": sensor_scope["execution_mode"],
+                "selected_scene_ids": list(sensor_scope["selected_scene_ids"]),
+            }
+            if sensor_scope is not None
+            else None
+        )
+        validation = validate_bop_result_csv(
+            source,
+            dataset=dataset,
+            selected_scene_ids=(
+                sensor_scope["selected_scene_ids"]
+                if sensor_scope is not None
+                else None
+            ),
+        )
         provenance = _external_result_provenance(
             controller_provenance,
             external_job_id=external_job_id,
@@ -1607,6 +1905,9 @@ def import_external_bop_result(
             source_provenance_sha256=source_provenance_sha256,
             source_path=source,
             validation=validation,
+            estimator_settings=estimator_settings,
+            sensor_scope=sensor_scope,
+            tracking_provenance=tracking_provenance,
         )
         external_job = provenance["external_job"]
         summary = {
@@ -1616,6 +1917,12 @@ def import_external_bop_result(
                 "slurm_job_id": external_job["slurm_job_id"],
             },
         }
+        if estimator_settings is not None:
+            summary["estimator_settings"] = estimator_settings
+        if sensor_scope is not None:
+            summary["sensor_scope"] = sensor_scope
+        if tracking_provenance is not None:
+            summary["tracking"] = tracking_provenance
         result = _store_result(
             run_root,
             source_path=source,
@@ -2014,6 +2321,7 @@ def create_evaluation_request(
         and "score" not in simulation
     ):
         normalized_simulation.pop("score", None)
+    sensor_scope: dict[str, Any] | None = None
     if result_id is not None:
         result = get_result(run_root, result_id, dataset=dataset)
         if result["dataset_sha256"] != dataset["dataset_sha256"]:
@@ -2031,7 +2339,19 @@ def create_evaluation_request(
             result_id,
             dataset=dataset,
         )
-        validation = validate_bop_result_csv(result_path, dataset=dataset)
+        sensor_scope = _validated_sensor_scope(
+            result.get("sensor_scope"),
+            inventory=_dataset_inventory(run_root),
+        )
+        validation = validate_bop_result_csv(
+            result_path,
+            dataset=dataset,
+            selected_scene_ids=(
+                sensor_scope["selected_scene_ids"]
+                if sensor_scope is not None
+                else None
+            ),
+        )
         if validation["sha256"] != result["sha256"]:
             raise ValueError(
                 "Registered BOP result CSV no longer matches its immutable hash"
@@ -2049,6 +2369,7 @@ def create_evaluation_request(
         "protocol": "bop19_localization",
         "result_id": result_id,
         "simulation": normalized_simulation,
+        "sensor_scope": sensor_scope,
         "vsd_delta_mm": DEFAULT_VSD_DELTA_MM,
         "renderer_type": DEFAULT_RENDERER,
         "num_workers": max(
@@ -2163,6 +2484,27 @@ def list_evaluations(
                 else progress.get("status", "queued")
             ),
             "metrics": report.get("metrics", []) if report else [],
+            "sensor_scope": (
+                report.get("sensor_scope")
+                if report is not None
+                else request_value.get("sensor_scope")
+            ),
+            "sensor_scoped": bool(
+                report.get("sensor_scoped")
+                if report is not None
+                else isinstance(request_value.get("sensor_scope"), Mapping)
+                and request_value["sensor_scope"].get("is_sensor_scoped") is True
+            ),
+            "comparability": (
+                report.get("comparability")
+                if report is not None
+                else (
+                    "selected_sensor_subset_not_directly_comparable_to_full_dataset"
+                    if isinstance(request_value.get("sensor_scope"), Mapping)
+                    and request_value["sensor_scope"].get("is_sensor_scoped") is True
+                    else "full_dataset_target_inventory"
+                )
+            ),
             "provenance": report.get("provenance", {}) if report else {},
             "report_available": report is not None,
         }
@@ -2405,16 +2747,65 @@ def run_evaluation_request(
             )
         if not result["compatible"]:
             raise ValueError("Resolved BOP result is no longer compatible")
+        inventory = _dataset_inventory(run_root)
+        result_scope = _validated_sensor_scope(
+            result.get("sensor_scope"),
+            inventory=inventory,
+        )
+        request_scope = _validated_sensor_scope(
+            request_value.get("sensor_scope"),
+            inventory=inventory,
+        )
+        if result_scope != request_scope:
+            raise ValueError(
+                "Resolved BOP result sensor scope does not match the queued request"
+            )
+        selected_scene_ids = (
+            list(result_scope["selected_scene_ids"])
+            if result_scope is not None
+            else sorted(
+                {int(target["scene_id"]) for target in inventory["targets"]}
+            )
+        )
         result_path = result_file_path(
             run_root,
             str(result["result_id"]),
             dataset=dataset,
         )
-        validation = validate_bop_result_csv(result_path, dataset=dataset)
+        validation = validate_bop_result_csv(
+            result_path,
+            dataset=dataset,
+            selected_scene_ids=selected_scene_ids,
+        )
         if validation["sha256"] != result["sha256"]:
             raise ValueError("Resolved BOP result no longer matches its immutable hash")
 
-        inventory = _dataset_inventory(run_root)
+        selected_targets = _canonical_target_inventory(
+            inventory,
+            selected_scene_ids=selected_scene_ids,
+        )
+        selected_targets_sha256 = _target_inventory_sha256(selected_targets)
+        if (
+            result_scope is not None
+            and selected_targets_sha256
+            != result_scope["selected_target_inventory_sha256"]
+        ):
+            raise ValueError("Selected BOP target inventory changed before evaluation")
+        targets_path = path.parent / SCOPED_TARGETS_FILENAME
+        if targets_path.exists():
+            if not _plain_file(targets_path, root=run_root):
+                raise ValueError(
+                    "Selected BOP targets path is not a regular run-owned file"
+                )
+            existing_targets = _load_json(targets_path)
+            if existing_targets != selected_targets:
+                raise ValueError(
+                    "Immutable selected BOP targets no longer match this evaluation"
+                )
+        else:
+            atomic_write_json(targets_path, selected_targets)
+        targets_path.chmod(0o444)
+        targets_file_sha256 = _sha256_file(targets_path)
         image_size = dataset.get("image_size")
         if not isinstance(image_size, list) or len(image_size) != 2:
             raise ValueError("BOP dataset has no uniform evaluation image size")
@@ -2427,10 +2818,11 @@ def run_evaluation_request(
             "bop_root": (run_root / "bop").as_posix(),
             "split": dataset["split"],
             "image_size": image_size,
-            "scene_ids": sorted(
-                {int(target["scene_id"]) for target in inventory["targets"]}
-            ),
-            "object_ids": sorted(inventory["object_ids"]),
+            "scene_ids": selected_scene_ids,
+            "object_ids": sorted({target["obj_id"] for target in selected_targets}),
+            "targets_path": targets_path.as_posix(),
+            "targets_sha256": targets_file_sha256,
+            "sensor_scope": result_scope,
             "vsd_delta_mm": float(request_value["vsd_delta_mm"]),
         }
         atomic_write_json(adapter_path, adapter)
@@ -2462,6 +2854,8 @@ def run_evaluation_request(
             str(dataset["dataset_alias"]),
             "--split",
             str(dataset["split"]),
+            "--targets-filename",
+            targets_path.as_posix(),
             "--image-size",
             str(image_size[0]),
             str(image_size[1]),
@@ -2519,6 +2913,10 @@ def run_evaluation_request(
             raise ValueError(
                 "Resolved BOP result changed while the metrics were running"
             )
+        if _sha256_file(targets_path) != targets_file_sha256:
+            raise ValueError(
+                "Selected BOP target inventory changed while metrics were running"
+            )
         final_dataset = inspect_dataset(run_root, include_depth_content=True)
         if (
             not final_dataset["evaluation_ready"]
@@ -2549,6 +2947,15 @@ def run_evaluation_request(
             "result_id": result["result_id"],
             "source_kind": result["source_kind"],
             "simulation": result.get("simulation"),
+            "sensor_scope": result_scope,
+            "sensor_scoped": bool(
+                result_scope is not None and result_scope["is_sensor_scoped"]
+            ),
+            "comparability": (
+                "selected_sensor_subset_not_directly_comparable_to_full_dataset"
+                if result_scope is not None and result_scope["is_sensor_scoped"]
+                else "full_dataset_target_inventory"
+            ),
             "metrics": _metric_values(scores),
             "official_scores": dict(scores),
             "provenance": {
@@ -2564,6 +2971,9 @@ def run_evaluation_request(
                 "result_filename": result["filename"],
                 "result_sha256": result["sha256"],
                 "result_validation": validation,
+                "selected_targets_path": _relative_to_run(targets_path, run_root),
+                "selected_targets_sha256": targets_file_sha256,
+                "sensor_scope": result_scope,
                 "official_scores_path": _relative_to_run(
                     official_scores_path, run_root
                 ),

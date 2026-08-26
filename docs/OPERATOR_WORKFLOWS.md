@@ -26,7 +26,7 @@ delete work. Switching context does not modify either run.
 | Workpiece Catalogue | Global CAD/geometry metadata and lifecycle | Author inputs before creating a pose template |
 | Pose Templates | Global immutable template authoring and run selection | Confirm placement in dataset step 2 |
 | Run Folders | Contained run inventory, move/delete, and cluster archive copy/restore/delete | Choose a root before creating configuration |
-| Pose Estimation | Browser-safe handoff to advertised external estimators | Requires an appropriate completed BOP export |
+| Pose Estimation | Browser-safe handoff with closed, driver-advertised settings | Requires an appropriate completed BOP export; results return to Inspect |
 | BOP Evaluation | Inspect-only standard-result validation | Requires annotations and an immutable BOP19 CSV |
 
 ## Outcome 1: calibrate cameras
@@ -149,6 +149,36 @@ full mode also renders masks, visible masks, and visibility information.
 
 Only an annotation-bearing dataset can use the Inspect evaluation path. Pose
 estimation itself remains in the separate controller/consumer boundary.
+
+### Inspect: run an external pose estimator
+
+Open **Pose Estimation** only after the active run has an immutable,
+annotation-bearing BOP export. Each sensor sequence is described by a safe
+sensor identifier, its run-owned alias, mounting mode, BOP scene ID, and frame
+and target counts. Source paths and cluster controls never enter the browser.
+
+The estimator's settings are a browser-local draft until submission. For
+FoundationPose v2 the advertised default is continuous tracking over every
+eligible sensor. Deselect sensors to create an explicitly sensor-scoped job,
+or select independent registration for the per-frame baseline. At least one
+eligible sensor is required in tracking mode. Submission snapshots the closed
+settings into the immutable controller job; changing the draft cannot mutate
+that job.
+
+Tracking is camera-local: sensor sequences and object instances do not share
+track state. A visible GT mask initializes each continuous segment, a missing
+target frame resets it, and a tracker error causes same-frame registration
+recovery. These oracle masks are initialization/recovery inputs, so the result
+must not be presented as an unconstrained detector benchmark.
+
+Import the completed standard BOP19 result back into the unchanged run. For a
+sensor-scoped FoundationPose v2 result, PoseTestBot independently recomputes
+the selected target inventory and its hash before accepting it. **BOP
+Evaluation** then writes an immutable filtered target list inside that
+evaluation and passes it to the pinned official toolkit. The report is clearly
+labelled sensor-scoped and is not directly comparable with a full-dataset
+result. External estimator execution, conversion, SSH, and scheduling remain
+owned by the companion repository.
 
 ## Physical controls
 
