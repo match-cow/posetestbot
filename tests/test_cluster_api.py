@@ -10,7 +10,13 @@ from typing import Any
 import cv2
 import numpy as np
 
-from posetestbot.bop.evaluation import inspect_dataset, list_results
+from posetestbot.bop import evaluation as bop_evaluation
+from posetestbot.bop.evaluation import (
+    create_evaluation_request,
+    inspect_dataset,
+    list_results,
+    run_evaluation_request,
+)
 from posetestbot.cluster.client import ClusterClientError, ClusterControllerClient
 from posetestbot.web.app import create_app
 from posetestbot.web.runtime import WebRuntime, WebSettings
@@ -143,6 +149,54 @@ def _status() -> dict[str, Any]:
     }
 
 
+def _tracking_status() -> dict[str, Any]:
+    status = json.loads(json.dumps(_status()))
+    runtime_id = "foundationpose-a1b694b8-bop-cea62d65-tracking-v1"
+    descriptor = {
+        "schema_version": "posetestbot_cluster_job_settings_descriptor.v1",
+        "value_schema_version": "posetestbot_cluster_job_settings.v1",
+        "additional_properties": False,
+        "fields": [
+            {
+                "key": "execution_mode",
+                "control": "enum",
+                "label": "Execution mode",
+                "description": "Choose tracking or the independent baseline.",
+                "required": True,
+                "default": "continuous_tracking",
+                "options": [
+                    {
+                        "value": "continuous_tracking",
+                        "label": "Continuous tracking",
+                    },
+                    {
+                        "value": "independent_registration",
+                        "label": "Independent registration",
+                    },
+                ],
+            },
+            {
+                "key": "selected_scene_ids",
+                "control": "sensor_scene_multiselect",
+                "label": "Sensor sequences",
+                "description": "Choose exported sensor scenes.",
+                "required": True,
+                "minimum_selected": 1,
+                "default": "all_eligible",
+            },
+        ],
+    }
+    status["runtime"]["driver_id"] = "foundationpose.v2"
+    status["runtime"]["runtime_id"] = runtime_id
+    estimator = status["estimators"][0]
+    estimator["driver_id"] = "foundationpose.v2"
+    estimator["runtime_id"] = runtime_id
+    estimator["runtime"]["driver_id"] = "foundationpose.v2"
+    estimator["runtime"]["runtime_id"] = runtime_id
+    estimator["job_settings"] = descriptor
+    return status
+
+
 class FakeController:
     def __init__(self):
         self.pose_payload: dict[str, Any] | None = None
@@ -234,6 +288,11 @@ class FakeController:
 
     def job_log(self, _job_id):
         return "controller log\nremote /secret/work\nAuthorization: Bearer fixture\n"
+
+
+class TrackingController(FakeController):
+    def status(self):
+        return _tracking_status()
 
 
 class GenericController(FakeController):
@@ -412,8 +471,107 @@ def _pose_ready_run(root: Path) -> Path:
     manifest["capabilities"].update(
         {"gt_masks_full": True, "gt_masks_visible": True, "gt_visibility_info": True}
     )
+    manifest["frame_map_path"] = "posetestbot_bop_frame_map.json"
+    manifest["instance_map_path"] = "posetestbot_instance_map.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    (run / "bop" / "posetestbot_bop_frame_map.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "posetestbot_bop_frame_map.v3",
+                "scenes": {
+                    "1": {
+                        "sensor_name": "realsense_fixture",
+                        "split": "test",
+                        "scene_folder": "test/000001",
+                        "frames": {
+                            "0": {
+                                "source_rgb": "rgb/000000.png",
+                                "source_depth": "depth/000000.png",
+                                "bop_rgb": "rgb/000000.png",
+                                "bop_depth": "depth/000000.png",
+                            }
+                        },
+                    }
+                },
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    (run / "bop" / "posetestbot_instance_map.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "posetestbot_bop_instance_map.v1",
+                "instances": [
+                    {
+                        "scene_id": 1,
+                        "im_id": 0,
+                        "gt_id": 0,
+                        "obj_id": 1,
+                        "instance_uuid": "11111111-1111-4111-8111-111111111111",
+                        "catalog_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    (run / "run_config.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "run_config.v4",
+                "capture": {
+                    "sensors": [
+                        {
+                            "sensor_type": "realsense_d435",
+                            "device_id": "fixture",
+                            "operator_alias": "Center",
+                            "display_name": "Center RGB-D",
+                            "mounting_mode": "fixed",
+                        }
+                    ]
+                },
+            },
+            indent=2,
+        )
+        + "\n"
+    )
     return run
+
+
+def _add_second_evaluation_scene(run: Path) -> None:
+    bop = run / "bop"
+    shutil.copytree(bop / "test" / "000001", bop / "test" / "000002")
+    targets_path = bop / "test_targets_bop19.json"
+    targets = json.loads(targets_path.read_text())
+    targets.append({"scene_id": 2, "im_id": 0, "obj_id": 1, "inst_count": 1})
+    targets_path.write_text(json.dumps(targets, indent=2) + "\n")
+    manifest_path = bop / "bop_export_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    second_export = json.loads(json.dumps(manifest["exports"][0]))
+    second_export.update(
+        {
+            "sensor_name": "realsense_fixture_right",
+            "scene_id": 2,
+            "scene_folder": "test/000002",
+        }
+    )
+    manifest["exports"].append(second_export)
+    manifest["validation"].update(
+        {
+            "scene_count": 2,
+            "frame_count": 2,
+            "annotation_count": 2,
+            "target_count": 2,
+        }
+    )
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    dataset_info_path = bop / "dataset_info.json"
+    dataset_info = json.loads(dataset_info_path.read_text())
+    dataset_info["scene_count"] = 2
+    dataset_info["sensors"] = ["fixture", "fixture_right"]
+    dataset_info_path.write_text(json.dumps(dataset_info, indent=2) + "\n")
 
 
 def _app(
@@ -579,6 +737,81 @@ def test_pose_setup_submission_is_server_revalidated_and_loopback_proxied(
     assert controller.pose_key.startswith("estimation-submit:")
 
 
+def test_tracking_settings_use_safe_sensor_descriptors_and_submit_immutable_scope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    controller = TrackingController()
+    app, runs_root = _app(tmp_path, controller)
+    run = _pose_ready_run(runs_root)
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs_root.as_posix())
+    client = app.test_client()
+
+    setup_response = client.get(
+        "/cluster/pose-estimation/setup", query_string={"run_root": run.as_posix()}
+    )
+
+    assert setup_response.status_code == 200
+    setup = setup_response.get_json()
+    assert setup["schema_version"] == "cluster_estimation_setup.v3"
+    assert setup["ready"] is True
+    assert setup["estimator"]["job_settings"]["additional_properties"] is False
+    assert setup["sensor_sequences"] == [
+        {
+            "scene_id": 1,
+            "sensor_id": "realsense_d435:fixture",
+            "operator_alias": "Center",
+            "display_name": "Center RGB-D",
+            "mounting_mode": "fixed",
+            "frame_count": 1,
+            "target_count": 1,
+            "tracking_eligible": True,
+            "tracking_blocker": None,
+        }
+    ]
+    settings = {
+        "schema_version": "posetestbot_cluster_job_settings.v1",
+        "execution_mode": "continuous_tracking",
+        "selected_scene_ids": [1],
+    }
+    submitted = client.post(
+        "/cluster/pose-estimation/jobs",
+        json={
+            "run_root": run.as_posix(),
+            "estimator_id": "foundationpose",
+            "profile_id": "smoke",
+            "operator": "Fixture Operator",
+            "estimator_settings": settings,
+        },
+    )
+    empty = client.post(
+        "/cluster/pose-estimation/jobs",
+        json={
+            "run_root": run.as_posix(),
+            "estimator_id": "foundationpose",
+            "profile_id": "smoke",
+            "operator": "Fixture Operator",
+            "estimator_settings": {**settings, "selected_scene_ids": []},
+        },
+    )
+    unknown = client.post(
+        "/cluster/pose-estimation/jobs",
+        json={
+            "run_root": run.as_posix(),
+            "estimator_id": "foundationpose",
+            "profile_id": "smoke",
+            "operator": "Fixture Operator",
+            "estimator_settings": {**settings, "selected_scene_ids": [2]},
+        },
+    )
+
+    assert submitted.status_code == 202
+    assert "run_root" not in submitted.get_json()["job"]["payload"]
+    assert controller.pose_payload is not None
+    assert controller.pose_payload["estimator_settings"] == settings
+    assert empty.status_code == 400
+    assert unknown.status_code == 400
+
+
 def test_generic_estimator_is_discovered_selected_and_submitted(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -598,7 +831,7 @@ def test_generic_estimator_is_discovered_selected_and_submitted(
 
     assert setup_response.status_code == 200
     setup = setup_response.get_json()
-    assert setup["schema_version"] == "cluster_estimation_setup.v2"
+    assert setup["schema_version"] == "cluster_estimation_setup.v3"
     assert setup["estimator_id"] == "megapose"
     assert setup["estimator"]["display_name"] == "MegaPose"
     assert setup["ready"] is True
@@ -816,6 +1049,118 @@ def _successful_external_job(
     return job_id
 
 
+def _successful_tracking_external_job(
+    controller: TrackingController, run: Path, tmp_path: Path
+) -> str:
+    dataset = inspect_dataset(run)
+    job_id = "pose-32345678-1234-4234-9234-123456789abc"
+    result = write_result_csv(
+        tmp_path / f"foundationpose_{dataset['dataset_alias']}-test_{job_id}.csv"
+    )
+    result_hash = hashlib.sha256(result.read_bytes()).hexdigest()
+    settings = {
+        "schema_version": "posetestbot_cluster_job_settings.v1",
+        "execution_mode": "continuous_tracking",
+        "selected_scene_ids": [1],
+    }
+    selected_targets = [
+        {"scene_id": 1, "im_id": 0, "obj_id": 1, "inst_count": 1}
+    ]
+    selected_hash = hashlib.sha256(
+        json.dumps(
+            selected_targets,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    runtime = _tracking_status()["runtime"]
+    runtime_id = runtime["runtime_id"]
+    result_counts = {
+        "estimate_count": 1,
+        "failure_count": 0,
+        "selected_target_inventory_sha256": selected_hash,
+        "selected_target_count": 1,
+        "processed_target_count": 1,
+        "selected_scope_excluded_target_count": 1,
+        "profile_excluded_target_count": 0,
+        "registration_count": 1,
+        "tracking_count": 0,
+        "reinitialization_count": 0,
+    }
+    estimator = {
+        "estimator_id": "foundationpose",
+        "driver_id": "foundationpose.v2",
+        "runtime_id": runtime_id,
+        "input_contracts": ["posetestbot.bop.v5.pose_and_masks"],
+        "output_contract": "bop19.csv.v1",
+    }
+    provenance = {
+        "schema_version": "posetestbot_cluster_collected_result.v1",
+        "job_id": job_id,
+        "dataset_sha256": dataset["dataset_sha256"],
+        "bop_content_sha256": "6" * 64,
+        "input_manifest_sha256": "3" * 64,
+        "input_hashes": {"rgb": "4" * 64, "depth": "5" * 64},
+        "runtime": runtime,
+        "estimator": estimator,
+        "estimator_settings": settings,
+        "registration_iterations": 5,
+        "tracking_iterations": 2,
+        **result_counts,
+        "external_job": {
+            "provider": "posetestbot-cluster",
+            "job_id": job_id,
+            "slurm_job_id": "91235",
+            "estimator_id": "foundationpose",
+            "driver_id": "foundationpose.v2",
+            "runtime_id": runtime_id,
+        },
+        "result": {
+            "filename": result.name,
+            "sha256": result_hash,
+            "size_bytes": result.stat().st_size,
+        },
+        "output_hashes": {result.name: result_hash},
+        "project_copy": {
+            "state": "verified",
+            "artifact_sha256": {result.name: result_hash},
+        },
+        "collected_at": "2026-08-26T12:00:00+00:00",
+    }
+    provenance_path = tmp_path / "tracking-controller-provenance.json"
+    provenance_path.write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n")
+    controller.result_source = result
+    controller.provenance_source = provenance_path
+    controller.job_value = {
+        "schema_version": "posetestbot_cluster_job.v1",
+        "job_id": job_id,
+        "kind": "estimation",
+        "state": "succeeded",
+        "status": "succeeded",
+        "payload": {
+            "run_root": run.as_posix(),
+            "estimator_id": "foundationpose",
+            "driver_id": "foundationpose.v2",
+            "runtime_id": runtime_id,
+            "estimator_settings": settings,
+        },
+        "result": {
+            "filename": result.name,
+            "sha256": result_hash,
+            "provenance_sha256": hashlib.sha256(
+                provenance_path.read_bytes()
+            ).hexdigest(),
+            "dataset_sha256": dataset["dataset_sha256"],
+            "estimator_id": "foundationpose",
+            "runtime_id": runtime_id,
+            "estimator_settings": settings,
+            **result_counts,
+        },
+        "terminal": True,
+    }
+    return job_id
+
+
 def _successful_generic_external_job(
     controller: GenericController, run: Path, tmp_path: Path
 ) -> str:
@@ -956,6 +1301,156 @@ def test_external_result_import_is_idempotent_and_historical_download_survives_d
     )
     assert download.status_code == 200
     assert hashlib.sha256(download.data).hexdigest() == records[0]["sha256"]
+
+
+def test_tracking_result_import_recomputes_and_retains_selected_sensor_scope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    controller = TrackingController()
+    app, runs_root = _app(tmp_path, controller)
+    run = _pose_ready_run(runs_root)
+    _add_second_evaluation_scene(run)
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs_root.as_posix())
+    job_id = _successful_tracking_external_job(controller, run, tmp_path)
+
+    response = app.test_client().post(
+        f"/cluster/jobs/{job_id}/import-result",
+        json={"run_root": run.as_posix()},
+    )
+
+    assert response.status_code == 201
+    [record] = list_results(run)
+    assert record["method_name"] == (
+        "FoundationPose (continuous tracking, oracle initialization)"
+    )
+    assert record["estimator_settings"] == {
+        "schema_version": "posetestbot_cluster_job_settings.v1",
+        "execution_mode": "continuous_tracking",
+        "selected_scene_ids": [1],
+    }
+    assert record["sensor_scope"] == {
+        "schema_version": "bop_result_sensor_scope.v1",
+        "scope_kind": "selected_bop_sensor_scenes",
+        "execution_mode": "continuous_tracking",
+        "selected_scene_ids": [1],
+        "eligible_scene_ids": [1, 2],
+        "selected_target_inventory_sha256": record["sensor_scope"][
+            "selected_target_inventory_sha256"
+        ],
+        "selected_target_count": 1,
+        "full_dataset_target_count": 2,
+        "excluded_target_count": 1,
+        "is_sensor_scoped": True,
+    }
+    assert record["target_required_count"] == 1
+    stored = json.loads((run / record["controller_provenance_path"]).read_text())
+    assert stored["sensor_scope"] == record["sensor_scope"]
+    assert stored["tracking"]["registration_count"] == 1
+
+
+def test_tracking_result_import_rejects_selected_inventory_hash_tampering(
+    tmp_path: Path, monkeypatch
+) -> None:
+    controller = TrackingController()
+    app, runs_root = _app(tmp_path, controller)
+    run = _pose_ready_run(runs_root)
+    _add_second_evaluation_scene(run)
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs_root.as_posix())
+    job_id = _successful_tracking_external_job(controller, run, tmp_path)
+    assert controller.provenance_source is not None
+    assert controller.job_value is not None
+    provenance = json.loads(controller.provenance_source.read_text())
+    provenance["selected_target_inventory_sha256"] = "a" * 64
+    controller.provenance_source.write_text(
+        json.dumps(provenance, indent=2, sort_keys=True) + "\n"
+    )
+    controller.job_value["result"]["selected_target_inventory_sha256"] = "a" * 64
+    controller.job_value["result"]["provenance_sha256"] = hashlib.sha256(
+        controller.provenance_source.read_bytes()
+    ).hexdigest()
+
+    response = app.test_client().post(
+        f"/cluster/jobs/{job_id}/import-result",
+        json={"run_root": run.as_posix()},
+    )
+
+    assert response.status_code == 400
+    assert "selected target inventory" in response.get_json()["output"]
+    assert list_results(run) == []
+
+
+def test_tracking_evaluation_uses_immutable_selected_sensor_targets(
+    tmp_path: Path, monkeypatch
+) -> None:
+    controller = TrackingController()
+    app, runs_root = _app(tmp_path, controller)
+    run = _pose_ready_run(runs_root)
+    _add_second_evaluation_scene(run)
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs_root.as_posix())
+    job_id = _successful_tracking_external_job(controller, run, tmp_path)
+    imported = app.test_client().post(
+        f"/cluster/jobs/{job_id}/import-result",
+        json={"run_root": run.as_posix()},
+    )
+    assert imported.status_code == 201
+    result = imported.get_json()["result"]
+    request = create_evaluation_request(run, result_id=result["result_id"])
+    request_path = (
+        run
+        / "processed"
+        / "bop_evaluation"
+        / "evaluations"
+        / request["evaluation_id"]
+        / "request.json"
+    )
+
+    monkeypatch.setattr(
+        bop_evaluation,
+        "toolkit_status",
+        lambda _root: {"available": True},
+    )
+
+    def fake_run(command, **_kwargs):
+        targets_path = Path(command[command.index("--targets-filename") + 1])
+        assert targets_path.is_absolute()
+        assert json.loads(targets_path.read_text()) == [
+            {"scene_id": 1, "im_id": 0, "obj_id": 1, "inst_count": 1}
+        ]
+        eval_root = Path(command[command.index("--eval-path") + 1])
+        result_name = Path(command[command.index("--result-filename") + 1]).stem
+        scores_path = eval_root / result_name / "scores_bop19.json"
+        scores_path.parent.mkdir(parents=True)
+        scores_path.write_text(
+            json.dumps(
+                {
+                    "bop19_average_recall_vsd": 1.0,
+                    "bop19_average_recall_mssd": 1.0,
+                    "bop19_average_recall_mspd": 1.0,
+                    "bop19_average_recall": 1.0,
+                    "bop19_average_time_per_image": 0.1,
+                }
+            )
+            + "\n"
+        )
+
+    monkeypatch.setattr(bop_evaluation.subprocess, "run", fake_run)
+
+    report = run_evaluation_request(request_path, app_root=tmp_path)
+
+    evaluation_root = request_path.parent
+    targets_path = evaluation_root / "selected_test_targets_bop19.json"
+    adapter = json.loads((evaluation_root / "dataset_adapter.json").read_text())
+    assert report["sensor_scoped"] is True
+    assert report["comparability"] == (
+        "selected_sensor_subset_not_directly_comparable_to_full_dataset"
+    )
+    assert report["sensor_scope"]["selected_scene_ids"] == [1]
+    assert adapter["scene_ids"] == [1]
+    assert adapter["targets_path"] == targets_path.as_posix()
+    assert targets_path.stat().st_mode & 0o222 == 0
+    assert report["provenance"]["command"][
+        report["provenance"]["command"].index("--targets-filename") + 1
+    ] == targets_path.as_posix()
 
 
 def test_generic_external_result_import_retains_neutral_provenance(

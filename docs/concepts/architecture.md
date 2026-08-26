@@ -27,7 +27,11 @@ Flask operator API ─────▶ LocalJobRunner ─────▶ acquisit
 
 The browser never receives the controller token, cluster credential, remote
 path, container command, or scheduler argument. PoseTestBot only returns a
-curated browser-safe controller view.
+curated browser-safe controller view. Estimator configuration is limited to a
+closed driver-advertised form: FoundationPose v2 exposes execution mode and a
+nonempty set of eligible BOP sensor-scene IDs. The form is a browser-local
+draft until submission; its normalized value then belongs immutably to the
+external job rather than to `run_config.json` or a global catalogue.
 
 ## Backend modules
 
@@ -83,4 +87,8 @@ this repository:
 
 The narrow exception is Inspect-only official BOP19 evaluation of an already
 exported annotation-bearing dataset and immutable compatible result. It writes
-derived evidence only below `processed/bop_evaluation/`.
+derived evidence only below `processed/bop_evaluation/`. For a verified
+sensor-subset result, the adapter recomputes the selected inventory from the
+unchanged local export, writes an immutable filtered BOP19 targets file inside
+the evaluation folder, and constrains the pinned toolkit to those scenes. No
+tracking or estimator logic crosses back into this repository.

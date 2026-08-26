@@ -284,6 +284,40 @@ export interface ClusterCapabilityDomain {
   blockers: string[]
 }
 
+export interface ClusterJobSettingsEnumField {
+  key: string
+  control: "enum"
+  label: string
+  description: string
+  required: true
+  default: string
+  options: Array<{ value: string; label: string }>
+}
+
+export interface ClusterJobSettingsSensorField {
+  key: string
+  control: "sensor_scene_multiselect"
+  label: string
+  description: string
+  required: true
+  minimum_selected: number
+  default: "all_eligible"
+}
+
+export interface ClusterJobSettingsDescriptor {
+  schema_version: "posetestbot_cluster_job_settings_descriptor.v1"
+  value_schema_version: "posetestbot_cluster_job_settings.v1"
+  additional_properties: false
+  fields: Array<ClusterJobSettingsEnumField | ClusterJobSettingsSensorField>
+}
+
+export interface ClusterEstimatorSettings {
+  schema_version: "posetestbot_cluster_job_settings.v1"
+  execution_mode: "continuous_tracking" | "independent_registration"
+  selected_scene_ids: number[]
+  [key: string]: JsonValue
+}
+
 export interface ClusterEstimator {
   estimator_id: string
   driver_id?: string | null
@@ -296,6 +330,7 @@ export interface ClusterEstimator {
   readiness_blockers: string[]
   input_contracts: string[]
   output_contract?: string | null
+  job_settings: ClusterJobSettingsDescriptor | null
   runtime: ClusterRuntimeIdentity
   profiles: ClusterProfile[]
 }
@@ -342,12 +377,23 @@ export interface ClusterControllerServiceStatus {
 }
 
 export interface ClusterPoseSetup {
-  schema_version: "cluster_estimation_setup.v2"
+  schema_version: "cluster_estimation_setup.v3"
   run_root: string
   ready: boolean
   estimator_id: string | null
   estimator: ClusterEstimator | null
   estimators: ClusterEstimator[]
+  sensor_sequences: Array<{
+    scene_id: number
+    sensor_id: string
+    operator_alias: string | null
+    display_name: string
+    mounting_mode: string
+    frame_count: number
+    target_count: number
+    tracking_eligible: boolean
+    tracking_blocker: string | null
+  }>
   dataset: {
     dataset_alias: string
     dataset_sha256: string
@@ -393,6 +439,7 @@ export interface ClusterJob {
     dataset_sha256?: string
     profile_id?: string
     operator?: string
+    estimator_settings?: ClusterEstimatorSettings
     [key: string]: JsonValue | undefined
   }
   result: {
@@ -401,7 +448,16 @@ export interface ClusterJob {
     dataset_sha256: string
     estimate_count: number
     failure_count: number
-    [key: string]: JsonValue
+    estimator_settings?: ClusterEstimatorSettings
+    selected_target_inventory_sha256?: string
+    selected_target_count?: number
+    processed_target_count?: number
+    selected_scope_excluded_target_count?: number
+    profile_excluded_target_count?: number
+    registration_count?: number
+    tracking_count?: number
+    reinitialization_count?: number
+    [key: string]: JsonValue | undefined
   } | null
   error: string | null
   log_available: boolean
@@ -1023,6 +1079,19 @@ export interface BopSimulationParameters {
   score?: number
 }
 
+export interface BopResultSensorScope {
+  schema_version: "bop_result_sensor_scope.v1"
+  scope_kind: "selected_bop_sensor_scenes"
+  execution_mode: "continuous_tracking" | "independent_registration"
+  selected_scene_ids: number[]
+  eligible_scene_ids: number[]
+  selected_target_inventory_sha256: string
+  selected_target_count: number
+  full_dataset_target_count: number
+  excluded_target_count: number
+  is_sensor_scoped: boolean
+}
+
 export interface BopResultSubmission {
   result_id: string
   method: string
@@ -1037,6 +1106,8 @@ export interface BopResultSubmission {
   compatible: boolean
   blockers: BopEvaluationIssue[]
   simulation?: BopSimulationParameters | null
+  estimator_settings?: ClusterEstimatorSettings | null
+  sensor_scope?: BopResultSensorScope | null
 }
 
 export interface BopEvaluationMetric {
@@ -1058,6 +1129,9 @@ export interface BopEvaluationSummary {
   protocol: string
   status: string
   metrics: BopEvaluationMetric[]
+  sensor_scope?: BopResultSensorScope | null
+  sensor_scoped: boolean
+  comparability: string
   provenance: Record<string, JsonValue>
   report_available: boolean
 }

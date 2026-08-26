@@ -56,6 +56,14 @@ test validation and explicitly labelled as such. This API is not a pose
 estimator, result converter, or acquisition stage. All result and
 evaluation evidence stays below `processed/bop_evaluation/`.
 
+An imported FoundationPose v2 result may carry a verified sensor scope. In
+that case PoseTestBot recomputes the selected target inventory from the local
+export before import. Evaluation writes
+`selected_test_targets_bop19.json` inside the evaluation directory, passes its
+absolute path to the pinned toolkit, restricts the adapter scene IDs, and
+labels a proper sensor subset as not directly comparable to a full-dataset
+result.
+
 ## External cluster controller proxy
 
 | Method and path | Contract |
@@ -67,8 +75,8 @@ evaluation evidence stays below `processed/bop_evaluation/`.
 | `POST /cluster/archives` | Submit archive creation for a locally validated run |
 | `POST /cluster/archives/<archive_id>/restore` | Submit restore with local identity/active-job checks |
 | `DELETE /cluster/archives/<archive_id>` | Queue permanent deletion of one opaque-ID archive after explicit confirmation and operator attribution |
-| `GET /cluster/pose-estimation/setup?run_root=…&estimator_id=…` | Return strict setup v2 with the browser-safe dataset identity and controller-advertised estimators |
-| `POST /cluster/pose-estimation/jobs` | Submit a typed controller job using an advertised estimator ID and supported options |
+| `GET /cluster/pose-estimation/setup?run_root=…&estimator_id=…` | Return strict setup v3 with browser-safe dataset identity, sensor sequences, and controller-advertised estimators/settings |
+| `POST /cluster/pose-estimation/jobs` | Submit a typed controller job using an advertised estimator ID, profile, and closed estimator settings |
 | `GET /cluster/jobs` | List curated external jobs |
 | `GET /cluster/jobs/<job_id>` | Inspect one curated external job |
 | `POST /cluster/jobs/<job_id>/cancel` | Request controller cancellation |
@@ -78,7 +86,32 @@ The proxy is enabled only by server configuration. Returned values are
 allow-listed and scrubbed; controller URLs/tokens, SSH data, remote paths,
 container commands, and arbitrary scheduler inputs are never accepted from or
 returned to the browser. Imported results bind the controller provenance,
-staged dataset hash, and local dataset hash.
+staged dataset hash, and local dataset hash. FoundationPose v2 import also
+requires the payload, public result, downloaded provenance, and independently
+recomputed selected-target hash to agree.
+
+FoundationPose v2 submission example:
+
+```json
+{
+  "run_root": "working_data/example",
+  "estimator_id": "foundationpose",
+  "profile_id": "full",
+  "operator": "Lab Operator",
+  "estimator_settings": {
+    "schema_version": "posetestbot_cluster_job_settings.v1",
+    "execution_mode": "continuous_tracking",
+    "selected_scene_ids": [1, 3]
+  }
+}
+```
+
+Setup sensor descriptors contain only BOP `scene_id`, a safe sensor identity,
+the run-owned alias/display label, mounting mode, counts, and tracking
+eligibility/blocker. Source paths and physical scheduler controls are never
+included. Omitting `estimator_settings` remains the controller's legacy
+compatibility request and means independent registration over all exported
+target scenes.
 
 Archive/storage readiness is independent from estimator runtime readiness. A
 run can be archived, restored, or its retained archive can be deleted even when

@@ -101,10 +101,16 @@ an estimator-driver registry,
 qualified private runtimes, and standard BOP19 CSV generation. Archive and
 restore, plus confirmed archive deletion, remain usable without any pose
 method. Estimators are available only when the controller advertises a
-qualified current driver. PoseTestBot
-revalidates the active run,
-proxies browser-safe requests, imports a completed CSV through its existing
-BOP19 validator, and retains external-job/container/input/output provenance.
+qualified current driver. A driver may advertise a closed browser-safe job
+settings form. FoundationPose v2 defaults that browser-local draft to
+continuous camera-local tracking over every eligible exported sensor, while
+allowing an operator to choose a nonempty sensor subset or the independent
+per-frame registration baseline. PoseTestBot revalidates the active run,
+proxies only those typed settings, imports a completed CSV through its existing
+BOP19 validator, and independently verifies the selected-scene target hash and
+external-job/container/input/output provenance. Sensor-subset evaluation uses
+an immutable filtered target list and is explicitly not presented as directly
+comparable to a full-dataset result.
 It never becomes an acquisition stage. The browser never receives a controller
 token or cluster credential. Private runtimes, licenses, remote paths, and
 scheduler details remain companion-owned.

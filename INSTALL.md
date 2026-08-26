@@ -366,8 +366,10 @@ defaults to the companion's `POSETESTBOT_CLUSTER_HOST` and
 `POSETESTBOT_CLUSTER_PORT`. The web process must run as the same user that owns
 the fixed service. It reads only the loopback host/port and API token; changing
 them requires a web-process restart. SSH credentials, cluster paths, runtime
-manifests, estimator settings, and service commands cannot be entered in the
-browser or returned by `/cluster/*` responses.
+manifests, arbitrary driver arguments, and service commands cannot be entered
+in the browser or returned by `/cluster/*` responses. The browser may render
+only a closed settings descriptor advertised by an installed driver; those
+values become immutable job settings on submission.
 
 The Dashboard reports service, connection, archive readiness, and estimator
 readiness as distinct states. Lifecycle actions are fixed server-owned

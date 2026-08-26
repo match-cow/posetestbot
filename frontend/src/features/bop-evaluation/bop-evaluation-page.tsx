@@ -116,6 +116,9 @@ function ResultDetails({ result, runRoot }: { result: BopResultSubmission; runRo
       <Detail label="Target estimates" value={result.target_estimate_count.toLocaleString()} />
       <Detail label="Target coverage" value={targetCoverage(result.target_coverage)} />
     </div>
+    {result.sensor_scope && <div className="mt-3 rounded border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+      {result.sensor_scope.execution_mode === "continuous_tracking" ? "Continuous tracking" : "Independent registration"} · BOP sensor scene{result.sensor_scope.selected_scene_ids.length === 1 ? "" : "s"} {result.sensor_scope.selected_scene_ids.join(", ")} · {result.sensor_scope.selected_target_count.toLocaleString()} selected targets
+    </div>}
     <Issues title="This result cannot be evaluated" issues={result.blockers} />
   </div>
 }
@@ -175,6 +178,10 @@ function MetricsReport({ evaluation }: { evaluation: BopEvaluationSummary }) {
       </div>
     </CardHeader>
     <CardContent className="space-y-5 pt-5">
+      {evaluation.sensor_scoped && evaluation.sensor_scope && <div data-testid="bop-evaluation-sensor-scope" className="flex items-start gap-3 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs">
+        <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning-foreground" />
+        <div><div className="font-semibold text-warning-foreground">Sensor-scoped evaluation</div><p className="mt-1 leading-relaxed text-muted-foreground">Official metrics use only BOP sensor scene{evaluation.sensor_scope.selected_scene_ids.length === 1 ? "" : "s"} {evaluation.sensor_scope.selected_scene_ids.join(", ")} and their {evaluation.sensor_scope.selected_target_count.toLocaleString()} targets. This report is not directly comparable to a full-dataset result.</p></div>
+      </div>}
       {evaluation.source_kind === "gt_simulation" && <div className="flex items-start gap-3 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><FlaskConical aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning-foreground" /><div><div className="font-semibold text-warning-foreground">Test-only simulated estimates</div><p className="mt-1 leading-relaxed text-muted-foreground">These values measure a GT-derived compatibility fixture, not pose-estimator performance.</p></div></div>}
       {evaluation.source_kind === "gt_simulation" && simulation && <div data-testid="bop-evaluation-simulation-evidence" className="grid gap-3 rounded-lg border border-warning/30 bg-warning/5 p-4 sm:grid-cols-2 xl:grid-cols-5">
         <Detail label="Simulation method" value={simulation.method_name ?? "GT slight offset"} />

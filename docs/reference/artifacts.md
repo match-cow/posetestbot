@@ -91,11 +91,11 @@ artifacts from the removed staged calibration implementation.
 | Path | Contract |
 | --- | --- |
 | `bop/bop_export_manifest.json` | Current `bop_export_manifest.v5` and capability declaration |
-| `bop/posetestbot_bop_frame_map.json` | Source-to-BOP frame identity |
+| `bop/posetestbot_bop_frame_map.json` | Current v3 source-to-BOP frame and exported sensor-scene identity |
 | `bop/test_targets_bop19.json` | Standard BOP19 targets |
 | `bop/models/models_info.json` | Model dimensions and identity |
 | `bop/posetestbot_pose_template.json` | Pose-template provenance |
-| `bop/posetestbot_instance_map.json` | Run instance to BOP object mapping |
+| `bop/posetestbot_instance_map.json` | Current v1 exact `(scene_id, im_id, gt_id)` to run-instance UUID mapping |
 | `bop/posetestbot_coco_annotations.json` | Optional COCO view of generated annotations |
 | `processed/bop_annotations/generation_report.json` | Optional GT/mask generation evidence |
 | `blenderproc_render_plan.json` | Transactional optional GT/mask render plan, dry-run, or skip evidence |
@@ -108,6 +108,7 @@ artifacts from the removed staged calibration implementation.
 | --- | --- |
 | `processed/bop_evaluation/results/<result_id>/` | Immutable imported/simulated CSV, validation result, and provenance |
 | `processed/bop_evaluation/evaluations/<evaluation_id>/` | Request, progress, dataset adapter, official toolkit output, and report |
+| `processed/bop_evaluation/evaluations/<evaluation_id>/selected_test_targets_bop19.json` | Immutable locally recomputed target list used for that evaluation; filtered to verified selected sensor scenes when applicable |
 
 Evaluation never mutates raw capture or the exported dataset and is not an
 acquisition stage.

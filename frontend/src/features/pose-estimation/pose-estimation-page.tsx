@@ -9,12 +9,13 @@ import { ProcessHandoff } from "@/components/process-handoff"
 import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, errorMessage, query } from "@/lib/api"
-import type { ClusterJob, ClusterPoseSetup } from "@/lib/contracts"
+import type { ClusterEstimatorSettings, ClusterJob, ClusterPoseSetup } from "@/lib/contracts"
 import { formatDate } from "@/lib/utils"
 import { useOperator } from "@/providers/operator-provider"
 
@@ -35,6 +36,11 @@ interface ScopedSubmission {
 
 interface ScopedImport extends ScopedSubmission {
   value: ImportedResult
+}
+
+interface SettingsDraft {
+  scope: string
+  values: Record<string, string | number[]>
 }
 
 function shortHash(value?: string | null) {
@@ -62,6 +68,7 @@ export function PoseEstimationPage() {
   const [operator, setOperator] = useState(() => localStorage.getItem("posetestbot.clusterOperator") ?? "")
   const [estimatorId, setEstimatorId] = useState("")
   const [profileId, setProfileId] = useState("")
+  const [settingsDraft, setSettingsDraft] = useState<SettingsDraft | null>(null)
   const [submittedJob, setSubmittedJob] = useState<ScopedSubmission | null>(null)
   const [importedResult, setImportedResult] = useState<ScopedImport | null>(null)
   const autoImportAttempted = useRef(new Set<string>())
@@ -102,11 +109,47 @@ export function PoseEstimationPage() {
   const imported = importedResult?.runRoot === selectedRun && importedResult.jobId === currentJob?.job_id
     ? importedResult.value
     : null
+  const settingsDescriptor = selectedEstimator?.job_settings ?? null
+  const sensorSequences = setup.data?.sensor_sequences ?? []
+  const settingsScope = `${selectedRun}\u0000${effectiveEstimatorId}`
+  const defaultSettingsValues = useMemo(() => {
+    const values: Record<string, string | number[]> = {}
+    for (const field of settingsDescriptor?.fields ?? []) {
+      values[field.key] = field.control === "enum"
+        ? field.default
+        : sensorSequences.filter((sensor) => sensor.tracking_eligible).map((sensor) => sensor.scene_id)
+    }
+    return values
+  }, [sensorSequences, settingsDescriptor])
+  const settingsValues = settingsDraft?.scope === settingsScope ? settingsDraft.values : defaultSettingsValues
+  const updateSetting = (key: string, value: string | number[]) => {
+    setSettingsDraft({ scope: settingsScope, values: { ...settingsValues, [key]: value } })
+  }
+  const settingsBlockers = useMemo(() => {
+    const blockers: string[] = []
+    for (const field of settingsDescriptor?.fields ?? []) {
+      const value = settingsValues[field.key]
+      if (field.control === "enum") {
+        if (typeof value !== "string" || !field.options.some((option) => option.value === value)) blockers.push(`Choose ${field.label.toLowerCase()}.`)
+      } else {
+        const selected = Array.isArray(value) ? value : []
+        if (selected.length < field.minimum_selected) blockers.push("Select at least one eligible sensor sequence.")
+        if (selected.some((sceneId) => !sensorSequences.some((sensor) => sensor.scene_id === sceneId && sensor.tracking_eligible))) blockers.push("The sensor selection contains an ineligible sequence.")
+      }
+    }
+    return [...new Set(blockers)]
+  }, [sensorSequences, settingsDescriptor, settingsValues])
+  const estimatorSettings = settingsDescriptor
+    ? settingsDescriptor.fields.reduce<Record<string, string | number[]>>(
+        (settings, field) => ({ ...settings, [field.key]: settingsValues[field.key] }),
+        { schema_version: settingsDescriptor.value_schema_version },
+      ) as ClusterEstimatorSettings
+    : null
 
   const submit = useMutation({
     mutationFn: () => api<{ job: ClusterJob }>("/cluster/pose-estimation/jobs", {
       method: "POST",
-      body: JSON.stringify({ run_root: selectedRun, estimator_id: effectiveEstimatorId, profile_id: effectiveProfileId, operator: operator.trim() }),
+      body: JSON.stringify({ run_root: selectedRun, estimator_id: effectiveEstimatorId, profile_id: effectiveProfileId, operator: operator.trim(), ...(estimatorSettings ? { estimator_settings: estimatorSettings } : {}) }),
     }),
     onSuccess: ({ job: submitted }) => {
       localStorage.setItem("posetestbot.clusterOperator", operator.trim())
@@ -138,7 +181,7 @@ export function PoseEstimationPage() {
   }, [currentJob, importResult, imported])
 
   const selectedProfile = enabledProfiles.find((profile) => profile.profile_id === effectiveProfileId)
-  const canSubmit = Boolean(setup.data?.ready && effectiveEstimatorId && effectiveProfileId && operator.trim().length >= 2 && !submit.isPending)
+  const canSubmit = Boolean(setup.data?.ready && effectiveEstimatorId && effectiveProfileId && operator.trim().length >= 2 && settingsBlockers.length === 0 && !submit.isPending)
   const runtime = setup.data?.runtime
 
   return <div className="space-y-6" data-testid="pose-estimation-page">
@@ -185,7 +228,7 @@ export function PoseEstimationPage() {
                 </div>
                 {setup.data.oracle_mask_contract && <div className="rounded-lg border border-warning/35 bg-warning/5 p-3 text-xs leading-relaxed text-warning-foreground">
                   <div className="flex items-center gap-2 font-semibold"><AlertTriangle className="size-4" />Oracle-mask qualification</div>
-                  <p className="mt-1">This qualified run does not measure detection or segmentation. Each row uses a known visible instance mask, reports score 1.0, and estimates every target independently without tracking across images or cameras.</p>
+                  <p className="mt-1">This qualified run does not measure detection or segmentation. Visible GT instance masks initialize and recover tracks; independent mode uses one per target. Scores remain 1.0, and camera-local tracks are never fused across sensors.</p>
                 </div>}
                 {setup.data.blockers.length > 0 && <div className="space-y-2" aria-label="Pose estimation blockers">
                   {setup.data.blockers.map((blocker) => <div key={`${blocker.code}-${blocker.message}`} className="flex gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"><AlertTriangle className="mt-0.5 size-4 shrink-0" /><span>{blocker.message}</span></div>)}
@@ -212,6 +255,40 @@ export function PoseEstimationPage() {
                   </Select>
                   {selectedEstimator && <p className="text-[11px] leading-relaxed text-muted-foreground">{selectedEstimator.output_contract ?? "No output contract"} · {selectedEstimator.input_contracts.join(", ") || "No compatible input contract"}</p>}
                 </div>
+                {settingsDescriptor && <div data-testid="estimator-settings-form" className="space-y-4 rounded-lg border border-primary/25 bg-primary/5 p-4">
+                  <div><div className="text-xs font-semibold">Estimator settings</div><p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">Browser-local draft for this run and estimator. Submission validates it against the unchanged export, then stores it immutably with the controller job.</p></div>
+                  {settingsDescriptor.fields.map((field) => field.control === "enum"
+                    ? <div key={field.key} className="space-y-2">
+                      <Label htmlFor={`estimator-setting-${field.key}`}>{field.label}</Label>
+                      <Select value={typeof settingsValues[field.key] === "string" ? settingsValues[field.key] as string : ""} onValueChange={(value) => updateSetting(field.key, value)}>
+                        <SelectTrigger id={`estimator-setting-${field.key}`} data-testid={`estimator-setting-${field.key}`}><SelectValue /></SelectTrigger>
+                        <SelectContent>{field.options.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
+                      </Select>
+                      <p className="text-[11px] leading-relaxed text-muted-foreground">{field.description}</p>
+                    </div>
+                    : <div key={field.key} className="space-y-2">
+                      <div><Label>{field.label}</Label><p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{field.description}</p></div>
+                      <div className="grid gap-2" data-testid={`estimator-setting-${field.key}`}>
+                        {sensorSequences.map((sensor) => {
+                          const selected = Array.isArray(settingsValues[field.key]) && (settingsValues[field.key] as number[]).includes(sensor.scene_id)
+                          return <Label key={sensor.scene_id} className={`flex items-start gap-3 rounded-md border p-3 ${sensor.tracking_eligible ? "cursor-pointer bg-card" : "bg-muted/40 opacity-65"}`}>
+                            <Checkbox
+                              aria-label={`Select ${sensor.display_name} scene ${sensor.scene_id}`}
+                              data-testid="estimator-sensor-selection"
+                              checked={selected}
+                              disabled={!sensor.tracking_eligible}
+                              onCheckedChange={(checked) => {
+                                const current = Array.isArray(settingsValues[field.key]) ? settingsValues[field.key] as number[] : []
+                                updateSetting(field.key, checked === true ? [...current, sensor.scene_id].sort((left, right) => left - right) : current.filter((sceneId) => sceneId !== sensor.scene_id))
+                              }}
+                            />
+                            <span className="min-w-0"><span className="block text-xs font-semibold">{sensor.display_name}</span><span className="mt-0.5 block font-mono text-[9px] font-normal text-muted-foreground">{sensor.sensor_id} · scene {sensor.scene_id}</span><span className="mt-1 block text-[10px] font-normal text-muted-foreground">{sensor.mounting_mode} · {sensor.frame_count.toLocaleString()} frames · {sensor.target_count.toLocaleString()} targets</span>{sensor.tracking_blocker && <span className="mt-1 block text-[10px] font-normal text-destructive">{sensor.tracking_blocker}</span>}</span>
+                          </Label>
+                        })}
+                      </div>
+                    </div>)}
+                  {settingsBlockers.map((message) => <p key={message} role="alert" className="text-[11px] font-medium text-destructive">{message}</p>)}
+                </div>}
                 <div className="space-y-2">
                   <Label htmlFor="cluster-profile">Server-owned resource profile</Label>
                   <Select value={effectiveProfileId} onValueChange={setProfileId} disabled={!enabledProfiles.length}>
@@ -235,12 +312,14 @@ export function PoseEstimationPage() {
               </div>
             </CardHeader>
             <CardContent className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.7fr)]">
-              <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
+              <div className="grid grid-cols-2 gap-2 lg:grid-cols-3 2xl:grid-cols-7">
                 <Metric label="SLURM job" value={currentJob.slurm_job_id ?? "pending"} />
                 <Metric label="Estimator" value={String(currentJob.payload.estimator_id ?? "unreported")} />
                 <Metric label="Profile" value={String(currentJob.payload.profile_id ?? "—")} />
                 <Metric label="Updated" value={formatDate(currentJob.updated_at)} />
                 <Metric label="Estimates" value={currentJob.result?.estimate_count ?? "—"} detail={currentJob.result ? `${currentJob.result.failure_count} target failures retained` : undefined} />
+                <Metric label="Mode" value={currentJob.payload.estimator_settings?.execution_mode ?? "legacy independent"} />
+                <Metric label="Sensor scenes" value={currentJob.payload.estimator_settings?.selected_scene_ids.join(", ") ?? "all"} detail={currentJob.result?.profile_excluded_target_count ? `${currentJob.result.profile_excluded_target_count} profile-bounded targets excluded` : undefined} />
               </div>
               <div className="flex flex-col justify-center gap-2">
                 {ACTIVE.has(currentJob.state) && <div className="flex items-center gap-2 text-sm"><LoaderCircle className="size-4 animate-spin text-primary-strong" />Remote work is durable and still running.</div>}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import shutil
 import uuid
@@ -24,6 +25,7 @@ from posetestbot.run_folders import (
     resolve_direct_run_folder,
     validate_expected_identity,
 )
+from posetestbot.sensors.registry import sensor_folder_name
 from posetestbot.web.runtime import (
     get_cluster_client,
     get_cluster_service_manager,
@@ -86,6 +88,13 @@ PUBLIC_COMPONENT_RE = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
 PUBLIC_CONTRACT_RE = re.compile(r"^[a-z][a-z0-9._-]{2,127}$")
 PUBLIC_REVISION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$")
 PUBLIC_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+PUBLIC_SETTING_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+PUBLIC_SENSOR_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+JOB_SETTINGS_DESCRIPTOR_SCHEMA = (
+    "posetestbot_cluster_job_settings_descriptor.v1"
+)
+JOB_SETTINGS_SCHEMA = "posetestbot_cluster_job_settings.v1"
+EXECUTION_MODES = {"continuous_tracking", "independent_registration"}
 
 
 def _json_object() -> dict[str, Any]:
@@ -222,6 +231,147 @@ def _public_estimator_runtime(value: Any) -> dict[str, Any]:
     return public
 
 
+def _public_job_settings_descriptor(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, Mapping)
+        or set(value)
+        != {
+            "schema_version",
+            "value_schema_version",
+            "additional_properties",
+            "fields",
+        }
+        or value.get("schema_version") != JOB_SETTINGS_DESCRIPTOR_SCHEMA
+        or value.get("value_schema_version") != JOB_SETTINGS_SCHEMA
+        or value.get("additional_properties") is not False
+        or not isinstance(value.get("fields"), list)
+        or not value["fields"]
+    ):
+        raise RuntimeError("The controller returned an invalid job-settings form")
+    fields: list[dict[str, Any]] = []
+    keys: set[str] = set()
+    for raw in value["fields"]:
+        if not isinstance(raw, Mapping):
+            raise RuntimeError("The controller returned an invalid settings field")
+        key = raw.get("key")
+        control = raw.get("control")
+        if (
+            not isinstance(key, str)
+            or PUBLIC_SETTING_KEY_RE.fullmatch(key) is None
+            or key in keys
+            or control not in {"enum", "sensor_scene_multiselect"}
+        ):
+            raise RuntimeError("The controller returned an invalid settings field")
+        keys.add(key)
+        label = _public_controller_text(raw.get("label"))
+        description = _public_controller_text(raw.get("description"))
+        if not label or len(label) > 120 or not description or len(description) > 500:
+            raise RuntimeError("The controller returned unsafe settings copy")
+        if control == "enum":
+            if set(raw) != {
+                "key",
+                "control",
+                "label",
+                "description",
+                "required",
+                "default",
+                "options",
+            } or raw.get("required") is not True:
+                raise RuntimeError("The controller returned an invalid enum field")
+            options = []
+            for option in raw.get("options", []):
+                if not isinstance(option, Mapping) or set(option) != {"value", "label"}:
+                    raise RuntimeError("The controller returned an invalid enum option")
+                option_value = option.get("value")
+                option_label = _public_controller_text(option.get("label"))
+                if (
+                    not isinstance(option_value, str)
+                    or PUBLIC_SETTING_KEY_RE.fullmatch(option_value) is None
+                    or not option_label
+                    or len(option_label) > 120
+                ):
+                    raise RuntimeError("The controller returned an invalid enum option")
+                options.append({"value": option_value, "label": option_label})
+            if (
+                not options
+                or len({item["value"] for item in options}) != len(options)
+                or raw.get("default") not in {item["value"] for item in options}
+            ):
+                raise RuntimeError("The controller returned an invalid enum default")
+            fields.append(
+                {
+                    "key": key,
+                    "control": control,
+                    "label": label,
+                    "description": description,
+                    "required": True,
+                    "default": raw["default"],
+                    "options": options,
+                }
+            )
+        else:
+            if set(raw) != {
+                "key",
+                "control",
+                "label",
+                "description",
+                "required",
+                "minimum_selected",
+                "default",
+            } or raw.get("required") is not True:
+                raise RuntimeError(
+                    "The controller returned an invalid sensor-selection field"
+                )
+            minimum = raw.get("minimum_selected")
+            if (
+                type(minimum) is not int
+                or minimum < 1
+                or raw.get("default") != "all_eligible"
+            ):
+                raise RuntimeError(
+                    "The controller returned an invalid sensor-selection default"
+                )
+            fields.append(
+                {
+                    "key": key,
+                    "control": control,
+                    "label": label,
+                    "description": description,
+                    "required": True,
+                    "minimum_selected": minimum,
+                    "default": "all_eligible",
+                }
+            )
+    return {
+        "schema_version": JOB_SETTINGS_DESCRIPTOR_SCHEMA,
+        "value_schema_version": JOB_SETTINGS_SCHEMA,
+        "additional_properties": False,
+        "fields": fields,
+    }
+
+
+def _public_estimator_settings(value: Any) -> dict[str, Any]:
+    if (
+        not isinstance(value, Mapping)
+        or set(value)
+        != {"schema_version", "execution_mode", "selected_scene_ids"}
+        or value.get("schema_version") != JOB_SETTINGS_SCHEMA
+        or value.get("execution_mode") not in EXECUTION_MODES
+        or not isinstance(value.get("selected_scene_ids"), list)
+        or not value["selected_scene_ids"]
+        or any(type(item) is not int or item < 1 for item in value["selected_scene_ids"])
+        or len(set(value["selected_scene_ids"])) != len(value["selected_scene_ids"])
+    ):
+        raise RuntimeError("The controller returned invalid estimator settings")
+    return {
+        "schema_version": JOB_SETTINGS_SCHEMA,
+        "execution_mode": value["execution_mode"],
+        "selected_scene_ids": sorted(value["selected_scene_ids"]),
+    }
+
+
 def _public_estimator(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise RuntimeError("The controller returned an invalid estimator")
@@ -252,8 +402,10 @@ def _public_estimator(value: Any) -> dict[str, Any]:
         public.pop("output_contract", None)
     else:
         public["output_contract"] = output_contract
+    job_settings = _public_job_settings_descriptor(value.get("job_settings"))
     return {
         **public,
+        "job_settings": job_settings,
         "blockers": [
             _public_controller_text(item) or "Estimator submission is blocked."
             for item in value.get("blockers", [])
@@ -291,7 +443,6 @@ def _public_job(value: Any) -> dict[str, Any]:
     payload = _selected_mapping(
         controller_payload,
         {
-            "run_root",
             "estimator_id",
             "driver_id",
             "runtime_id",
@@ -308,6 +459,13 @@ def _public_job(value: Any) -> dict[str, Any]:
         payload["archive_id"] = _require_id(
             controller_payload.get("archive_id"), prefix="archive"
         )
+    if (
+        isinstance(controller_payload, Mapping)
+        and controller_payload.get("estimator_settings") is not None
+    ):
+        payload["estimator_settings"] = _public_estimator_settings(
+            controller_payload["estimator_settings"]
+        )
     result = _selected_mapping(
         value.get("result"),
         {
@@ -319,8 +477,22 @@ def _public_job(value: Any) -> dict[str, Any]:
             "provenance_sha256",
             "estimate_count",
             "failure_count",
+            "selected_target_inventory_sha256",
+            "selected_target_count",
+            "processed_target_count",
+            "selected_scope_excluded_target_count",
+            "profile_excluded_target_count",
+            "registration_count",
+            "tracking_count",
+            "reinitialization_count",
         },
     )
+    if isinstance(value.get("result"), Mapping) and value["result"].get(
+        "estimator_settings"
+    ) is not None:
+        result["estimator_settings"] = _public_estimator_settings(
+            value["result"]["estimator_settings"]
+        )
     return {
         "schema_version": "posetestbot_cluster_job.v1",
         "job_id": job_id,
@@ -582,6 +754,319 @@ def _load_bop_manifest(run_root: Path) -> Mapping[str, Any]:
     return value
 
 
+def _bop_json_artifact(
+    run_root: Path,
+    value: Any,
+    *,
+    label: str,
+) -> Any:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} is missing")
+    relative = Path(value)
+    if relative.is_absolute() or ".." in relative.parts or "\\" in value:
+        raise ValueError(f"{label} must remain below the BOP export")
+    bop_root = run_root / "bop"
+    path = bop_root / relative
+    try:
+        path.resolve(strict=False).relative_to(bop_root.resolve())
+    except ValueError as exc:
+        raise ValueError(f"{label} must remain below the BOP export") from exc
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{label} is missing")
+    loaded = json.loads(path.read_text())
+    return loaded
+
+
+def _sensor_sequences(
+    run_root: Path,
+    manifest: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Build browser-safe exported-sensor descriptors without source paths."""
+
+    exports_value = manifest.get("exports")
+    exports = (
+        [item for item in exports_value if isinstance(item, Mapping)]
+        if isinstance(exports_value, list)
+        else []
+    )
+    issues: list[str] = []
+    try:
+        frame_map = _bop_json_artifact(
+            run_root,
+            manifest.get("frame_map_path"),
+            label="BOP frame map",
+        )
+        if (
+            not isinstance(frame_map, Mapping)
+            or frame_map.get("schema_version") != "posetestbot_bop_frame_map.v3"
+            or not isinstance(frame_map.get("scenes"), Mapping)
+        ):
+            raise ValueError("BOP frame map must use posetestbot_bop_frame_map.v3")
+        frame_scenes = frame_map["scenes"]
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        frame_scenes = {}
+        issues.append(str(exc))
+    try:
+        instance_map = _bop_json_artifact(
+            run_root,
+            manifest.get("instance_map_path"),
+            label="BOP instance map",
+        )
+        if (
+            not isinstance(instance_map, Mapping)
+            or instance_map.get("schema_version")
+            != "posetestbot_bop_instance_map.v1"
+            or not isinstance(instance_map.get("instances"), list)
+        ):
+            raise ValueError(
+                "BOP instance map must use posetestbot_bop_instance_map.v1"
+            )
+        instance_rows = instance_map["instances"]
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        instance_rows = []
+        issues.append(str(exc))
+    try:
+        targets = _bop_json_artifact(
+            run_root,
+            manifest.get("targets_path") or "test_targets_bop19.json",
+            label="BOP19 target inventory",
+        )
+        if not isinstance(targets, list) or any(
+            not isinstance(item, Mapping) for item in targets
+        ):
+            raise ValueError("BOP19 target inventory is invalid")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        targets = []
+        issues.append(str(exc))
+
+    configuration_by_folder: dict[str, Mapping[str, Any]] = {}
+    try:
+        run_config = json.loads((run_root / "run_config.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        run_config = {}
+    capture = run_config.get("capture") if isinstance(run_config, Mapping) else None
+    configured_sensors = (
+        capture.get("sensors") if isinstance(capture, Mapping) else None
+    )
+    if isinstance(configured_sensors, list):
+        for sensor in configured_sensors:
+            if not isinstance(sensor, Mapping):
+                continue
+            sensor_type = sensor.get("sensor_type")
+            device_id = sensor.get("device_id")
+            if not isinstance(sensor_type, str) or not isinstance(device_id, str):
+                continue
+            try:
+                configuration_by_folder[sensor_folder_name(sensor_type, device_id)] = sensor
+            except ValueError:
+                continue
+
+    identity_by_key: dict[tuple[int, int, int], Mapping[str, Any]] = {}
+    for row in instance_rows:
+        if not isinstance(row, Mapping):
+            continue
+        values = (row.get("scene_id"), row.get("im_id"), row.get("gt_id"))
+        if any(type(item) is not int for item in values):
+            continue
+        key = (int(values[0]), int(values[1]), int(values[2]))
+        if key in identity_by_key:
+            issues.append("BOP instance map contains duplicate GT identity rows")
+            continue
+        identity_by_key[key] = row
+
+    targets_by_scene: dict[int, list[Mapping[str, Any]]] = {}
+    for target in targets:
+        scene_id = target.get("scene_id")
+        if type(scene_id) is int:
+            targets_by_scene.setdefault(scene_id, []).append(target)
+
+    sequences: list[dict[str, Any]] = []
+    for export in sorted(exports, key=lambda item: int(item.get("scene_id", -1))):
+        raw_scene_id = export.get("scene_id")
+        if type(raw_scene_id) is not int or raw_scene_id < 1:
+            issues.append("BOP export contains an invalid sensor scene ID")
+            continue
+        scene_id = int(raw_scene_id)
+        scene_issues: list[str] = []
+        frame_scene = frame_scenes.get(str(scene_id))
+        if not isinstance(frame_scene, Mapping):
+            frame_scene = {}
+            scene_issues.append("Frame identity is missing for this sensor scene.")
+            issues.append(f"BOP frame identity is missing for scene {scene_id}")
+        sensor_name = frame_scene.get("sensor_name") or export.get("sensor_name")
+        if (
+            not isinstance(sensor_name, str)
+            or PUBLIC_SENSOR_ID_RE.fullmatch(sensor_name) is None
+        ):
+            sensor_name = f"scene-{scene_id}"
+            scene_issues.append("The exported sensor identifier is invalid.")
+            issues.append(f"BOP sensor identifier is invalid for scene {scene_id}")
+        frames = frame_scene.get("frames")
+        frame_count = len(frames) if isinstance(frames, Mapping) else 0
+        if frame_count < 1:
+            scene_issues.append("This sensor scene has no frame identity inventory.")
+            issues.append(f"BOP frame inventory is empty for scene {scene_id}")
+        scene_targets = targets_by_scene.get(scene_id, [])
+        target_count = sum(
+            int(item.get("inst_count", 0))
+            for item in scene_targets
+            if type(item.get("inst_count")) is int
+        )
+        if target_count < 1:
+            scene_issues.append("This sensor scene has no BOP19 target instances.")
+
+        split = str(export.get("split") or "test")
+        scene_folder = run_root / "bop" / split / f"{scene_id:06d}"
+        try:
+            scene_gt = json.loads((scene_folder / "scene_gt.json").read_text())
+            scene_info = json.loads(
+                (scene_folder / "scene_gt_info.json").read_text()
+            )
+            if not isinstance(scene_gt, Mapping) or not isinstance(
+                scene_info, Mapping
+            ):
+                raise ValueError
+            for target in scene_targets:
+                im_id = target.get("im_id")
+                obj_id = target.get("obj_id")
+                inst_count = target.get("inst_count")
+                if any(type(item) is not int for item in (im_id, obj_id, inst_count)):
+                    raise ValueError
+                gt_rows = scene_gt.get(str(im_id))
+                info_rows = scene_info.get(str(im_id))
+                if (
+                    not isinstance(gt_rows, list)
+                    or not isinstance(info_rows, list)
+                    or len(gt_rows) != len(info_rows)
+                ):
+                    raise ValueError
+                visible_gt_ids = []
+                for gt_id, (gt_row, info_row) in enumerate(zip(gt_rows, info_rows)):
+                    if (
+                        isinstance(gt_row, Mapping)
+                        and isinstance(info_row, Mapping)
+                        and gt_row.get("obj_id") == obj_id
+                    ):
+                        visibility = float(info_row.get("visib_fract", 0.0))
+                        if math.isfinite(visibility) and visibility >= 0.1:
+                            visible_gt_ids.append(gt_id)
+                if len(visible_gt_ids) != inst_count:
+                    raise ValueError
+                for gt_id in visible_gt_ids:
+                    identity = identity_by_key.get((scene_id, im_id, gt_id))
+                    try:
+                        identity_obj_id = identity.get("obj_id")  # type: ignore[union-attr]
+                        uuid.UUID(str(identity.get("instance_uuid")))  # type: ignore[union-attr]
+                    except (AttributeError, ValueError):
+                        raise ValueError from None
+                    if identity_obj_id != obj_id:
+                        raise ValueError
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            scene_issues.append(
+                "Exact target-to-instance identity is incomplete for this sensor scene."
+            )
+            if target_count:
+                issues.append(
+                    f"BOP target-to-instance identity is incomplete for scene {scene_id}"
+                )
+
+        configured = configuration_by_folder.get(sensor_name)
+        if configured is not None:
+            sensor_type = str(configured.get("sensor_type") or "sensor")
+            device_id = str(configured.get("device_id") or sensor_name)
+            safe_sensor_id = f"{sensor_type}:{device_id}"
+            if PUBLIC_SENSOR_ID_RE.fullmatch(safe_sensor_id) is None:
+                safe_sensor_id = sensor_name
+            operator_alias = configured.get("operator_alias")
+            operator_alias = (
+                str(operator_alias)[:120]
+                if isinstance(operator_alias, str) and operator_alias.strip()
+                else None
+            )
+            display_name = str(
+                configured.get("display_name") or operator_alias or sensor_name
+            )[:120]
+            mounting_mode = str(configured.get("mounting_mode") or "unknown")
+        else:
+            safe_sensor_id = sensor_name
+            operator_alias = None
+            display_name = sensor_name
+            mounting_mode = "unknown"
+            scene_issues.append(
+                "Run-owned sensor alias and mounting metadata are unavailable."
+            )
+        unique_scene_issues = list(dict.fromkeys(scene_issues))
+        sequences.append(
+            {
+                "scene_id": scene_id,
+                "sensor_id": safe_sensor_id,
+                "operator_alias": operator_alias,
+                "display_name": display_name,
+                "mounting_mode": mounting_mode,
+                "frame_count": frame_count,
+                "target_count": target_count,
+                "tracking_eligible": not unique_scene_issues,
+                "tracking_blocker": (
+                    " ".join(unique_scene_issues) if unique_scene_issues else None
+                ),
+            }
+        )
+    return sequences, list(dict.fromkeys(issues))
+
+
+def _normalize_estimator_settings_submission(
+    value: Any,
+    *,
+    descriptor: Any,
+    sensor_sequences: list[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    public_descriptor = _public_job_settings_descriptor(descriptor)
+    if public_descriptor is None or not isinstance(value, Mapping):
+        raise ValueError("The selected estimator does not accept job settings")
+    fields = public_descriptor["fields"]
+    expected_keys = {"schema_version", *(str(item["key"]) for item in fields)}
+    if set(value) != expected_keys or value.get("schema_version") != public_descriptor.get(
+        "value_schema_version"
+    ):
+        raise ValueError("estimator_settings contains unsupported fields")
+    normalized: dict[str, Any] = {
+        "schema_version": public_descriptor["value_schema_version"]
+    }
+    eligible_scene_ids = {
+        int(item["scene_id"])
+        for item in sensor_sequences
+        if item.get("tracking_eligible") is True
+    }
+    for field in fields:
+        key = str(field["key"])
+        field_value = value.get(key)
+        if field["control"] == "enum":
+            options = {str(item["value"]) for item in field["options"]}
+            if not isinstance(field_value, str) or field_value not in options:
+                raise ValueError(f"estimator_settings {key} is invalid")
+            normalized[key] = field_value
+        elif field["control"] == "sensor_scene_multiselect":
+            if (
+                not isinstance(field_value, list)
+                or len(field_value) < int(field["minimum_selected"])
+                or any(type(item) is not int or item < 1 for item in field_value)
+                or len(set(field_value)) != len(field_value)
+            ):
+                raise ValueError("Select at least one unique eligible sensor sequence")
+            unknown = sorted(set(field_value) - eligible_scene_ids)
+            if unknown:
+                raise ValueError(
+                    "estimator_settings selects an ineligible sensor scene: "
+                    + ", ".join(str(item) for item in unknown)
+                )
+            normalized[key] = sorted(field_value)
+        else:  # pragma: no cover - descriptor sanitizer is closed above
+            raise ValueError("Unsupported estimator settings control")
+    return _public_estimator_settings(normalized)
+
+
 def _build_pose_setup(
     run_root: Path, *, estimator_id: str | None = None
 ) -> dict[str, Any]:
@@ -591,6 +1076,7 @@ def _build_pose_setup(
     # every depth image in a Flask request.
     dataset = inspect_dataset(run_root)
     manifest = _load_bop_manifest(run_root)
+    sensor_sequences, sensor_identity_issues = _sensor_sequences(run_root, manifest)
     status = _controller_status()
     estimators = (
         status.get("estimators") if isinstance(status.get("estimators"), list) else []
@@ -610,6 +1096,9 @@ def _build_pose_setup(
             if isinstance(item, Mapping) and item.get("estimator_id") == selected_id
         ),
         None,
+    )
+    settings_descriptor = (
+        selected.get("job_settings") if isinstance(selected, Mapping) else None
     )
     blockers = [
         {"code": f"dataset_{index + 1}", "message": str(message)}
@@ -663,6 +1152,33 @@ def _build_pose_setup(
                 "message": "The BOP export does not declare complete visible GT masks.",
             }
         )
+    has_sensor_settings = bool(
+        isinstance(settings_descriptor, Mapping)
+        and any(
+            isinstance(field, Mapping)
+            and field.get("control") == "sensor_scene_multiselect"
+            for field in settings_descriptor.get("fields", [])
+        )
+    )
+    if has_sensor_settings:
+        if sensor_identity_issues:
+            blockers.extend(
+                {
+                    "code": "tracking_identity_invalid",
+                    "message": message,
+                }
+                for message in sensor_identity_issues
+            )
+        if not any(item["tracking_eligible"] for item in sensor_sequences):
+            blockers.append(
+                {
+                    "code": "no_tracking_sensor",
+                    "message": (
+                        "No exported sensor sequence has complete frame, target, "
+                        "instance, alias, and mounting evidence for tracking."
+                    ),
+                }
+            )
     if not status.get("available"):
         blockers.extend(status.get("blockers") or [])
     elif status.get("ready") is not True:
@@ -711,13 +1227,14 @@ def _build_pose_setup(
         }.values()
     )
     return {
-        "schema_version": "cluster_estimation_setup.v2",
+        "schema_version": "cluster_estimation_setup.v3",
         "run_root": run_root.as_posix(),
         "dataset": public_dataset_descriptor(dataset),
         "annotation_mode": manifest.get("annotation_mode"),
         "estimator_id": selected_id,
         "estimator": selected,
         "estimators": estimators,
+        "sensor_sequences": sensor_sequences,
         "oracle_mask_contract": (
             "bop_mask_visib_gt_instance.v1" if oracle_masks_required else None
         ),
@@ -725,9 +1242,13 @@ def _build_pose_setup(
             "constant_1.0_no_detection_confidence" if oracle_masks_required else None
         ),
         "execution_contract": (
-            "independent_register_per_target_no_tracking.v1"
-            if oracle_masks_required
-            else None
+            "driver_advertised_immutable_job_settings.v1"
+            if settings_descriptor is not None
+            else (
+                "independent_register_per_target_no_tracking.v1"
+                if oracle_masks_required
+                else None
+            )
         ),
         "controller": status,
         "runtime": (
@@ -744,8 +1265,9 @@ def _build_pose_setup(
                 {
                     "code": "oracle_gt_masks",
                     "message": (
-                        "Every estimate is conditioned on a BOP GT-visible instance "
-                        "mask; this is pose estimation, not detection or segmentation."
+                        "BOP GT-visible instance masks initialize and recover tracks; "
+                        "independent mode uses one for every target. This is pose "
+                        "estimation, not detection or segmentation."
                     ),
                 }
             ]
@@ -871,6 +1393,15 @@ def submit_cluster_pose_job():
     try:
         _require_cluster_enabled()
         value = _json_object()
+        if not set(value) <= {
+            "run_root",
+            "estimator_id",
+            "profile_id",
+            "operator",
+            "estimator_settings",
+            "dataset_sha256",
+        }:
+            raise ValueError("Pose-estimation submission contains unsupported fields")
         run_root = resolve_web_run_root(value.get("run_root"))
         estimator_id = value.get("estimator_id")
         if (
@@ -895,6 +1426,15 @@ def submit_cluster_pose_job():
         operator = value.get("operator")
         if not isinstance(operator, str) or not operator.strip():
             raise ValueError("operator is required")
+        estimator_settings = _normalize_estimator_settings_submission(
+            value.get("estimator_settings"),
+            descriptor=(
+                setup["estimator"].get("job_settings")
+                if isinstance(setup.get("estimator"), Mapping)
+                else None
+            ),
+            sensor_sequences=setup["sensor_sequences"],
+        )
         dataset = inspect_dataset(run_root)
         submission = {
             "estimator_id": estimator_id,
@@ -904,6 +1444,8 @@ def submit_cluster_pose_job():
             "profile_id": profile_id,
             "operator": operator.strip(),
         }
+        if estimator_settings is not None:
+            submission["estimator_settings"] = estimator_settings
         response = get_cluster_client().create_estimation_job(
             submission,
             idempotency_key=new_idempotency_key("estimation-submit"),
@@ -1055,6 +1597,51 @@ def import_cluster_result(job_id: str):
             and provenance_estimator.get("estimator_id") != estimator_id
         ):
             raise RuntimeError("Controller provenance names another estimator")
+        provenance_driver_id = (
+            provenance_estimator.get("driver_id")
+            if isinstance(provenance_estimator, Mapping)
+            else None
+        )
+        if provenance_driver_id == "foundationpose.v2":
+            settings_values = (
+                payload.get("estimator_settings"),
+                result.get("estimator_settings"),
+                provenance.get("estimator_settings"),
+            )
+            if any(not isinstance(item, Mapping) for item in settings_values):
+                raise RuntimeError(
+                    "FoundationPose v2 result lacks immutable estimator settings"
+                )
+            if not (
+                dict(settings_values[0])
+                == dict(settings_values[1])
+                == dict(settings_values[2])
+            ):
+                raise RuntimeError(
+                    "FoundationPose v2 estimator settings changed across job evidence"
+                )
+            execution_mode = settings_values[0].get("execution_mode")
+            method_name = (
+                "FoundationPose (continuous tracking, oracle initialization)"
+                if execution_mode == "continuous_tracking"
+                else "FoundationPose (independent registration, oracle GT masks)"
+            )
+            for field in (
+                "selected_target_inventory_sha256",
+                "selected_target_count",
+                "processed_target_count",
+                "selected_scope_excluded_target_count",
+                "profile_excluded_target_count",
+                "registration_count",
+                "tracking_count",
+                "reinitialization_count",
+                "estimate_count",
+                "failure_count",
+            ):
+                if result.get(field) != provenance.get(field):
+                    raise RuntimeError(
+                        "FoundationPose v2 result scope or tracking evidence changed"
+                    )
         registered, created = import_external_bop_result(
             run_root,
             result_path,
