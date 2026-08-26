@@ -106,9 +106,13 @@ artifacts from the removed staged calibration implementation.
 
 | Path | Contract |
 | --- | --- |
-| `processed/bop_evaluation/results/<result_id>/` | Immutable imported/simulated CSV, validation result, and provenance |
+| `processed/bop_evaluation/results/<result_id>/result.json` | Immutable result identity, hashes, dataset binding, optional external-job identity, and bounded FoundationPose execution summary |
+| `processed/bop_evaluation/results/<result_id>/*.csv` | Immutable validated standard BOP19 estimates |
+| `processed/bop_evaluation/results/<result_id>/controller-provenance.json` | Optional sanitized, hash-bound controller/runtime and bounded execution evidence; manual imports do not fabricate it |
 | `processed/bop_evaluation/evaluations/<evaluation_id>/` | Request, progress, dataset adapter, official toolkit output, and report |
 | `processed/bop_evaluation/evaluations/<evaluation_id>/selected_test_targets_bop19.json` | Immutable locally recomputed target list used for that evaluation; filtered to verified selected sensor scenes when applicable |
 
 Evaluation never mutates raw capture or the exported dataset and is not an
-acquisition stage.
+acquisition stage. Result ZIP packages are generated deterministically on
+demand after rechecking retained hashes; they are downloads, not additional
+stored run artifacts. Pose Results likewise writes no visualization files.

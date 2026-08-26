@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { AlertTriangle, Archive, ArrowRight, CheckCircle2, Cpu, Download, ExternalLink, FileCheck2, LoaderCircle, RefreshCw, Send, Server } from "lucide-react"
+import { AlertTriangle, Archive, ArrowRight, Box, CheckCircle2, Cpu, Download, ExternalLink, FileCheck2, FileJson, LoaderCircle, RefreshCw, ScanSearch, Send, Server } from "lucide-react"
 import { Link } from "react-router-dom"
 import { toast } from "sonner"
 
@@ -15,7 +15,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, errorMessage, query } from "@/lib/api"
-import type { ClusterEstimatorSettings, ClusterJob, ClusterPoseSetup } from "@/lib/contracts"
+import type { BopResultSubmission, ClusterEstimatorSettings, ClusterJob, ClusterPoseSetup } from "@/lib/contracts"
 import { formatDate } from "@/lib/utils"
 import { useOperator } from "@/providers/operator-provider"
 
@@ -23,10 +23,13 @@ const ACTIVE = new Set(["preparing", "transferring", "submitted", "pending", "ru
 const SUCCESS = new Set(["succeeded", "succeeded-with-warning"])
 
 interface ImportedResult {
-  result: { result_id: string; filename: string; method: string }
+  result: BopResultSubmission
   created: boolean
   evaluation_url: string
+  inspection_url: string
   download_url: string
+  package_url: string
+  provenance_url: string
 }
 
 interface ScopedSubmission {
@@ -71,7 +74,6 @@ export function PoseEstimationPage() {
   const [settingsDraft, setSettingsDraft] = useState<SettingsDraft | null>(null)
   const [submittedJob, setSubmittedJob] = useState<ScopedSubmission | null>(null)
   const [importedResult, setImportedResult] = useState<ScopedImport | null>(null)
-  const autoImportAttempted = useRef(new Set<string>())
 
   const setup = useQuery({
     queryKey: ["cluster-pose-setup", selectedRun, estimatorId],
@@ -84,14 +86,15 @@ export function PoseEstimationPage() {
     : setup.data?.estimator_id ?? estimators[0]?.estimator_id ?? ""
   const selectedEstimator = estimators.find((estimator) => estimator.estimator_id === effectiveEstimatorId) ?? setup.data?.estimator ?? null
   const history = useQuery({
-    queryKey: ["cluster-jobs"],
-    queryFn: () => api<{ jobs: ClusterJob[] }>(query("/cluster/jobs", { limit: 50 })),
+    queryKey: ["cluster-jobs", selectedRun, effectiveEstimatorId],
+    queryFn: () => api<{ jobs: ClusterJob[] }>(query("/cluster/jobs", { run_root: selectedRun, estimator_id: effectiveEstimatorId, limit: 50 })),
+    enabled: Boolean(effectiveEstimatorId),
     retry: false,
     refetchInterval: (state) => state.state.data?.jobs.some((job) => ACTIVE.has(job.state)) ? 2_000 : 10_000,
   })
   const latestRunJob = useMemo(
-    () => history.data?.jobs.find((job) => job.payload.run_root === selectedRun && job.payload.estimator_id === effectiveEstimatorId) ?? null,
-    [effectiveEstimatorId, history.data, selectedRun],
+    () => history.data?.jobs[0] ?? null,
+    [history.data],
   )
   const submittedJobId = submittedJob?.runRoot === selectedRun ? submittedJob.jobId : null
   const selectedJobId = submittedJobId ?? latestRunJob?.job_id ?? null
@@ -101,16 +104,25 @@ export function PoseEstimationPage() {
     enabled: Boolean(selectedJobId),
     refetchInterval: (state) => ACTIVE.has(state.state.data?.job.state ?? "") ? 1_500 : false,
   })
-  const currentJob = job.data?.job ?? (latestRunJob?.job_id === selectedJobId ? latestRunJob : null)
+  const currentJobBase = job.data?.job ?? (latestRunJob?.job_id === selectedJobId ? latestRunJob : null)
+  const currentJob = currentJobBase
+    ? {
+        ...currentJobBase,
+        collection: latestRunJob?.job_id === currentJobBase.job_id
+          ? latestRunJob.collection
+          : currentJobBase.collection,
+      }
+    : null
   const enabledProfiles = setup.data?.enabled_profiles ?? []
   const effectiveProfileId = enabledProfiles.some((profile) => profile.profile_id === profileId)
     ? profileId
     : enabledProfiles[0]?.profile_id ?? ""
-  const imported = importedResult?.runRoot === selectedRun && importedResult.jobId === currentJob?.job_id
+  const collectedResponse = importedResult?.runRoot === selectedRun && importedResult.jobId === currentJob?.job_id
     ? importedResult.value
     : null
+  const collectedResult = collectedResponse?.result ?? currentJob?.collection?.result ?? null
   const settingsDescriptor = selectedEstimator?.job_settings ?? null
-  const sensorSequences = setup.data?.sensor_sequences ?? []
+  const sensorSequences = useMemo(() => setup.data?.sensor_sequences ?? [], [setup.data?.sensor_sequences])
   const settingsScope = `${selectedRun}\u0000${effectiveEstimatorId}`
   const defaultSettingsValues = useMemo(() => {
     const values: Record<string, string | number[]> = {}
@@ -155,30 +167,25 @@ export function PoseEstimationPage() {
       localStorage.setItem("posetestbot.clusterOperator", operator.trim())
       setSubmittedJob({ runRoot: selectedRun, jobId: submitted.job_id })
       setImportedResult(null)
-      autoImportAttempted.current.delete(submitted.job_id)
       toast.success(`${selectedEstimator?.display_name ?? effectiveEstimatorId} job accepted`, { description: "Work continues after navigation. Monitor it from Jobs." })
-      queryClient.invalidateQueries({ queryKey: ["cluster-jobs"] })
+      queryClient.invalidateQueries({ queryKey: ["cluster-jobs", selectedRun, effectiveEstimatorId] })
     },
     onError: (error) => toast.error("Estimator job was not submitted", { description: errorMessage(error) }),
   })
-  const importResult = useMutation({
+  const collectResult = useMutation({
     mutationFn: (jobId: string) => api<ImportedResult>(`/cluster/jobs/${jobId}/import-result`, {
       method: "POST",
       body: JSON.stringify({ run_root: selectedRun }),
     }),
     onSuccess: (value, jobId) => {
       setImportedResult({ runRoot: selectedRun, jobId, value })
-      toast.success(value.created ? "Cluster result imported" : "Imported result verified")
+      toast.success(value.created ? "Cluster result collected" : "Collected result verified")
+      void queryClient.invalidateQueries({ queryKey: ["cluster-jobs", selectedRun, effectiveEstimatorId] })
+      void queryClient.invalidateQueries({ queryKey: ["bop-evaluation", "setup", selectedRun] })
+      void queryClient.invalidateQueries({ queryKey: ["bop-inspection"] })
     },
-    onError: (error) => toast.error("Automatic result import needs attention", { description: errorMessage(error) }),
+    onError: (error) => toast.error("Cluster result was not collected", { description: errorMessage(error) }),
   })
-
-  useEffect(() => {
-    if (!currentJob || !SUCCESS.has(currentJob.state) || imported || importResult.isPending) return
-    if (autoImportAttempted.current.has(currentJob.job_id)) return
-    autoImportAttempted.current.add(currentJob.job_id)
-    importResult.mutate(currentJob.job_id)
-  }, [currentJob, importResult, imported])
 
   const selectedProfile = enabledProfiles.find((profile) => profile.profile_id === effectiveProfileId)
   const canSubmit = Boolean(setup.data?.ready && effectiveEstimatorId && effectiveProfileId && operator.trim().length >= 2 && settingsBlockers.length === 0 && !submit.isPending)
@@ -324,12 +331,16 @@ export function PoseEstimationPage() {
               <div className="flex flex-col justify-center gap-2">
                 {ACTIVE.has(currentJob.state) && <div className="flex items-center gap-2 text-sm"><LoaderCircle className="size-4 animate-spin text-primary-strong" />Remote work is durable and still running.</div>}
                 {currentJob.error && <p className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{currentJob.error}</p>}
-                {SUCCESS.has(currentJob.state) && !imported && <Button variant="outline" onClick={() => importResult.mutate(currentJob.job_id)} disabled={importResult.isPending}>{importResult.isPending ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}{importResult.isPending ? "Importing result…" : importResult.isError ? "Retry result import" : "Import result"}</Button>}
-                {imported && <div className="rounded-lg border border-success/35 bg-success/5 p-3">
-                  <div className="flex items-center gap-2 text-sm font-semibold text-success"><CheckCircle2 className="size-4" />Immutable BOP19 result imported</div>
+                {SUCCESS.has(currentJob.state) && !collectedResult && <Button variant="outline" onClick={() => collectResult.mutate(currentJob.job_id)} disabled={collectResult.isPending}>{collectResult.isPending ? <LoaderCircle className="animate-spin" /> : <Download />}{collectResult.isPending ? "Collecting result…" : collectResult.isError ? "Retry result collection" : "Collect result"}</Button>}
+                {collectedResult && <div className="rounded-lg border border-success/35 bg-success/5 p-3" data-testid="pose-estimation-collected-result">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-success"><CheckCircle2 className="size-4" />Immutable BOP19 result collected</div>
+                  <p className="mt-1 break-all font-mono text-[9px] text-muted-foreground">{collectedResult.result_id} · {shortHash(collectedResult.sha256)}</p>
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <Button asChild size="sm"><Link to={imported.evaluation_url}>Evaluate result<ArrowRight /></Link></Button>
-                    <Button asChild size="sm" variant="outline"><a href={imported.download_url}><Download />Download BOP CSV</a></Button>
+                    <Button asChild size="sm"><Link to={collectedResponse?.inspection_url ?? `/pose-results?result_id=${collectedResult.result_id}`}><ScanSearch />Inspect poses</Link></Button>
+                    <Button asChild size="sm" variant="outline"><Link to={collectedResponse?.evaluation_url ?? `/bop-evaluation?result_id=${collectedResult.result_id}`}>Evaluate<ArrowRight /></Link></Button>
+                    <Button asChild size="sm" variant="outline"><a href={collectedResponse?.package_url ?? query(`/bop/evaluation/results/${collectedResult.result_id}/package`, { run_root: selectedRun })}><Box />Package</a></Button>
+                    <Button asChild size="sm" variant="outline"><a href={collectedResponse?.download_url ?? query(`/bop/evaluation/results/${collectedResult.result_id}/download`, { run_root: selectedRun })}><Download />CSV</a></Button>
+                    {collectedResult.provenance_available && <Button asChild size="sm" variant="outline"><a href={collectedResponse?.provenance_url ?? query(`/bop/evaluation/results/${collectedResult.result_id}/provenance`, { run_root: selectedRun })}><FileJson />Provenance</a></Button>}
                   </div>
                 </div>}
                 <Button asChild variant="ghost" size="sm"><Link to="/jobs">View logs and all cluster jobs<ExternalLink /></Link></Button>

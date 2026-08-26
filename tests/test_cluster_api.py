@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import shutil
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -1104,8 +1106,31 @@ def _successful_tracking_external_job(
         "runtime": runtime,
         "estimator": estimator,
         "estimator_settings": settings,
+        "oracle_mask_contract": "bop_mask_visib_gt_instance.v1",
+        "score_contract": "constant_1.0_no_detection_confidence",
+        "execution_contract": "sensor_local_instance_continuous_tracking.v1",
         "registration_iterations": 5,
         "tracking_iterations": 2,
+        "track_segment_count": 1,
+        "recorded_track_segment_count": 1,
+        "omitted_track_segment_count": 0,
+        "track_segments": [
+            {
+                "scene_id": 1,
+                "sensor_id": "fixture",
+                "obj_id": 1,
+                "instance_uuid": "11111111-1111-4111-8111-111111111111",
+                "start_im_id": 0,
+                "end_im_id": 0,
+                "frame_count": 1,
+                "registration_count": 1,
+                "tracking_count": 0,
+                "reinitialization_count": 0,
+                "reset_reason": "end_of_scene",
+            }
+        ],
+        "failures": [],
+        "image_timings_seconds": {"1/0": 0.01},
         **result_counts,
         "external_job": {
             "provider": "posetestbot-cluster",
@@ -1292,6 +1317,33 @@ def test_external_result_import_is_idempotent_and_historical_download_survives_d
     assert "project_copy" not in stored and "scheduler" not in stored
     assert "/secret" not in json.dumps(stored)
 
+    provenance_download = client.get(
+        f"/bop/evaluation/results/{records[0]['result_id']}/provenance",
+        query_string={"run_root": run.as_posix()},
+    )
+    first_package = client.get(
+        f"/bop/evaluation/results/{records[0]['result_id']}/package",
+        query_string={"run_root": run.as_posix()},
+    )
+    second_package = client.get(
+        f"/bop/evaluation/results/{records[0]['result_id']}/package",
+        query_string={"run_root": run.as_posix()},
+    )
+    assert provenance_download.status_code == 200
+    assert json.loads(provenance_download.data) == stored
+    assert first_package.status_code == 200
+    assert first_package.data == second_package.data
+    with zipfile.ZipFile(io.BytesIO(first_package.data)) as archive:
+        assert sorted(archive.namelist()) == sorted(
+            [records[0]["filename"], "manifest.json", "provenance.json"]
+        )
+        package_manifest = json.loads(archive.read("manifest.json"))
+        assert package_manifest["result_id"] == records[0]["result_id"]
+        assert package_manifest["provenance"]["sha256"] == records[0][
+            "controller_provenance_sha256"
+        ]
+        assert "/secret" not in archive.read("provenance.json").decode()
+
     manifest = run / "bop" / "bop_export_manifest.json"
     manifest.write_text(manifest.read_text() + " ")
     result_id = records[0]["result_id"]
@@ -1301,6 +1353,92 @@ def test_external_result_import_is_idempotent_and_historical_download_survives_d
     )
     assert download.status_code == 200
     assert hashlib.sha256(download.data).hexdigest() == records[0]["sha256"]
+
+    provenance_path = run / records[0]["controller_provenance_path"]
+    provenance_path.chmod(0o600)
+    provenance_path.write_bytes(provenance_path.read_bytes() + b"\n")
+    assert client.get(
+        f"/bop/evaluation/results/{result_id}/provenance",
+        query_string={"run_root": run.as_posix()},
+    ).status_code == 400
+    assert client.get(
+        f"/bop/evaluation/results/{result_id}/package",
+        query_string={"run_root": run.as_posix()},
+    ).status_code == 400
+
+
+def test_filtered_cluster_job_recovery_is_path_free_and_collection_is_durable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    controller = FakeController()
+    app, runs_root = _app(tmp_path, controller)
+    run = _pose_ready_run(runs_root)
+    other = make_tiny_evaluation_run(runs_root, name="other-run")
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs_root.as_posix())
+    job_id = _successful_external_job(controller, run, tmp_path)
+    assert controller.job_value is not None
+    other_job = json.loads(json.dumps(controller.job_value))
+    other_job["job_id"] = "pose-72345678-1234-4234-9234-123456789abc"
+    other_job["payload"]["run_root"] = other.as_posix()
+    other_job["payload"]["remote_work_dir"] = "/secret/other/job"
+
+    monkeypatch.setattr(
+        controller,
+        "estimation_jobs",
+        lambda **_kwargs: {
+            "jobs": [other_job, controller.job_value],
+            "next_cursor": "private-cursor",
+        },
+    )
+    client = app.test_client()
+    before = client.get(
+        "/cluster/jobs",
+        query_string={
+            "run_root": run.as_posix(),
+            "estimator_id": "foundationpose",
+            "limit": 10,
+        },
+    )
+
+    assert before.status_code == 200
+    assert before.get_json()["next_cursor"] is None
+    assert [job["job_id"] for job in before.get_json()["jobs"]] == [job_id]
+    assert before.get_json()["jobs"][0]["collection"] == {
+        "state": "available",
+        "result": None,
+    }
+    serialized = before.get_data(as_text=True)
+    assert run.as_posix() not in serialized
+    assert other.as_posix() not in serialized
+    assert "/secret" not in serialized
+
+    collected = client.post(
+        f"/cluster/jobs/{job_id}/import-result", json={"run_root": run.as_posix()}
+    )
+    after = client.get(
+        "/cluster/jobs",
+        query_string={
+            "run_root": run.as_posix(),
+            "estimator_id": "foundationpose",
+            "limit": 10,
+        },
+    )
+
+    assert collected.status_code == 201
+    collection = after.get_json()["jobs"][0]["collection"]
+    assert collection["state"] == "collected"
+    assert collection["result"]["result_id"] == collected.get_json()["result"][
+        "result_id"
+    ]
+    assert "path" not in collection["result"]
+    assert client.get(
+        "/cluster/jobs",
+        query_string={"run_root": tmp_path.as_posix()},
+    ).status_code == 400
+    assert client.get(
+        "/cluster/jobs",
+        query_string={"estimator_id": "FoundationPose"},
+    ).status_code == 400
 
 
 def test_tracking_result_import_recomputes_and_retains_selected_sensor_scope(
@@ -1346,6 +1484,22 @@ def test_tracking_result_import_recomputes_and_retains_selected_sensor_scope(
     stored = json.loads((run / record["controller_provenance_path"]).read_text())
     assert stored["sensor_scope"] == record["sensor_scope"]
     assert stored["tracking"]["registration_count"] == 1
+    assert stored["tracking"]["track_segments"] == [
+        {
+            "end_im_id": 0,
+            "frame_count": 1,
+            "instance_uuid": "11111111-1111-4111-8111-111111111111",
+            "obj_id": 1,
+            "registration_count": 1,
+            "reinitialization_count": 0,
+            "reset_reason": "end_of_scene",
+            "scene_id": 1,
+            "sensor_id": "fixture",
+            "start_im_id": 0,
+            "tracking_count": 0,
+        }
+    ]
+    assert stored["tracking"]["image_timings_seconds"] == {"1/0": 0.01}
 
 
 def test_tracking_result_import_rejects_selected_inventory_hash_tampering(

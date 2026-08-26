@@ -2,9 +2,9 @@
 
 # Complete HTTP route index
 
-This index contains all **117** non-static Flask rules registered by
+This index contains all **126** non-static Flask rules registered by
 `posetestbot.web.app.create_app`, rendered as
-**121** method-specific operations. It is generated from the
+**130** method-specific operations. It is generated from the
 running route map, so aliases remain explicit and every application-declared
 method has its own row. Flask's implicit `HEAD` and `OPTIONS` methods are
 excluded.
@@ -27,11 +27,20 @@ uv run python scripts/generate_http_api_reference.py --check
 | --- | --- | --- | --- | --- |
 | `POST` | `/bop/annotations` | JSON | Queue bop annotations | `bop_annotations.queue_bop_annotations` |
 | `GET` | `/bop/annotations/setup` | JSON | Bop annotations setup | `bop_annotations.bop_annotations_setup` |
+| `GET` | `/bop/evaluation/results` | JSON | Bop result list | `bop_evaluation.bop_result_list` |
 | `POST` | `/bop/evaluation/results` | JSON | Bop result import | `bop_evaluation.bop_result_import` |
 | `GET` | `/bop/evaluation/results/<result_id>/download` | File | Download bop result | `bop_evaluation.download_bop_result` |
+| `GET` | `/bop/evaluation/results/<result_id>/package` | ZIP | Download bop result package | `bop_evaluation.download_bop_result_package` |
+| `GET` | `/bop/evaluation/results/<result_id>/provenance` | JSON | Download bop result provenance | `bop_evaluation.download_bop_result_provenance` |
 | `GET` | `/bop/evaluation/setup` | JSON | Bop evaluation setup | `bop_evaluation.bop_evaluation_setup` |
 | `POST` | `/bop/evaluations` | JSON | Queue bop evaluation | `bop_evaluation.queue_bop_evaluation` |
 | `GET` | `/bop/evaluations/<evaluation_id>/report` | File | Download bop evaluation report | `bop_evaluation.download_bop_evaluation_report` |
+| `GET` | `/bop/inspection/frame` | JSON | Bop inspection frame | `bop_inspection.bop_inspection_frame` |
+| `GET` | `/bop/inspection/frames` | JSON | Bop inspection frames | `bop_inspection.bop_inspection_frames` |
+| `GET` | `/bop/inspection/masks/<result_id>/<int:scene_id>/<int:im_id>/<int:gt_id>/<kind>` | PNG | Bop inspection mask | `bop_inspection.bop_inspection_mask` |
+| `GET` | `/bop/inspection/media/<result_id>/<int:scene_id>/<int:im_id>/<kind>` | File | Bop inspection image | `bop_inspection.bop_inspection_image` |
+| `GET` | `/bop/inspection/models/<result_id>/<int:obj_id>` | PLY | Bop inspection model | `bop_inspection.bop_inspection_model` |
+| `GET` | `/bop/inspection/setup` | JSON | Bop inspection setup | `bop_inspection.bop_inspection_setup` |
 
 ## Calibration
 

@@ -23,7 +23,7 @@ replace the defaults. Every API path still passes the same containment checks.
 | Immutable input snapshot | calibration selection/bundle, pose-template selection, object instances | Hash-bound to the run so later library changes cannot alter it |
 | Derived evidence | sync, calibration, render, and validation reports | Reproducible output, normally below `processed/` |
 | Dataset export | `bop/` | Bound to selected frames, calibration, models, annotations, and provenance |
-| Inspect evaluation | `processed/bop_evaluation/` | Immutable inputs/results plus derived official-toolkit evidence |
+| Inspect results/evaluation | `processed/bop_evaluation/` | Immutable CSV/provenance and derived official-toolkit evidence; frame visualization is read-only |
 
 ## Manifest contract
 

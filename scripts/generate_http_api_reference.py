@@ -59,6 +59,9 @@ def _group(path: str) -> str:
 
 
 INTERFACE_OVERRIDES = {
+    "bop_evaluation.download_bop_result_package": "ZIP",
+    "bop_inspection.bop_inspection_mask": "PNG",
+    "bop_inspection.bop_inspection_model": "PLY",
     "calibration_targets.calibration_target_preview": "PNG",
     "jobs_commands.get_job_log": "Text",
     "pose_templates.library_thumbnail": "JSON",

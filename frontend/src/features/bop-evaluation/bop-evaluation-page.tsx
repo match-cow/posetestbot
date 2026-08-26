@@ -4,17 +4,20 @@ import { Link, useSearchParams } from "react-router-dom"
 import {
   AlertTriangle,
   ArrowRight,
+  Box,
   ChartNoAxesCombined,
   CheckCircle2,
   Clock3,
   Database,
   Download,
+  FileJson,
   FileUp,
   FlaskConical,
   History,
   LoaderCircle,
   Play,
   RefreshCw,
+  ScanSearch,
   ShieldCheck,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -28,7 +31,6 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { api, errorMessage, query } from "@/lib/api"
 import type {
   BopEvaluationIssue,
@@ -108,7 +110,12 @@ function ResultDetails({ result, runRoot }: { result: BopResultSubmission; runRo
         <div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{result.display_name}</span><StatusBadge status={result.compatible ? "valid" : "invalid"} tone={result.compatible ? "success" : "destructive"}>{result.compatible ? "compatible" : "incompatible"}</StatusBadge></div>
         <div className="mt-1 text-xs text-muted-foreground">{result.method} · imported {formatDate(result.created_at)}</div>
       </div>
-      <div className="flex flex-wrap items-center gap-2"><span className="font-mono text-[10px] text-muted-foreground">{shortHash(result.sha256)}</span><Button asChild variant="outline" size="sm"><a href={query(`/bop/evaluation/results/${result.result_id}/download`, { run_root: runRoot })}><Download />Download BOP CSV</a></Button></div>
+      <div className="flex flex-wrap items-center gap-2"><span className="font-mono text-[10px] text-muted-foreground">{shortHash(result.sha256)}</span>
+        <Button asChild size="sm"><Link to={`/pose-results?result_id=${result.result_id}`}><ScanSearch />Inspect poses</Link></Button>
+        <Button asChild variant="outline" size="sm"><a href={query(`/bop/evaluation/results/${result.result_id}/package`, { run_root: runRoot })}><Box />Package</a></Button>
+        <Button asChild variant="outline" size="sm"><a href={query(`/bop/evaluation/results/${result.result_id}/download`, { run_root: runRoot })}><Download />CSV</a></Button>
+        {result.provenance_available && <Button asChild variant="outline" size="sm"><a href={query(`/bop/evaluation/results/${result.result_id}/provenance`, { run_root: runRoot })}><FileJson />Provenance</a></Button>}
+      </div>
     </div>
     <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <Detail label="BOP CSV" value={result.filename} mono />
@@ -273,16 +280,22 @@ export function BopEvaluationPage() {
     () => [...(setup.data?.evaluations ?? [])].sort((left, right) => right.created_at.localeCompare(left.created_at)),
     [setup.data?.evaluations],
   )
+  const scopedEvaluations = useMemo(
+    () => orderedEvaluations.filter((evaluation) => sourceKind === "registered_result"
+      ? evaluation.source_kind !== "gt_simulation" && evaluation.result_id === selectedResultId
+      : evaluation.source_kind === "gt_simulation"),
+    [orderedEvaluations, selectedResultId, sourceKind],
+  )
   const savedEvaluationId = evaluationSelection?.runRoot === selectedRun ? evaluationSelection.evaluationId : ""
   const submittedEvaluationId = submittedEvaluation?.runRoot === selectedRun ? submittedEvaluation.evaluationId : ""
-  const selectedEvaluationId = orderedEvaluations.some((evaluation) => evaluation.evaluation_id === savedEvaluationId)
+  const selectedEvaluationId = scopedEvaluations.some((evaluation) => evaluation.evaluation_id === savedEvaluationId)
     ? savedEvaluationId
-    : orderedEvaluations.some((evaluation) => evaluation.evaluation_id === submittedEvaluationId)
+    : scopedEvaluations.some((evaluation) => evaluation.evaluation_id === submittedEvaluationId)
       ? submittedEvaluationId
-      : orderedEvaluations.find((evaluation) => evaluation.report_available)?.evaluation_id
-        ?? orderedEvaluations[0]?.evaluation_id
+      : scopedEvaluations.find((evaluation) => evaluation.report_available)?.evaluation_id
+        ?? scopedEvaluations[0]?.evaluation_id
         ?? ""
-  const selectedEvaluation = orderedEvaluations.find((evaluation) => evaluation.evaluation_id === selectedEvaluationId) ?? null
+  const selectedEvaluation = scopedEvaluations.find((evaluation) => evaluation.evaluation_id === selectedEvaluationId) ?? null
 
   const persistedEvaluationJobs = useMemo(
     () => [...(jobs.data?.jobs ?? [])]
@@ -290,13 +303,22 @@ export function BopEvaluationPage() {
       .sort((left, right) => right.created_at.localeCompare(left.created_at)),
     [jobs.data?.jobs, selectedRun],
   )
+  const scopedEvaluationJobs = useMemo(
+    () => persistedEvaluationJobs.filter((job) => sourceKind === "registered_result"
+      ? job.parameters.source_kind === "registered_result" && job.parameters.result_id === selectedResultId
+      : job.parameters.source_kind === "gt_simulation"),
+    [persistedEvaluationJobs, selectedResultId, sourceKind],
+  )
   const submittedForRun = submittedEvaluation?.runRoot === selectedRun ? submittedEvaluation : null
-  const submittedJob = submittedForRun
-    ? persistedEvaluationJobs.find((job) => job.id === submittedForRun.job.id) ?? submittedForRun.job
+  const submittedMatchesScope = Boolean(submittedForRun && (sourceKind === "registered_result"
+    ? submittedForRun.job.parameters.source_kind === "registered_result" && submittedForRun.job.parameters.result_id === selectedResultId
+    : submittedForRun.job.parameters.source_kind === "gt_simulation"))
+  const submittedJob = submittedForRun && submittedMatchesScope
+    ? scopedEvaluationJobs.find((job) => job.id === submittedForRun.job.id) ?? submittedForRun.job
     : null
-  const currentJob = persistedEvaluationJobs.find((job) => ACTIVE_JOB_STATUSES.has(job.status))
+  const currentJob = scopedEvaluationJobs.find((job) => ACTIVE_JOB_STATUSES.has(job.status))
     ?? submittedJob
-    ?? persistedEvaluationJobs[0]
+    ?? scopedEvaluationJobs[0]
     ?? null
   const currentEvaluationId = typeof currentJob?.parameters.evaluation_id === "string"
     ? currentJob.parameters.evaluation_id
@@ -305,9 +327,9 @@ export function BopEvaluationPage() {
       : null
   const currentReportAvailable = Boolean(
     currentEvaluationId
-    && orderedEvaluations.find((evaluation) => evaluation.evaluation_id === currentEvaluationId)?.report_available,
+    && scopedEvaluations.find((evaluation) => evaluation.evaluation_id === currentEvaluationId)?.report_available,
   )
-  const activeJob = Boolean(currentJob && ACTIVE_JOB_STATUSES.has(currentJob.status))
+  const activeJob = persistedEvaluationJobs.some((item) => ACTIVE_JOB_STATUSES.has(item.status))
 
   useEffect(() => {
     if (!currentJob || !TERMINAL_JOB_STATUSES.has(currentJob.status)) return
@@ -328,7 +350,11 @@ export function BopEvaluationPage() {
     },
     onSuccess: (data) => {
       const resultId = data.result?.result_id ?? data.result_id
-      if (resultId) setResultSelection({ runRoot: selectedRun, resultId })
+      if (resultId) {
+        setSourceKind("registered_result")
+        setResultSelection({ runRoot: selectedRun, resultId })
+        setSearchParams({ result_id: resultId })
+      }
       setUploadSelection(null)
       setUploadName(null)
       setUploadEpoch((value) => value + 1)
@@ -443,48 +469,46 @@ export function BopEvaluationPage() {
 
           <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_390px]">
             <Card data-testid="bop-evaluation-source">
-              <CardHeader><CardTitle className="text-base">Pose estimates</CardTitle><CardDescription>Choose a registered standard BOP CSV or generate deterministic test estimates from this dataset's ground truth.</CardDescription></CardHeader>
-              <CardContent>
-                <Tabs value={sourceKind} onValueChange={(value) => setSourceKind(value as SourceKind)}>
-                  <TabsList aria-label="Pose result source">
-                    <TabsTrigger value="registered_result">BOP result CSV</TabsTrigger>
-                    <TabsTrigger value="gt_simulation">Simulated from GT · Test only</TabsTrigger>
-                  </TabsList>
+              <CardHeader><CardTitle className="text-base">1 · Retained result selection and readiness</CardTitle><CardDescription>Collected cluster results are the primary path. Every choice is an immutable, locally revalidated standard BOP19 CSV.</CardDescription></CardHeader>
+              <CardContent className="space-y-5">
+                {sourceKind === "gt_simulation" && <div role="status" className="flex items-center justify-between gap-3 rounded-lg border border-warning/45 bg-warning/10 p-3 text-xs"><span><strong>Test-only simulation is selected.</strong> Its history and report are isolated from retained estimator results.</span>{selectedResult && <Button size="sm" variant="outline" onClick={() => setSourceKind("registered_result")}>Use retained result</Button>}</div>}
+                {realResults.length > 0 ? <div className="space-y-3">
+                  <div className="space-y-1.5"><Label htmlFor="bop-result-selection">Retained pose result</Label><Select value={selectedResultId} onValueChange={(resultId) => { setSourceKind("registered_result"); setResultSelection({ runRoot: selectedRun, resultId }); setSearchParams({ result_id: resultId }) }}><SelectTrigger id="bop-result-selection" aria-label="Retained pose result"><SelectValue /></SelectTrigger><SelectContent>{realResults.map((result) => <SelectItem key={result.result_id} value={result.result_id}>{result.display_name} · {result.method} · {result.compatible ? "compatible" : "incompatible"}</SelectItem>)}</SelectContent></Select></div>
+                  {selectedResult && <ResultDetails result={selectedResult} runRoot={selectedRun} />}
+                </div> : <div className="rounded-lg border border-dashed p-6 text-center"><ScanSearch className="mx-auto size-6 text-muted-foreground" /><div className="mt-2 text-sm font-semibold">No retained estimator result</div><p className="mt-1 text-xs text-muted-foreground">Submit and collect a compatible external estimator result first, or expand manual import below.</p><Button asChild className="mt-4" size="sm"><Link to="/pose-estimation">Open Pose Estimation<ArrowRight /></Link></Button></div>}
 
-                  <TabsContent value="registered_result" className="space-y-5">
-                    <form className="space-y-4 rounded-lg border bg-muted/15 p-4" onSubmit={(event) => { event.preventDefault(); importResult.mutate() }}>
-                      <div><div className="flex items-center gap-2 text-sm font-semibold"><FileUp aria-hidden="true" className="size-4" />Import standard BOP result CSV</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">The server validates the official columns, dataset/split identity, target coverage, and pose values before registering a selectable immutable result.</p></div>
-                      <div data-testid="bop-result-csv-contract" className="space-y-2 rounded-lg border bg-background p-3 text-[11px] leading-relaxed text-muted-foreground">
-                        <div className="font-semibold text-foreground">Interoperable BOP CSV contract</div>
-                        <code className="block max-w-full overflow-x-auto rounded bg-muted px-2 py-1.5 text-[10px] text-foreground">scene_id,im_id,obj_id,score,R,t,time</code>
-                        <p><strong className="text-foreground">R</strong> contains nine space-separated row-major values for the 3 × 3 model-to-camera rotation. <strong className="text-foreground">t</strong> is the model-to-camera translation in millimetres and contains three space-separated values. Higher <strong className="text-foreground">score</strong> values rank estimates first.</p>
-                        <p><strong className="text-foreground">time</strong> is total processing time per image in seconds and must be identical on every estimate for that image; use <code>-1</code> when unavailable. Use the exact dataset filename pattern shown above.</p>
-                      </div>
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <div className="space-y-1.5"><Label htmlFor="bop-result-file">Result CSV</Label><Input key={`${selectedRun}:${uploadEpoch}`} id="bop-result-file" type="file" accept=".csv,text/csv" onChange={(event) => { const file = event.target.files?.[0] ?? null; setUploadSelection(file ? { runRoot: selectedRun, file } : null); if (file && !uploadDisplayName.trim()) setUploadName({ runRoot: selectedRun, value: file.name.replace(/\.csv$/i, "") }) }} /></div>
-                        <div className="space-y-1.5"><Label htmlFor="bop-result-display-name">Display name</Label><Input id="bop-result-display-name" value={uploadDisplayName} onChange={(event) => setUploadName({ runRoot: selectedRun, value: event.target.value })} placeholder="Method and result run" /></div>
-                      </div>
-                      {!dataset.result_registration_ready && <div role="alert" className="rounded border border-warning/40 bg-warning/5 p-3 text-xs text-warning-foreground">Result import requires an exported manifest and populated BOP target inventory for this run.</div>}
-                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"><p className="text-[11px] text-muted-foreground">Import never rewrites the source file or the BOP dataset.</p><Button type="submit" variant="outline" disabled={!dataset.result_registration_ready || !uploadFile || importResult.isPending}>{importResult.isPending ? <LoaderCircle className="animate-spin" /> : <FileUp />}{importResult.isPending ? "Importing…" : "Import result"}</Button></div>
-                    </form>
+                <details className="rounded-lg border" data-testid="bop-manual-import">
+                  <summary className="cursor-pointer px-4 py-3 text-sm font-semibold">Manual BOP19 CSV import · secondary</summary>
+                  <form className="space-y-4 border-t bg-muted/15 p-4" onSubmit={(event) => { event.preventDefault(); importResult.mutate() }}>
+                    <div><div className="flex items-center gap-2 text-sm font-semibold"><FileUp aria-hidden="true" className="size-4" />Import standard BOP result CSV</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">The server validates the official columns, dataset/split identity, target coverage, and pose values before registering a selectable immutable result. Manual imports have no fabricated controller provenance.</p></div>
+                    <div data-testid="bop-result-csv-contract" className="space-y-2 rounded-lg border bg-background p-3 text-[11px] leading-relaxed text-muted-foreground">
+                      <div className="font-semibold text-foreground">Interoperable BOP CSV contract</div>
+                      <code className="block max-w-full overflow-x-auto rounded bg-muted px-2 py-1.5 text-[10px] text-foreground">scene_id,im_id,obj_id,score,R,t,time</code>
+                      <p><strong className="text-foreground">R</strong> contains nine row-major model-to-camera rotation values. <strong className="text-foreground">t</strong> contains three model-to-camera millimetre values. <strong className="text-foreground">time</strong> is consistent per image, or <code>-1</code> when unavailable.</p>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="space-y-1.5"><Label htmlFor="bop-result-file">Result CSV</Label><Input key={`${selectedRun}:${uploadEpoch}`} id="bop-result-file" type="file" accept=".csv,text/csv" onChange={(event) => { const file = event.target.files?.[0] ?? null; setUploadSelection(file ? { runRoot: selectedRun, file } : null); if (file && !uploadDisplayName.trim()) setUploadName({ runRoot: selectedRun, value: file.name.replace(/\.csv$/i, "") }) }} /></div>
+                      <div className="space-y-1.5"><Label htmlFor="bop-result-display-name">Display name</Label><Input id="bop-result-display-name" value={uploadDisplayName} onChange={(event) => setUploadName({ runRoot: selectedRun, value: event.target.value })} placeholder="Method and result run" /></div>
+                    </div>
+                    {!dataset.result_registration_ready && <div role="alert" className="rounded border border-warning/40 bg-warning/5 p-3 text-xs text-warning-foreground">Result import requires an exported manifest and populated BOP target inventory for this run.</div>}
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"><p className="text-[11px] text-muted-foreground">Import never rewrites the source file or the BOP dataset.</p><Button type="submit" variant="outline" disabled={!dataset.result_registration_ready || !uploadFile || importResult.isPending}>{importResult.isPending ? <LoaderCircle className="animate-spin" /> : <FileUp />}{importResult.isPending ? "Importing…" : "Import result"}</Button></div>
+                  </form>
+                </details>
 
-                    {realResults.length > 0 ? <div className="space-y-3">
-                      <div className="space-y-1.5"><Label htmlFor="bop-result-selection">Pose-estimation method and result</Label><Select value={selectedResultId} onValueChange={(resultId) => { setResultSelection({ runRoot: selectedRun, resultId }); setSearchParams({ result_id: resultId }) }}><SelectTrigger id="bop-result-selection" aria-label="Pose-estimation method and result"><SelectValue /></SelectTrigger><SelectContent>{realResults.map((result) => <SelectItem key={result.result_id} value={result.result_id}>{result.display_name} · {result.method} · {result.compatible ? "compatible" : "incompatible"}</SelectItem>)}</SelectContent></Select></div>
-                      {selectedResult && <ResultDetails result={selectedResult} runRoot={selectedRun} />}
-                    </div> : <div className="rounded-lg border border-dashed p-6 text-center"><FileUp className="mx-auto size-6 text-muted-foreground" /><div className="mt-2 text-sm font-semibold">No estimator results registered</div><p className="mt-1 text-xs text-muted-foreground">Import a standard BOP result CSV above, or use the test-only GT simulation.</p></div>}
-                  </TabsContent>
-
-                  <TabsContent value="gt_simulation" className="space-y-5">
-                    <div role="alert" className="flex items-start gap-3 rounded-lg border border-warning/45 bg-warning/10 p-4"><FlaskConical aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-warning-foreground" /><div><div className="font-semibold text-warning-foreground">Test only: estimates are derived from ground truth</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">This fixture checks dataset/result formatting and the evaluation path. Its metrics must never be presented as pose-estimator performance.</p></div></div>
+                <details className="rounded-lg border border-warning/35" data-testid="bop-test-simulation">
+                  <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-warning-foreground">Advanced · deterministic GT perturbation · Test only</summary>
+                  <div className="space-y-4 border-t p-4">
+                    <div role="alert" className="flex items-start gap-3 rounded-lg border border-warning/45 bg-warning/10 p-4"><FlaskConical aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-warning-foreground" /><div><div className="font-semibold text-warning-foreground">Estimates are derived from ground truth</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">This fixture checks formatting and the official evaluation path. Its metrics must never be presented as pose-estimator performance.</p></div></div>
                     <div className="grid gap-4 rounded-lg border p-4 sm:grid-cols-2">
-                      <div className="space-y-1.5"><Label htmlFor="translation-sigma">Translation sigma (mm)</Label><Input id="translation-sigma" aria-describedby="translation-sigma-help" type="number" min={0} max={100} step={0.1} value={Number.isNaN(translationSigmaMm) ? "" : translationSigmaMm} onChange={(event) => setTranslationSigmaMm(event.currentTarget.value === "" ? Number.NaN : event.currentTarget.valueAsNumber)} /><p id="translation-sigma-help" className="text-[10px] text-muted-foreground">Gaussian offset in BOP millimetres, from 0 to 100.</p></div>
-                      <div className="space-y-1.5"><Label htmlFor="rotation-sigma">Rotation sigma (degrees)</Label><Input id="rotation-sigma" aria-describedby="rotation-sigma-help" type="number" min={0} max={30} step={0.05} value={Number.isNaN(rotationSigmaDeg) ? "" : rotationSigmaDeg} onChange={(event) => setRotationSigmaDeg(event.currentTarget.value === "" ? Number.NaN : event.currentTarget.valueAsNumber)} /><p id="rotation-sigma-help" className="text-[10px] text-muted-foreground">Gaussian angular offset, from 0° to 30°.</p></div>
-                      <div className="space-y-1.5"><Label htmlFor="simulation-seed">Deterministic seed</Label><Input id="simulation-seed" aria-describedby="simulation-seed-help" type="number" min={-(2 ** 31)} max={2 ** 31 - 1} step={1} value={Number.isNaN(seed) ? "" : seed} onChange={(event) => setSeed(event.currentTarget.value === "" ? Number.NaN : event.currentTarget.valueAsNumber)} /><p id="simulation-seed-help" className="text-[10px] text-muted-foreground">Signed 32-bit integer.</p></div>
-                      <div className="space-y-1.5"><Label htmlFor="simulation-score">Estimate score</Label><Input id="simulation-score" aria-describedby="simulation-score-help" type="number" step={0.01} value={Number.isNaN(score) ? "" : score} onChange={(event) => setScore(event.currentTarget.value === "" ? Number.NaN : event.currentTarget.valueAsNumber)} /><p id="simulation-score-help" className="text-[10px] text-muted-foreground">Finite BOP confidence score; higher estimates rank first.</p></div>
+                      <div className="space-y-1.5"><Label htmlFor="translation-sigma">Translation sigma (mm)</Label><Input id="translation-sigma" type="number" min={0} max={100} step={0.1} value={Number.isNaN(translationSigmaMm) ? "" : translationSigmaMm} onChange={(event) => setTranslationSigmaMm(event.currentTarget.value === "" ? Number.NaN : event.currentTarget.valueAsNumber)} /></div>
+                      <div className="space-y-1.5"><Label htmlFor="rotation-sigma">Rotation sigma (degrees)</Label><Input id="rotation-sigma" type="number" min={0} max={30} step={0.05} value={Number.isNaN(rotationSigmaDeg) ? "" : rotationSigmaDeg} onChange={(event) => setRotationSigmaDeg(event.currentTarget.value === "" ? Number.NaN : event.currentTarget.valueAsNumber)} /></div>
+                      <div className="space-y-1.5"><Label htmlFor="simulation-seed">Deterministic seed</Label><Input id="simulation-seed" type="number" min={-(2 ** 31)} max={2 ** 31 - 1} step={1} value={Number.isNaN(seed) ? "" : seed} onChange={(event) => setSeed(event.currentTarget.value === "" ? Number.NaN : event.currentTarget.valueAsNumber)} /></div>
+                      <div className="space-y-1.5"><Label htmlFor="simulation-score">Estimate score</Label><Input id="simulation-score" type="number" step={0.01} value={Number.isNaN(score) ? "" : score} onChange={(event) => setScore(event.currentTarget.value === "" ? Number.NaN : event.currentTarget.valueAsNumber)} /></div>
                     </div>
                     {!dataset.simulation_ready && <div role="alert" className="rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs text-destructive">Simulation requires complete ground-truth annotations and evaluation targets for the selected dataset.</div>}
-                  </TabsContent>
-                </Tabs>
+                    <Button variant={sourceKind === "gt_simulation" ? "secondary" : "outline"} onClick={() => setSourceKind("gt_simulation")} disabled={!dataset.simulation_ready}>{sourceKind === "gt_simulation" ? "Test-only simulation selected" : "Use test-only simulation source"}</Button>
+                  </div>
+                </details>
               </CardContent>
             </Card>
 
@@ -503,8 +527,8 @@ export function BopEvaluationPage() {
                 </CardContent>
               </Card>
 
-              <Card className="border-primary/30">
-                <CardHeader><CardTitle className="flex items-center gap-2 text-base"><Play aria-hidden="true" className="size-4" />Run evaluation</CardTitle><CardDescription>The CPU/disk job continues after navigation. Jobs provides its live output and cancellation.</CardDescription></CardHeader>
+              <Card className="border-primary/30" data-testid="bop-evaluation-submit">
+                <CardHeader><CardTitle className="flex items-center gap-2 text-base"><Play aria-hidden="true" className="size-4" />2 · Run official evaluation</CardTitle><CardDescription>Explicitly queue the pinned official BOP Toolkit for the source selected at left. The CPU/disk job continues after navigation.</CardDescription></CardHeader>
                 <CardContent className="space-y-4">
                   {queueBlockers.length > 0 ? <div role="alert" data-testid="bop-evaluation-disabled-reasons" className="rounded-lg border border-warning/40 bg-warning/5 p-3"><div className="text-xs font-semibold text-warning-foreground">Evaluation cannot be queued yet</div><ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-relaxed text-muted-foreground">{queueBlockers.map((reason) => <li key={reason}>{reason}</li>)}</ul></div> : <div className="flex items-start gap-2 rounded-lg border border-success/30 bg-success/5 p-3 text-xs"><CheckCircle2 aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-success" /><span>The dataset, toolkit, and selected result source are compatible.</span></div>}
                   <Button className="w-full" onClick={() => queueEvaluation.mutate()} disabled={queueBlockers.length > 0 || queueEvaluation.isPending}>{queueEvaluation.isPending || activeJob ? <LoaderCircle className="animate-spin" /> : <ChartNoAxesCombined />}{queueEvaluation.isPending ? "Queueing…" : activeJob ? "Evaluation running…" : "Queue BOP evaluation"}</Button>
@@ -516,14 +540,14 @@ export function BopEvaluationPage() {
 
           {currentJob && <EvaluationJobStatus job={currentJob} evaluationId={currentEvaluationId} reportAvailable={currentReportAvailable} />}
 
-          {orderedEvaluations.length > 0 && <Card data-testid="bop-evaluation-history">
-            <CardHeader><CardTitle className="flex items-center gap-2 text-base"><History aria-hidden="true" className="size-4" />Evaluation history</CardTitle><CardDescription>Choose any retained evaluation to compare methods, result runs, and test fixtures without rerunning it.</CardDescription></CardHeader>
+          {scopedEvaluations.length > 0 && <Card data-testid="bop-evaluation-history">
+            <CardHeader><CardTitle className="flex items-center gap-2 text-base"><History aria-hidden="true" className="size-4" />3 · Result-scoped evaluation history</CardTitle><CardDescription>{sourceKind === "registered_result" ? `Only evaluations bound to ${selectedResult?.display_name ?? selectedResultId} are shown.` : "Only deterministic test-fixture evaluations are shown."}</CardDescription></CardHeader>
             <CardContent>
               <div className="overflow-x-auto rounded-lg border">
                 <table className="w-full min-w-[820px] text-left text-xs">
                   <caption className="sr-only">BOP evaluation history for the selected run</caption>
                   <thead className="bg-muted/60 text-muted-foreground"><tr><th scope="col" className="px-3 py-2">Evaluation</th><th scope="col" className="px-3 py-2">Result source</th><th scope="col" className="px-3 py-2">Protocol</th><th scope="col" className="px-3 py-2">Created</th><th scope="col" className="px-3 py-2">Status</th><th scope="col" className="px-3 py-2 text-right">Report</th></tr></thead>
-                  <tbody>{orderedEvaluations.slice(0, HISTORY_LIMIT).map((evaluation) => <tr key={evaluation.evaluation_id} className={cn("border-t", evaluation.evaluation_id === selectedEvaluationId && "bg-primary/5")}>
+                  <tbody>{scopedEvaluations.slice(0, HISTORY_LIMIT).map((evaluation) => <tr key={evaluation.evaluation_id} className={cn("border-t", evaluation.evaluation_id === selectedEvaluationId && "bg-primary/5")}>
                     <td className="px-3 py-2.5 font-mono text-[10px]">{evaluation.evaluation_id}</td>
                     <td className="px-3 py-2.5"><div className="font-semibold">{evaluation.source_kind === "gt_simulation" ? "GT simulation · Test only" : evaluation.result?.display_name ?? evaluation.result_id ?? "Registered result"}</div><div className="mt-0.5 text-[10px] text-muted-foreground">{evaluation.source_kind === "gt_simulation" && evaluation.simulation ? `${evaluation.simulation.translation_sigma_mm.toFixed(3)} mm · ${evaluation.simulation.rotation_sigma_deg.toFixed(3)}° · seed ${evaluation.simulation.seed}` : evaluation.result?.method ?? titleCase(evaluation.source_kind)}</div></td>
                     <td className="px-3 py-2.5">{evaluation.protocol}</td>
@@ -533,13 +557,13 @@ export function BopEvaluationPage() {
                   </tr>)}</tbody>
                 </table>
               </div>
-              {orderedEvaluations.length > HISTORY_LIMIT && <p className="mt-3 text-xs text-muted-foreground">Showing the {HISTORY_LIMIT} newest of {orderedEvaluations.length} evaluations.</p>}
+              {scopedEvaluations.length > HISTORY_LIMIT && <p className="mt-3 text-xs text-muted-foreground">Showing the {HISTORY_LIMIT} newest of {scopedEvaluations.length} evaluations for this source.</p>}
             </CardContent>
           </Card>}
 
           {selectedEvaluation
             ? <MetricsReport evaluation={selectedEvaluation} />
-            : <Card className="border-dashed"><CardContent className="grid min-h-40 place-items-center p-8 text-center"><div><ChartNoAxesCombined className="mx-auto size-7 text-muted-foreground" /><div className="mt-3 text-sm font-semibold">No evaluation report yet</div><p className="mt-1 text-xs text-muted-foreground">Choose a compatible result source and queue an evaluation to publish official metric values here.</p></div></CardContent></Card>}
+            : <Card className="border-dashed"><CardContent className="grid min-h-40 place-items-center p-8 text-center"><div><ChartNoAxesCombined className="mx-auto size-7 text-muted-foreground" /><div className="mt-3 text-sm font-semibold">No evaluation report for this result</div><p className="mt-1 text-xs text-muted-foreground">Queue the selected source explicitly. Reports from another retained result are intentionally not shown here.</p>{!selectedResult && sourceKind === "registered_result" && <Button asChild className="mt-4" size="sm"><Link to="/pose-estimation">Collect an estimator result<ArrowRight /></Link></Button>}</div></CardContent></Card>}
         </>}
   </div>
 }

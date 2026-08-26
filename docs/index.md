@@ -14,8 +14,8 @@ PoseTestBot owns:
 - calibration, timestamp alignment, and synchronization-quality evidence;
 - reusable workpiece and pose-template libraries with immutable run snapshots;
 - optional GT/mask generation and BOP dataset export; and
-- run-scoped Inspect evaluation of an existing BOP dataset and standard BOP19
-  result CSV.
+- run-scoped, read-only frame inspection and official evaluation of an existing
+  BOP dataset and immutable standard BOP19 result CSV.
 
 Pose estimators, estimator-specific conversion, SSH credentials, and SLURM
 orchestration are outside this repository. The optional cluster integration is
@@ -41,6 +41,13 @@ workpiece geometry  ────────▶  immutable pose-template selecti
                                       │
                                       ▼
                               BOP export ──▶ optional GT and masks
+                                      │
+                                      ▼
+                            retained BOP19 result
+                                      │
+                         ┌────────────┴────────────┐
+                         ▼                         ▼
+                  pose/GT inspection       official evaluation
 ```
 
 Raw capture data is retained. Synchronization, annotation, export, and

@@ -29,8 +29,10 @@ database record.
 6. Synchronize non-destructively and evaluate in-motion coverage and timing.
 7. Export the selected frames, calibration, object models, and provenance as a
    BOP dataset.
-8. Optionally generate run-scoped GT/masks or validate a standard BOP19 result
-   through the Inspect-only evaluation path.
+8. Optionally generate run-scoped GT/masks, explicitly collect a standard
+   BOP19 result from the external controller, inspect frame-level pose/GT
+   overlays, and validate that selected result through the Inspect-only
+   official evaluation path.
 
 Long-running submissions return a job identifier. They continue when the
 browser navigates away and remain inspectable through `/jobs` and the console's

@@ -27,6 +27,7 @@ delete work. Switching context does not modify either run.
 | Pose Templates | Global immutable template authoring and run selection | Confirm placement in dataset step 2 |
 | Run Folders | Contained run inventory, move/delete, and cluster archive copy/restore/delete | Choose a root before creating configuration |
 | Pose Estimation | Browser-safe handoff with closed, driver-advertised settings | Requires an appropriate completed BOP export; results return to Inspect |
+| Pose Results | Read-only frame-level estimate/GT comparison | Consumes one retained compatible result; links to evaluation or back to the external handoff |
 | BOP Evaluation | Inspect-only standard-result validation | Requires annotations and an immutable BOP19 CSV |
 
 ## Outcome 1: calibrate cameras
@@ -171,7 +172,29 @@ target frame resets it, and a tracker error causes same-frame registration
 recovery. These oracle masks are initialization/recovery inputs, so the result
 must not be presented as an unconstrained detector benchmark.
 
-Import the completed standard BOP19 result back into the unchanged run. For a
+When the controller job succeeds, use the explicit **Collect result** action.
+Collection rechecks controller provenance, the staged and local dataset hashes,
+the standard BOP19 CSV, and the result hash before retaining it below
+`processed/bop_evaluation/results/`. Collection is idempotent, and its state is
+recovered from the retained external job ID after a browser or service restart;
+no automatic page effect downloads a result. The retained-result actions expose
+the CSV, sanitized controller provenance, a deterministic package, **Pose
+Results**, and **BOP Evaluation**.
+
+**Pose Results** is a read-only x-ray diagnostic. Select the retained result,
+operator-labelled sensor scene, and frame; then compare the exact-aspect RGB or
+colorized depth image with projected evaluation-model geometry. The default is
+a translucent cyan estimated surface and magenta GT wireframe. Estimated and GT
+surfaces, wireframes, axes, boxes, full masks, and visible masks are independent
+browser-local controls. The overlay does not claim observed-depth occlusion.
+Translation and symmetry-unaware rotation deltas appear only for an unambiguous
+single estimate-to-GT association. Repeated identical objects remain visibly
+ambiguous. Registration/tracking labels appear only when the retained sanitized
+FoundationPose evidence proves them; generic BOP19 results show `unknown`. If
+WebGL is unavailable, images, masks, navigation, and numeric evidence remain
+usable while geometry controls are visibly disabled.
+
+For a
 sensor-scoped FoundationPose v2 result, PoseTestBot independently recomputes
 the selected target inventory and its hash before accepting it. **BOP
 Evaluation** then writes an immutable filtered target list inside that
@@ -179,6 +202,12 @@ evaluation and passes it to the pinned official toolkit. The report is clearly
 labelled sensor-scoped and is not directly comparable with a full-dataset
 result. External estimator execution, conversion, SSH, and scheduling remain
 owned by the companion repository.
+
+**BOP Evaluation** first selects one retained result, then requires an explicit
+official-toolkit submission, and finally shows only that result's evaluation
+history and aggregate report. Manual standard-CSV import is a secondary
+expandable action. Deterministic GT perturbation remains isolated under the
+advanced, test-only section and is never estimator-performance evidence.
 
 ## Physical controls
 

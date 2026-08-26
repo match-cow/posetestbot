@@ -423,10 +423,13 @@ storage** opens the archive/restore panel directly below the **Run folders**
 page header. **Pose Estimation** also links back to that storage panel, so
 archive transfer does not depend on estimator readiness.
 
-A controller result is imported only when the local dataset identity still
-matches its staged snapshot. An intact historical CSV remains downloadable
-after dataset drift, but evaluation remains blocked until the matching
-snapshot is selected or restored.
+A controller result is collected only through the explicit **Collect result**
+action and only when the local dataset identity still matches its staged
+snapshot. Collection is idempotent and its status is recovered from retained
+external-job provenance after reload. An intact historical CSV, sanitized
+provenance, and deterministic result package remain downloadable after dataset
+drift, but evaluation remains blocked until the matching snapshot is selected
+or restored.
 
 Imported results must already use the BOP filename convention and the exact
 `scene_id,im_id,obj_id,score,R,t,time` header. Each result is copied and
@@ -435,7 +438,10 @@ official BOP19 VSD, MSSD, and MSPD evaluation writes its immutable request,
 progress, adapter/provenance, toolkit outputs, and final metric report below
 `processed/bop_evaluation/evaluations/<evaluation_id>/`. These are derived
 inspection artifacts; the exported `bop/` dataset and raw capture evidence are
-not modified.
+not modified. **Inspect → Pose Results** serves validated existing RGB/depth,
+mask, model, GT, and estimate evidence read-only. Its browser-local x-ray
+overlays and frame controls create no run artifacts; when WebGL is unavailable,
+the image/mask and numeric inspection path remains usable.
 
 New annotation-bearing exports use the official BOP19 visibility target rule
 (`visib_fract >= 0.1`). Inspect warns when an older export's target list does
