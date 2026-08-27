@@ -20,6 +20,7 @@ from posetestbot.web.routes.calibration_library import calibration_library_bp
 from posetestbot.web.routes.calibration_targets import calibration_targets_bp
 from posetestbot.web.routes.bop_annotations import bop_annotations_bp
 from posetestbot.web.routes.bop_evaluation import bop_evaluation_bp
+from posetestbot.web.routes.bop_inspection import bop_inspection_bp
 from posetestbot.web.routes.cluster import cluster_bp
 from posetestbot.web.routes.overview import overview_bp
 from posetestbot.web.routes.pages import pages_bp
@@ -120,6 +121,7 @@ def create_app(
     app.register_blueprint(calibration_targets_bp)
     app.register_blueprint(bop_annotations_bp)
     app.register_blueprint(bop_evaluation_bp)
+    app.register_blueprint(bop_inspection_bp)
     app.register_blueprint(cluster_bp)
     app.register_blueprint(workpieces_bp)
     app.register_blueprint(pose_templates_bp)

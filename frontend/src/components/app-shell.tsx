@@ -1,7 +1,7 @@
 import { useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
-import { ArrowRight, BookOpen, Bot, Boxes, ChartNoAxesCombined, Check, Circle, CircleDot, Cpu, FolderOpen, Folders, Gauge, Grid3X3, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Route, Sun, Workflow } from "lucide-react"
+import { ArrowRight, BookOpen, Bot, Boxes, ChartNoAxesCombined, Check, Circle, CircleDot, Cpu, FolderOpen, Folders, Gauge, Grid3X3, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Route, ScanSearch, Sun, Workflow } from "lucide-react"
 import { RestartControl } from "@/components/restart-control"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select"
@@ -37,6 +37,7 @@ const navigationGroups = [
       { to: "/cell", label: "Cell View", icon: Boxes },
       { to: "/run-folders", label: "Run folders", icon: Folders },
       { to: "/pose-estimation", label: "Pose Estimation", icon: Cpu },
+      { to: "/pose-results", label: "Pose Results", icon: ScanSearch },
       { to: "/bop-evaluation", label: "BOP Evaluation", icon: ChartNoAxesCombined },
       { to: "/jobs", label: "Jobs", icon: ListChecks },
     ],

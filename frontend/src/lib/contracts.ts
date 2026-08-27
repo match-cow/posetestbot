@@ -463,6 +463,20 @@ export interface ClusterJob {
   log_available: boolean
   cancel_requested: boolean
   terminal: boolean
+  collection?: {
+    state: "unavailable" | "available" | "collected"
+    result: BopResultSubmission | null
+  }
+}
+
+export interface ClusterResultCollectionResponse {
+  result: BopResultSubmission
+  created: boolean
+  evaluation_url: string
+  inspection_url: string
+  download_url: string
+  package_url: string
+  provenance_url: string
 }
 
 export interface ClusterArchive {
@@ -1108,6 +1122,191 @@ export interface BopResultSubmission {
   simulation?: BopSimulationParameters | null
   estimator_settings?: ClusterEstimatorSettings | null
   sensor_scope?: BopResultSensorScope | null
+  tracking?: {
+    schema_version?: string
+    oracle_mask_contract?: string
+    score_contract?: string
+    execution_contract?: string
+    registration_iterations?: number
+    tracking_iterations?: number
+    registration_count?: number
+    tracking_count?: number
+    reinitialization_count?: number
+    failure_count?: number
+    track_segment_count?: number
+    recorded_track_segment_count?: number
+    omitted_track_segment_count?: number
+    recorded_failure_identity_count?: number
+    omitted_failure_identity_count?: number
+    recorded_image_timing_count?: number
+    omitted_image_timing_count?: number
+  } | null
+  provenance_available: boolean
+  package_available: boolean
+}
+
+export interface BopInspectionObject {
+  obj_id: number
+  name: string
+  diameter_mm: number
+  bounds_mm: { minimum: [number, number, number]; size: [number, number, number] } | null
+  symmetries_declared: boolean
+  model_sha256: string
+  model_size_bytes: number
+  model_url: string
+}
+
+export interface BopInspectionScene {
+  scene_id: number
+  sensor_name: string
+  operator_alias: string | null
+  display_name: string
+  physical_identity: {
+    sensor_type?: string
+    family?: string
+    device_id?: string
+    mounting_mode?: string
+    sensor_folder: string
+  }
+  frame_count: number
+  target_frame_count: number
+  estimate_frame_count: number
+  image_size: [number, number]
+  capabilities: {
+    rgb: boolean
+    depth: boolean
+    ground_truth: boolean
+    full_mask: boolean
+    visible_mask: boolean
+    execution_operations: boolean
+  }
+}
+
+export interface BopInspectionSetup {
+  schema_version: "bop_inspection_setup.v1"
+  ready: boolean
+  dataset: BopEvaluationDataset
+  results: BopResultSubmission[]
+  selected_result_id: string | null
+  objects: BopInspectionObject[]
+  scenes: BopInspectionScene[]
+  blockers: BopEvaluationIssue[]
+  limits: { max_page_size: number; max_hypotheses: number }
+  visualization_contract?: {
+    projection: string
+    renderer_coordinates: string
+    occlusion: string
+    default_layers: string[]
+  }
+}
+
+export type BopInspectionFrameFilter = "all" | "estimated" | "target" | "missing_estimate" | "registration" | "tracking" | "reinitialization"
+
+export interface BopInspectionFrameSummary {
+  scene_id: number
+  im_id: number
+  ordinal?: number
+  previous_im_id?: number | null
+  next_im_id?: number | null
+  target: boolean
+  target_instance_count: number
+  has_estimate: boolean
+  estimate_count: number
+  missing_estimate: boolean
+  missing_target_instance_count: number
+  operations: string[]
+}
+
+export interface BopInspectionFrameList {
+  schema_version: "bop_inspection_frame_list.v1"
+  result_id: string
+  scene: BopInspectionScene
+  frame_filter: BopInspectionFrameFilter
+  object_id: number | null
+  page: number
+  page_size: number
+  total_count: number
+  page_count: number
+  previous_page: number | null
+  next_page: number | null
+  frames: BopInspectionFrameSummary[]
+}
+
+export interface BopInspectionPose {
+  obj_id: number
+  object_name: string
+  rotation: number[]
+  translation_mm: number[]
+  matrix_model_to_camera: number[][]
+  projected_model_bounds: number[] | null
+  operations: string[]
+}
+
+export interface BopInspectionGroundTruth extends BopInspectionPose {
+  gt_id: number
+  instance_uuid: string | null
+  visibility: {
+    bbox_obj: number[]
+    bbox_visib: number[]
+    px_count_all: number
+    px_count_valid: number
+    px_count_visib: number
+    visib_fract: number
+  }
+  masks: { full: boolean; visible: boolean }
+  mask_urls: { full: string | null; visible: string | null }
+}
+
+export interface BopInspectionEstimate extends BopInspectionPose {
+  rank: number
+  score: number
+  time_seconds: number | null
+}
+
+export interface BopInspectionAssociation {
+  obj_id: number
+  status: string
+  estimate_rank?: number | null
+  gt_id?: number | null
+  reason?: string
+  delta: {
+    translation_mm: number
+    rotation_deg: number
+    rotation_contract: "symmetry_unaware"
+  } | null
+  failures?: Array<Record<string, JsonValue>>
+}
+
+export interface BopInspectionFrame {
+  schema_version: "bop_inspection_frame.v1"
+  result: BopResultSubmission
+  scene: BopInspectionScene
+  frame: BopInspectionFrameSummary
+  camera: {
+    cam_K: number[]
+    intrinsic_matrix: number[][]
+    depth_scale_mm: number
+    image_size: [number, number]
+    coordinate_convention: string
+  }
+  ground_truth: BopInspectionGroundTruth[]
+  estimates: BopInspectionEstimate[]
+  omitted_hypothesis_count: number
+  associations: BopInspectionAssociation[]
+  execution: {
+    known: boolean
+    image_time_seconds: number | null
+    oracle_mask_contract: string | null
+    registration_iterations: number | null
+    tracking_iterations: number | null
+  }
+  visualization: {
+    base_layers: Array<"rgb" | "depth">
+    xray: boolean
+    observed_depth_occlusion: false
+  }
+  media: { rgb_url: string; depth_url: string }
+  model_urls: Record<string, string>
 }
 
 export interface BopEvaluationMetric {

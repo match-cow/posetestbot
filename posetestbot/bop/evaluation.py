@@ -19,6 +19,8 @@ import shutil
 import stat
 import subprocess
 import uuid
+import zipfile
+from bisect import bisect_left
 from collections import Counter
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -68,7 +70,18 @@ MAX_RESULT_BYTES = 128 * 1024 * 1024
 MAX_RESULT_ROWS = 10_000_000
 CLUSTER_JOB_SETTINGS_SCHEMA = "posetestbot_cluster_job_settings.v1"
 RESULT_SENSOR_SCOPE_SCHEMA = "bop_result_sensor_scope.v1"
+FOUNDATIONPOSE_EXECUTION_EVIDENCE_SCHEMA = "foundationpose_execution_evidence.v1"
+RESULT_PACKAGE_MANIFEST_SCHEMA = "bop_result_package_manifest.v1"
 SCOPED_TARGETS_FILENAME = "selected_test_targets_bop19.json"
+TRACK_SEGMENT_RECORD_LIMIT = 200
+FAILURE_IDENTITY_RECORD_LIMIT = 200
+IMAGE_TIMING_RECORD_LIMIT = 10_000
+SAFE_ERROR_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.]{0,127}$")
+SAFE_SENSOR_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+INSTANCE_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 
 
 def _utc_now() -> str:
@@ -1012,6 +1025,257 @@ def _validated_sensor_scope(
     return expected
 
 
+def _nonnegative_int(value: Any, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label} must be a nonnegative integer")
+    return value
+
+
+def _foundationpose_execution_evidence(
+    value: Mapping[str, Any],
+    *,
+    inventory: Mapping[str, Any],
+    execution_mode: str,
+    counts: Mapping[str, int],
+) -> dict[str, Any]:
+    """Validate v2 worker detail and retain only bounded, path-free evidence."""
+
+    expected_execution_contract = (
+        "sensor_local_instance_continuous_tracking.v1"
+        if execution_mode == "continuous_tracking"
+        else "independent_register_per_target.v2"
+    )
+    if (
+        value.get("oracle_mask_contract") != "bop_mask_visib_gt_instance.v1"
+        or value.get("score_contract")
+        != "constant_1.0_no_detection_confidence"
+        or value.get("execution_contract") != expected_execution_contract
+    ):
+        raise ValueError("FoundationPose v2 execution contracts are invalid")
+
+    exports = inventory.get("manifest", {}).get("exports")
+    scene_sensors: dict[int, str] = {}
+    if isinstance(exports, list):
+        for item in exports:
+            if not isinstance(item, Mapping):
+                continue
+            scene_id = item.get("scene_id")
+            sensor_id = item.get("sensor_name")
+            if type(scene_id) is int and isinstance(sensor_id, str):
+                scene_sensors[scene_id] = sensor_id
+    target_keys = set(inventory.get("target_rows", {}))
+    target_frame_keys = {key[:2] for key in target_keys}
+    target_images_by_scene_object: dict[tuple[int, int], list[int]] = {}
+    for scene_id, im_id, obj_id in target_keys:
+        target_images_by_scene_object.setdefault((scene_id, obj_id), []).append(im_id)
+    for image_ids in target_images_by_scene_object.values():
+        image_ids.sort()
+    object_ids = set(inventory.get("object_ids", set()))
+
+    segment_count = _nonnegative_int(
+        value.get("track_segment_count"), label="track_segment_count"
+    )
+    recorded_segment_count = _nonnegative_int(
+        value.get("recorded_track_segment_count"),
+        label="recorded_track_segment_count",
+    )
+    omitted_segment_count = _nonnegative_int(
+        value.get("omitted_track_segment_count"),
+        label="omitted_track_segment_count",
+    )
+    raw_segments = value.get("track_segments")
+    if (
+        not isinstance(raw_segments, list)
+        or len(raw_segments) != recorded_segment_count
+        or recorded_segment_count > TRACK_SEGMENT_RECORD_LIMIT
+        or recorded_segment_count + omitted_segment_count != segment_count
+        or (execution_mode == "independent_registration" and segment_count != 0)
+    ):
+        raise ValueError("FoundationPose v2 track-segment evidence is invalid")
+    segments: list[dict[str, Any]] = []
+    reset_reasons = {
+        "end_of_scene",
+        "missing_target_frame",
+        "profile_target_limit",
+        "tracking_error",
+    }
+    segment_fields = {
+        "scene_id",
+        "sensor_id",
+        "obj_id",
+        "instance_uuid",
+        "start_im_id",
+        "end_im_id",
+        "frame_count",
+        "registration_count",
+        "tracking_count",
+        "reinitialization_count",
+        "reset_reason",
+    }
+    for index, raw in enumerate(raw_segments):
+        if not isinstance(raw, Mapping) or set(raw) != segment_fields:
+            raise ValueError(
+                f"FoundationPose v2 track segment {index + 1} is invalid"
+            )
+        scene_id = raw.get("scene_id")
+        obj_id = raw.get("obj_id")
+        start_im_id = raw.get("start_im_id")
+        end_im_id = raw.get("end_im_id")
+        frame_count = raw.get("frame_count")
+        registration_count = raw.get("registration_count")
+        tracking_count = raw.get("tracking_count")
+        reinitialization_count = raw.get("reinitialization_count")
+        sensor_id = raw.get("sensor_id")
+        instance_uuid = raw.get("instance_uuid")
+        reset_reason = raw.get("reset_reason")
+        integer_values = (
+            scene_id,
+            obj_id,
+            start_im_id,
+            end_im_id,
+            frame_count,
+            registration_count,
+            tracking_count,
+            reinitialization_count,
+        )
+        if (
+            any(isinstance(item, bool) or not isinstance(item, int) for item in integer_values)
+            or scene_id not in scene_sensors
+            or obj_id not in object_ids
+            or start_im_id < 0
+            or end_im_id < start_im_id
+            or frame_count != end_im_id - start_im_id + 1
+            or registration_count != 1
+            or tracking_count != frame_count - 1
+            or reinitialization_count not in {0, 1}
+            or not isinstance(sensor_id, str)
+            or SAFE_SENSOR_ID_RE.fullmatch(sensor_id) is None
+            or sensor_id != scene_sensors[scene_id]
+            or not isinstance(instance_uuid, str)
+            or INSTANCE_UUID_RE.fullmatch(instance_uuid) is None
+            or reset_reason not in reset_reasons
+            or (
+                not (
+                    target_image_ids := target_images_by_scene_object.get(
+                        (scene_id, obj_id), []
+                    )
+                )
+                or (
+                    target_index := bisect_left(target_image_ids, start_im_id)
+                ) >= len(target_image_ids)
+                or target_image_ids[target_index] > end_im_id
+            )
+        ):
+            raise ValueError(
+                f"FoundationPose v2 track segment {index + 1} is inconsistent"
+            )
+        segments.append({field: raw[field] for field in sorted(segment_fields)})
+
+    raw_failures = value.get("failures")
+    if not isinstance(raw_failures, list) or len(raw_failures) != counts["failure_count"]:
+        raise ValueError("FoundationPose v2 failure evidence is invalid")
+    failure_identities: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_failures):
+        if not isinstance(raw, Mapping):
+            raise ValueError(
+                f"FoundationPose v2 failure identity {index + 1} is invalid"
+            )
+        scene_id = raw.get("scene_id")
+        im_id = raw.get("im_id")
+        obj_id = raw.get("obj_id")
+        gt_id = raw.get("gt_id")
+        instance_uuid = raw.get("instance_uuid")
+        operation = raw.get("operation")
+        error_type = raw.get("error_type")
+        tracking_error_type = raw.get("tracking_error_type")
+        if (
+            any(
+                isinstance(item, bool) or not isinstance(item, int) or item < 0
+                for item in (scene_id, im_id, gt_id)
+            )
+            or isinstance(obj_id, bool)
+            or not isinstance(obj_id, int)
+            or obj_id < 1
+            or (scene_id, im_id, obj_id) not in target_keys
+            or not isinstance(instance_uuid, str)
+            or INSTANCE_UUID_RE.fullmatch(instance_uuid) is None
+            or operation not in {"registration", "tracking_recovery"}
+            or not isinstance(error_type, str)
+            or SAFE_ERROR_TYPE_RE.fullmatch(error_type) is None
+            or (
+                tracking_error_type is not None
+                and (
+                    operation != "tracking_recovery"
+                    or not isinstance(tracking_error_type, str)
+                    or SAFE_ERROR_TYPE_RE.fullmatch(tracking_error_type) is None
+                )
+            )
+        ):
+            raise ValueError(
+                f"FoundationPose v2 failure identity {index + 1} is inconsistent"
+            )
+        if len(failure_identities) < FAILURE_IDENTITY_RECORD_LIMIT:
+            identity = {
+                "scene_id": scene_id,
+                "im_id": im_id,
+                "obj_id": obj_id,
+                "gt_id": gt_id,
+                "instance_uuid": instance_uuid,
+                "operation": operation,
+                "error_type": error_type,
+            }
+            if tracking_error_type is not None:
+                identity["tracking_error_type"] = tracking_error_type
+            failure_identities.append(identity)
+
+    raw_timings = value.get("image_timings_seconds")
+    if not isinstance(raw_timings, Mapping):
+        raise ValueError("FoundationPose v2 image timing evidence is invalid")
+    normalized_timings: list[tuple[int, int, float]] = []
+    for raw_key, raw_timing in raw_timings.items():
+        if not isinstance(raw_key, str) or re.fullmatch(r"[0-9]+/[0-9]+", raw_key) is None:
+            raise ValueError("FoundationPose v2 image timing key is invalid")
+        scene_text, image_text = raw_key.split("/", 1)
+        scene_id = int(scene_text)
+        im_id = int(image_text)
+        if (
+            raw_key != f"{scene_id}/{im_id}"
+            or type(raw_timing) not in {int, float}
+            or not math.isfinite(float(raw_timing))
+            or float(raw_timing) < 0
+            or (scene_id, im_id) not in target_frame_keys
+        ):
+            raise ValueError("FoundationPose v2 image timing value is invalid")
+        normalized_timings.append((scene_id, im_id, float(raw_timing)))
+    normalized_timings.sort(key=lambda item: item[:2])
+    retained_timings = normalized_timings[:IMAGE_TIMING_RECORD_LIMIT]
+    image_timings = {
+        f"{scene_id}/{im_id}": timing
+        for scene_id, im_id, timing in retained_timings
+    }
+
+    return {
+        "schema_version": FOUNDATIONPOSE_EXECUTION_EVIDENCE_SCHEMA,
+        "oracle_mask_contract": "bop_mask_visib_gt_instance.v1",
+        "score_contract": "constant_1.0_no_detection_confidence",
+        "execution_contract": expected_execution_contract,
+        "registration_iterations": 5,
+        "tracking_iterations": 2,
+        **counts,
+        "track_segment_count": segment_count,
+        "recorded_track_segment_count": recorded_segment_count,
+        "omitted_track_segment_count": omitted_segment_count,
+        "track_segments": segments,
+        "recorded_failure_identity_count": len(failure_identities),
+        "omitted_failure_identity_count": counts["failure_count"]
+        - len(failure_identities),
+        "failure_identities": failure_identities,
+        "recorded_image_timing_count": len(image_timings),
+        "omitted_image_timing_count": len(normalized_timings) - len(image_timings),
+        "image_timings_seconds": image_timings,
+    }
+
+
 def _foundationpose_v2_scope(
     value: Mapping[str, Any],
     *,
@@ -1124,11 +1388,12 @@ def _foundationpose_v2_scope(
         "excluded_target_count": full_count - selected_count,
         "is_sensor_scoped": selected != eligible,
     }
-    tracking = {
-        "registration_iterations": 5,
-        "tracking_iterations": 2,
-        **counts,
-    }
+    tracking = _foundationpose_execution_evidence(
+        value,
+        inventory=inventory,
+        execution_mode=execution_mode,
+        counts={**counts, "failure_count": counts["failure_count"]},
+    )
     return scope, tracking
 
 
@@ -1751,10 +2016,13 @@ def _store_result(
             provenance_path = folder / "controller-provenance.json"
             atomic_write_json(provenance_path, dict(provenance))
             provenance_path.chmod(0o444)
+            provenance_stat = provenance_path.stat(follow_symlinks=False)
             record["controller_provenance_path"] = _relative_to_run(
                 provenance_path, run_root
             )
             record["controller_provenance_sha256"] = _sha256_file(provenance_path)
+            record["controller_provenance_size_bytes"] = provenance_stat.st_size
+            record["controller_provenance_mtime_ns"] = provenance_stat.st_mtime_ns
         metadata_path = folder / RESULT_METADATA
         atomic_write_json(metadata_path, record)
         metadata_path.chmod(0o444)
@@ -2297,6 +2565,267 @@ def result_download_path(run_root: str | Path, result_id: str) -> Path:
     if not isinstance(expected, str) or _sha256_file(path) != expected:
         raise RuntimeError("Registered BOP result integrity check failed")
     return path
+
+
+def result_provenance_path(run_root: str | Path, result_id: str) -> Path:
+    """Resolve and hash-check retained sanitized controller provenance."""
+
+    root = Path(run_root).resolve()
+    result = get_result(root, result_id)
+    relative_value = result.get("controller_provenance_path")
+    if not isinstance(relative_value, str) or not relative_value:
+        raise KeyError("This BOP result has no retained controller provenance")
+    relative = Path(relative_value)
+    folder = _result_dir(root, result_id)
+    expected_path = folder / "controller-provenance.json"
+    path = root / relative
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or path.resolve(strict=False) != expected_path.resolve(strict=False)
+        or not _plain_file(path, root=root)
+    ):
+        raise RuntimeError("Retained controller provenance path is invalid")
+    expected_hash = result.get("controller_provenance_sha256")
+    if not isinstance(expected_hash, str) or _sha256_file(path) != expected_hash:
+        raise RuntimeError("Retained controller provenance integrity check failed")
+    expected_size = result.get("controller_provenance_size_bytes")
+    if expected_size is not None and path.stat(follow_symlinks=False).st_size != expected_size:
+        raise RuntimeError("Retained controller provenance size changed")
+    return path
+
+
+def _public_sensor_scope(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    selected = value.get("selected_scene_ids")
+    eligible = value.get("eligible_scene_ids")
+    selected_count = value.get("selected_target_count")
+    full_count = value.get("full_dataset_target_count")
+    excluded_count = value.get("excluded_target_count")
+    is_sensor_scoped = value.get("is_sensor_scoped")
+    if (
+        value.get("schema_version") != RESULT_SENSOR_SCOPE_SCHEMA
+        or value.get("scope_kind") != "selected_bop_sensor_scenes"
+        or value.get("execution_mode")
+        not in {"continuous_tracking", "independent_registration"}
+        or not isinstance(selected, list)
+        or not selected
+        or len(selected) > 1_000
+        or any(type(item) is not int or item < 1 for item in selected)
+        or len(set(selected)) != len(selected)
+        or not isinstance(eligible, list)
+        or not eligible
+        or len(eligible) > 1_000
+        or any(type(item) is not int or item < 1 for item in eligible)
+        or len(set(eligible)) != len(eligible)
+        or not set(selected).issubset(eligible)
+        or not isinstance(value.get("selected_target_inventory_sha256"), str)
+        or SHA256_RE.fullmatch(value["selected_target_inventory_sha256"]) is None
+        or any(
+            isinstance(item, bool) or not isinstance(item, int) or item < 0
+            for item in (selected_count, full_count, excluded_count)
+        )
+        or selected_count > full_count
+        or excluded_count != full_count - selected_count
+        or type(is_sensor_scoped) is not bool
+        or is_sensor_scoped != (sorted(selected) != sorted(eligible))
+    ):
+        return None
+    return {
+        "schema_version": RESULT_SENSOR_SCOPE_SCHEMA,
+        "scope_kind": "selected_bop_sensor_scenes",
+        "execution_mode": value["execution_mode"],
+        "selected_scene_ids": sorted(selected),
+        "eligible_scene_ids": sorted(eligible),
+        "selected_target_inventory_sha256": value[
+            "selected_target_inventory_sha256"
+        ],
+        "selected_target_count": selected_count,
+        "full_dataset_target_count": full_count,
+        "excluded_target_count": excluded_count,
+        "is_sensor_scoped": is_sensor_scoped,
+    }
+
+
+def _public_tracking_summary(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    public: dict[str, Any] = {}
+    exact_strings = {
+        "schema_version": FOUNDATIONPOSE_EXECUTION_EVIDENCE_SCHEMA,
+        "oracle_mask_contract": "bop_mask_visib_gt_instance.v1",
+        "score_contract": "constant_1.0_no_detection_confidence",
+    }
+    for key, expected in exact_strings.items():
+        if value.get(key) == expected:
+            public[key] = expected
+    execution_contract = value.get("execution_contract")
+    if execution_contract in {
+        "sensor_local_instance_continuous_tracking.v1",
+        "independent_register_per_target.v2",
+    }:
+        public["execution_contract"] = execution_contract
+    for key in (
+        "registration_iterations",
+        "tracking_iterations",
+        "registration_count",
+        "tracking_count",
+        "reinitialization_count",
+        "failure_count",
+        "track_segment_count",
+        "recorded_track_segment_count",
+        "omitted_track_segment_count",
+        "recorded_failure_identity_count",
+        "omitted_failure_identity_count",
+        "recorded_image_timing_count",
+        "omitted_image_timing_count",
+    ):
+        item = value.get(key)
+        if isinstance(item, int) and not isinstance(item, bool) and item >= 0:
+            public[key] = item
+    return public or None
+
+
+def public_result_descriptor(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a bounded result summary without local filesystem paths."""
+
+    fields = {
+        "schema_version",
+        "result_id",
+        "method",
+        "method_name",
+        "display_name",
+        "filename",
+        "created_at",
+        "source_kind",
+        "simulated",
+        "simulation",
+        "sha256",
+        "size_bytes",
+        "dataset_sha256",
+        "dataset_alias",
+        "split",
+        "row_count",
+        "estimate_count",
+        "target_estimate_count",
+        "target_required_count",
+        "target_coverage",
+        "timings_available",
+        "average_time_per_image",
+        "compatible",
+    }
+    public = {key: result[key] for key in fields if key in result}
+    public["blockers"] = _public_issue_list(result.get("blockers", []))
+    external_job = result.get("external_job")
+    if isinstance(external_job, Mapping):
+        public_job: dict[str, Any] = {}
+        job_id = external_job.get("job_id")
+        if (
+            external_job.get("provider") == "posetestbot-cluster"
+            and isinstance(job_id, str)
+            and EXTERNAL_POSE_JOB_RE.fullmatch(job_id)
+        ):
+            public_job["provider"] = "posetestbot-cluster"
+            public_job["job_id"] = job_id
+        slurm_job_id = external_job.get("slurm_job_id")
+        if (
+            public_job
+            and isinstance(slurm_job_id, str)
+            and SLURM_JOB_ID_RE.fullmatch(slurm_job_id)
+        ):
+            public_job["slurm_job_id"] = slurm_job_id
+        if public_job:
+            public["external_job"] = public_job
+    estimator_settings = result.get("estimator_settings")
+    if isinstance(estimator_settings, Mapping):
+        execution_mode = estimator_settings.get("execution_mode")
+        selected_scene_ids = estimator_settings.get("selected_scene_ids")
+        if (
+            estimator_settings.get("schema_version") == CLUSTER_JOB_SETTINGS_SCHEMA
+            and execution_mode in {"continuous_tracking", "independent_registration"}
+            and isinstance(selected_scene_ids, list)
+            and all(type(item) is int and item > 0 for item in selected_scene_ids)
+        ):
+            public["estimator_settings"] = {
+                "schema_version": CLUSTER_JOB_SETTINGS_SCHEMA,
+                "execution_mode": execution_mode,
+                "selected_scene_ids": list(selected_scene_ids),
+            }
+    sensor_scope = _public_sensor_scope(result.get("sensor_scope"))
+    if sensor_scope is not None:
+        public["sensor_scope"] = sensor_scope
+    tracking = _public_tracking_summary(result.get("tracking"))
+    if tracking is not None:
+        public["tracking"] = tracking
+    provenance_hash = result.get("controller_provenance_sha256")
+    provenance_available = (
+        isinstance(provenance_hash, str)
+        and SHA256_RE.fullmatch(provenance_hash) is not None
+    )
+    public["provenance_available"] = provenance_available
+    public["package_available"] = True
+    return public
+
+
+def result_package_bytes(
+    run_root: str | Path, result_id: str
+) -> tuple[bytes, dict[str, Any]]:
+    """Build a deterministic, path-free ZIP after checking every retained hash."""
+
+    result = get_result(run_root, result_id)
+    csv_path = result_download_path(run_root, result_id)
+    csv_bytes = csv_path.read_bytes()
+    provenance_path: Path | None = None
+    provenance_bytes: bytes | None = None
+    provenance_descriptor: dict[str, Any] | None = None
+    if isinstance(result.get("controller_provenance_sha256"), str):
+        provenance_path = result_provenance_path(run_root, result_id)
+        provenance_bytes = provenance_path.read_bytes()
+        provenance_value = _load_json(provenance_path)
+        if not isinstance(provenance_value, Mapping):
+            raise RuntimeError("Retained controller provenance is not a JSON object")
+        provenance_descriptor = {
+            "schema_version": provenance_value.get("schema_version"),
+            "filename": "provenance.json",
+            "size_bytes": len(provenance_bytes),
+            "sha256": _sha256_file(provenance_path),
+        }
+    manifest = {
+        "schema_version": RESULT_PACKAGE_MANIFEST_SCHEMA,
+        "result_id": result_id,
+        "source_kind": result.get("source_kind"),
+        "method": result.get("method"),
+        "dataset": {
+            "dataset_alias": result.get("dataset_alias"),
+            "split": result.get("split"),
+            "sha256": result.get("dataset_sha256"),
+        },
+        "external_job": public_result_descriptor(result).get("external_job"),
+        "result": {
+            "schema_version": "bop19.csv.v1",
+            "filename": str(result["filename"]),
+            "size_bytes": len(csv_bytes),
+            "sha256": _sha256_file(csv_path),
+        },
+        "provenance": provenance_descriptor,
+    }
+    manifest_bytes = (
+        json.dumps(manifest, indent=2, sort_keys=True, separators=(",", ": "))
+        + "\n"
+    ).encode("utf-8")
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_STORED) as archive:
+        entries = [("manifest.json", manifest_bytes), (csv_path.name, csv_bytes)]
+        if provenance_bytes is not None:
+            entries.append(("provenance.json", provenance_bytes))
+        for filename, content in sorted(entries, key=lambda item: item[0]):
+            info = zipfile.ZipInfo(filename, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            info.create_system = 3
+            info.external_attr = 0o100444 << 16
+            archive.writestr(info, content)
+    return output.getvalue(), manifest
 
 
 def create_evaluation_request(

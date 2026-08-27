@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 import re
 import threading
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
+
+import cv2
+import numpy as np
 import pytest
 from werkzeug.serving import make_server
 
@@ -679,6 +682,406 @@ def cluster_pose_job(*, state: str, with_result: bool = False) -> dict:
     }
 
 
+def bop_result_fixture(token: str = "a", *, label: str | None = None) -> dict:
+    result_id = f"result-{token * 12}"
+    return {
+        "schema_version": "bop_result_record.v1",
+        "result_id": result_id,
+        "method": "foundationpose",
+        "method_name": label or f"FoundationPose result {token.upper()}",
+        "display_name": label or f"FoundationPose result {token.upper()}",
+        "filename": f"foundationpose_ptb123456789abc-test_{token * 8}.csv",
+        "source_kind": "external_controller",
+        "created_at": f"2026-08-2{1 if token == 'a' else 2}T10:00:00Z",
+        "sha256": token * 64,
+        "size_bytes": 8192,
+        "estimate_count": 2574 if token == "a" else 2500,
+        "target_estimate_count": 2574 if token == "a" else 2500,
+        "target_required_count": 2574,
+        "target_coverage": 1.0 if token == "a" else 2500 / 2574,
+        "compatible": True,
+        "blockers": [],
+        "tracking": {
+            "schema_version": "foundationpose_execution_evidence.v1",
+            "oracle_mask_contract": "bop_mask_visib_gt_instance.v1",
+            "score_contract": "constant_1.0_no_detection_confidence",
+            "execution_contract": "sensor_local_instance_continuous_tracking.v1",
+            "registration_iterations": 5,
+            "tracking_iterations": 2,
+            "registration_count": 8,
+            "tracking_count": 2568,
+            "reinitialization_count": 2,
+            "failure_count": 0,
+            "track_segment_count": 8,
+            "recorded_track_segment_count": 8,
+            "omitted_track_segment_count": 0,
+            "recorded_failure_identity_count": 0,
+            "omitted_failure_identity_count": 0,
+            "recorded_image_timing_count": 2574,
+        },
+        "provenance_available": True,
+        "package_available": True,
+    }
+
+
+def bop_evaluation_dataset_fixture() -> dict:
+    return {
+        "status": "ready",
+        "evaluation_ready": True,
+        "simulation_ready": True,
+        "dataset_id": "ptb123456789abc",
+        "name": "PoseTestBot object run",
+        "split": "test",
+        "export_manifest_sha256": "d" * 64,
+        "manifest_schema_version": "bop_export_manifest.v5",
+        "scene_count": 4,
+        "frame_count": 2588,
+        "target_count": 2574,
+        "model_count": 1,
+        "annotation_count": 2588,
+        "annotation_source": "blenderproc",
+        "image_size": [640, 480],
+        "result_registration_ready": True,
+        "result_filename_template": "{method}_ptb123456789abc-test.csv",
+        "blockers": [],
+        "warnings": [],
+    }
+
+
+def bop_evaluation_fixture(result: dict, *, token: str, metric: float) -> dict:
+    return {
+        "evaluation_id": f"evaluation-{token * 12}",
+        "created_at": f"2026-08-2{1 if token == 'a' else 2}T11:00:00Z",
+        "completed_at": f"2026-08-2{1 if token == 'a' else 2}T11:10:00Z",
+        "result_id": result["result_id"],
+        "result": result,
+        "source_kind": "registered_result",
+        "protocol": "BOP19",
+        "status": "succeeded",
+        "metrics": [
+            {
+                "id": "bop19_average_recall",
+                "label": "Average recall",
+                "value": metric,
+                "display": f"{metric:.3f}",
+                "unit": None,
+            }
+        ],
+        "sensor_scope": None,
+        "sensor_scoped": False,
+        "comparability": "full_dataset",
+        "provenance": {"dataset_sha256": "d" * 64},
+        "report_available": True,
+    }
+
+
+def bop_inspection_scene(scene_id: int) -> dict:
+    alias = "Center" if scene_id == 1 else "Right"
+    device_id = "033422071805" if scene_id == 1 else "923322071605"
+    frame_ids = [0, 1] if scene_id == 1 else [5]
+    return {
+        "scene_id": scene_id,
+        "sensor_name": f"realsense_{device_id}",
+        "operator_alias": alias,
+        "display_name": alias,
+        "physical_identity": {
+            "sensor_type": "realsense_d435",
+            "family": "Intel RealSense D435-class",
+            "device_id": device_id,
+            "mounting_mode": "fixed",
+            "sensor_folder": f"realsense_{device_id}",
+        },
+        "frame_count": len(frame_ids),
+        "target_frame_count": len(frame_ids),
+        "estimate_frame_count": len(frame_ids),
+        "image_size": [640, 480],
+        "capabilities": {
+            "rgb": True,
+            "depth": True,
+            "ground_truth": True,
+            "full_mask": True,
+            "visible_mask": True,
+            "execution_operations": True,
+        },
+    }
+
+
+def bop_inspection_frame_summary(scene_id: int, im_id: int) -> dict:
+    frame_ids = [0, 1] if scene_id == 1 else [5]
+    ordinal = frame_ids.index(im_id)
+    operation = "registration" if im_id == 0 else "tracking" if im_id == 1 else "reinitialization"
+    return {
+        "scene_id": scene_id,
+        "im_id": im_id,
+        "ordinal": ordinal,
+        "previous_im_id": frame_ids[ordinal - 1] if ordinal else None,
+        "next_im_id": frame_ids[ordinal + 1] if ordinal + 1 < len(frame_ids) else None,
+        "target": True,
+        "target_instance_count": 1,
+        "has_estimate": True,
+        "estimate_count": 1,
+        "missing_estimate": False,
+        "missing_target_instance_count": 0,
+        "operations": [operation],
+    }
+
+
+def bop_inspection_frame_fixture(result: dict, scene_id: int, im_id: int) -> dict:
+    rotation = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    estimate_translation = [0.0, 0.0, 500.0]
+    gt_translation = [18.0, 0.0, 500.0]
+
+    def matrix(translation: list[float]) -> list[list[float]]:
+        return [
+            [1.0, 0.0, 0.0, translation[0]],
+            [0.0, 1.0, 0.0, translation[1]],
+            [0.0, 0.0, 1.0, translation[2]],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+
+    operation = bop_inspection_frame_summary(scene_id, im_id)["operations"]
+    return {
+        "schema_version": "bop_inspection_frame.v1",
+        "result": result,
+        "scene": bop_inspection_scene(scene_id),
+        "frame": bop_inspection_frame_summary(scene_id, im_id),
+        "camera": {
+            "cam_K": [400.0, 0.0, 320.0, 0.0, 400.0, 240.0, 0.0, 0.0, 1.0],
+            "intrinsic_matrix": [[400.0, 0.0, 320.0], [0.0, 400.0, 240.0], [0.0, 0.0, 1.0]],
+            "depth_scale_mm": 1.0,
+            "image_size": [640, 480],
+            "coordinate_convention": "BOP OpenCV camera: +X right, +Y down, +Z forward",
+        },
+        "ground_truth": [
+            {
+                "gt_id": 0,
+                "obj_id": 1,
+                "object_name": "Gripper",
+                "instance_uuid": "11111111-1111-4111-8111-111111111111",
+                "rotation": rotation,
+                "translation_mm": gt_translation,
+                "matrix_model_to_camera": matrix(gt_translation),
+                "visibility": {
+                    "bbox_obj": [260.0, 180.0, 100.0, 100.0],
+                    "bbox_visib": [270.0, 190.0, 80.0, 80.0],
+                    "px_count_all": 10000,
+                    "px_count_valid": 9000,
+                    "px_count_visib": 8000,
+                    "visib_fract": 0.8,
+                },
+                "operations": operation,
+                "projected_model_bounds": [270.0, 190.0, 90.0, 90.0],
+                "masks": {"full": True, "visible": True},
+                "mask_urls": {"full": "/mock/full-mask.png", "visible": "/mock/visible-mask.png"},
+            }
+        ],
+        "estimates": [
+            {
+                "obj_id": 1,
+                "object_name": "Gripper",
+                "rank": 1,
+                "score": 1.0,
+                "time_seconds": 0.125,
+                "rotation": rotation,
+                "translation_mm": estimate_translation,
+                "matrix_model_to_camera": matrix(estimate_translation),
+                "operations": operation,
+                "projected_model_bounds": [275.0, 195.0, 90.0, 90.0],
+            }
+        ],
+        "omitted_hypothesis_count": 0,
+        "associations": [
+            {
+                "obj_id": 1,
+                "status": "unambiguous",
+                "estimate_rank": 1,
+                "gt_id": 0,
+                "delta": {
+                    "translation_mm": 18.0,
+                    "rotation_deg": 0.0,
+                    "rotation_contract": "symmetry_unaware",
+                },
+            }
+        ],
+        "execution": {
+            "known": True,
+            "image_time_seconds": 0.125,
+            "oracle_mask_contract": "bop_mask_visib_gt_instance.v1",
+            "registration_iterations": 5,
+            "tracking_iterations": 2,
+        },
+        "visualization": {"base_layers": ["rgb", "depth"], "xray": True, "observed_depth_occlusion": False},
+        "media": {"rgb_url": "/mock/rgb.png", "depth_url": "/mock/depth.png"},
+        "model_urls": {"1": "/mock/model.ply"},
+    }
+
+
+def inspection_png(*, mask: bool = False) -> bytes:
+    if mask:
+        image = np.zeros((480, 640), dtype=np.uint8)
+        cv2.rectangle(image, (260, 180), (360, 280), 255, thickness=-1)
+    else:
+        image = np.full((480, 640, 3), (35, 42, 50), dtype=np.uint8)
+        cv2.rectangle(image, (180, 120), (460, 360), (60, 70, 82), thickness=-1)
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok
+    return encoded.tobytes()
+
+
+INSPECTION_MODEL_PLY = """ply
+format ascii 1.0
+element vertex 8
+property float x
+property float y
+property float z
+element face 12
+property list uchar int vertex_indices
+end_header
+-50 -50 -50
+50 -50 -50
+50 50 -50
+-50 50 -50
+-50 -50 50
+50 -50 50
+50 50 50
+-50 50 50
+3 0 1 2
+3 0 2 3
+3 4 6 5
+3 4 7 6
+3 0 4 5
+3 0 5 1
+3 1 5 6
+3 1 6 2
+3 2 6 7
+3 2 7 3
+3 3 7 4
+3 3 4 0
+"""
+
+
+def install_pose_inspection_mocks(page) -> list[dict]:
+    results = [bop_result_fixture("a"), bop_result_fixture("b")]
+    scenes = [bop_inspection_scene(1), bop_inspection_scene(2)]
+
+    def setup_handler(route) -> None:
+        params = parse_qs(urlparse(route.request.url).query)
+        requested = params.get("result_id", [results[0]["result_id"]])[0]
+        selected = next(
+            (item for item in results if item["result_id"] == requested), results[0]
+        )
+        fulfill_json(
+            route,
+            {
+                "schema_version": "bop_inspection_setup.v1",
+                "ready": True,
+                "dataset": bop_evaluation_dataset_fixture(),
+                "results": results,
+                "selected_result_id": selected["result_id"],
+                "objects": [
+                    {
+                        "obj_id": 1,
+                        "name": "Gripper",
+                        "diameter_mm": 173.2,
+                        "bounds_mm": {
+                            "minimum": [-50.0, -50.0, -50.0],
+                            "size": [100.0, 100.0, 100.0],
+                        },
+                        "symmetries_declared": False,
+                        "model_sha256": "c" * 64,
+                        "model_size_bytes": len(INSPECTION_MODEL_PLY.encode()),
+                        "model_url": "/mock/model.ply",
+                    }
+                ],
+                "scenes": scenes,
+                "blockers": [],
+                "limits": {"max_page_size": 200, "max_hypotheses": 50},
+                "visualization_contract": {
+                    "projection": "bop_opencv_model_to_camera.v1",
+                    "renderer_coordinates": "opencv_x_right_y_down_z_forward_to_webgl_x_right_y_up_z_back",
+                    "occlusion": "xray_no_observed_depth_occlusion",
+                    "default_layers": ["rgb", "estimate_surface", "gt_wireframe"],
+                },
+            },
+        )
+
+    def frames_handler(route) -> None:
+        params = parse_qs(urlparse(route.request.url).query)
+        scene_id = int(params["scene_id"][0])
+        frame_filter = params.get("filter", ["all"])[0]
+        frame_ids = [0, 1] if scene_id == 1 else [5]
+        rows = [bop_inspection_frame_summary(scene_id, im_id) for im_id in frame_ids]
+        if frame_filter in {"registration", "tracking", "reinitialization"}:
+            rows = [row for row in rows if frame_filter in row["operations"]]
+        page_number = int(params.get("page", ["1"])[0])
+        fulfill_json(
+            route,
+            {
+                "schema_version": "bop_inspection_frame_list.v1",
+                "result_id": params["result_id"][0],
+                "scene": next(item for item in scenes if item["scene_id"] == scene_id),
+                "frame_filter": frame_filter,
+                "object_id": None,
+                "page": page_number,
+                "page_size": 80,
+                "total_count": len(rows),
+                "page_count": 1 if rows else 0,
+                "previous_page": None,
+                "next_page": None,
+                "frames": rows,
+            },
+        )
+
+    def frame_handler(route) -> None:
+        params = parse_qs(urlparse(route.request.url).query)
+        result = next(
+            item for item in results if item["result_id"] == params["result_id"][0]
+        )
+        fulfill_json(
+            route,
+            bop_inspection_frame_fixture(
+                result,
+                int(params["scene_id"][0]),
+                int(params["im_id"][0]),
+            ),
+        )
+
+    page.route("**/bop/inspection/setup?**", setup_handler)
+    page.route("**/bop/inspection/frames?**", frames_handler)
+    page.route("**/bop/inspection/frame?**", frame_handler)
+    page.route(
+        "**/mock/model.ply",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/octet-stream",
+            body=INSPECTION_MODEL_PLY.encode(),
+        ),
+    )
+    page.route(
+        "**/mock/rgb.png",
+        lambda route: route.fulfill(
+            status=200, content_type="image/png", body=inspection_png()
+        ),
+    )
+    page.route(
+        "**/mock/depth.png",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="image/png",
+            body=inspection_png(),
+        ),
+    )
+    page.route(
+        "**/mock/*-mask.png",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="image/png",
+            body=inspection_png(mask=True),
+        ),
+    )
+    return results
+
+
 def install_common_mocks(
     page,
     *,
@@ -1058,6 +1461,7 @@ def test_navigation_run_fallback_persistence_and_both_themes(
         "Cell View",
         "Run folders",
         "Pose Estimation",
+        "Pose Results",
         "BOP Evaluation",
         "Jobs",
     ]
@@ -2141,7 +2545,7 @@ def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
         }
     ]
 
-    current.get_by_role("link", name="View logs and all cluster jobs").click()
+    current.get_by_role("link", name="View logs and manage all cluster jobs").click()
     expect(page).to_have_url(f"{console_server.url}/#/jobs")
     cluster_section = page.get_by_test_id("cluster-jobs-section")
     expect(cluster_section).to_contain_text("Durable estimator and SLURM state")
@@ -2152,6 +2556,432 @@ def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
         page.get_by_text("Controller state survives UI and PoseTestBot restarts.")
     ).to_be_visible()
     expect(page.get_by_text("sbatch job 482991")).to_be_visible()
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
+@pytest.mark.parametrize(
+    "viewport",
+    [{"width": 1920, "height": 1080}, {"width": 1440, "height": 900}],
+    ids=["1920x1080", "1440x900"],
+)
+def test_pose_estimation_selects_historical_jobs_collects_and_survives_reload(
+    console_server, page, viewport
+) -> None:
+    install_common_mocks(page)
+    page.set_viewport_size(viewport)
+    setup = cluster_pose_setup(ready=True)
+    result = bop_result_fixture("a")
+    latest_job = cluster_pose_job(state="succeeded", with_result=True)
+    latest_job["job_id"] = "pose-22222222-2222-4222-8222-222222222222"
+    latest_job["updated_at"] = "2026-08-04T10:02:00Z"
+    latest_job["payload"]["estimator_settings"] = {
+        "schema_version": "posetestbot_cluster_job_settings.v1",
+        "execution_mode": "continuous_tracking",
+        "selected_scene_ids": [1, 2],
+    }
+    latest_job["collection"] = {"state": "available", "result": None}
+    historical_job = cluster_pose_job(state="succeeded", with_result=True)
+    historical_job["payload"]["estimator_settings"] = {
+        "schema_version": "posetestbot_cluster_job_settings.v1",
+        "execution_mode": "independent_registration",
+        "selected_scene_ids": [1],
+    }
+    historical_job["collection"] = {"state": "available", "result": None}
+    jobs = [latest_job, historical_job]
+    for item in jobs:
+        item["payload"].pop("run_root", None)
+    collected = {"value": False}
+    collection_requests: list[dict] = []
+    list_queries: list[dict[str, list[str]]] = []
+
+    page.route(
+        "**/cluster/pose-estimation/setup?**",
+        lambda route: fulfill_json(route, setup),
+    )
+
+    def list_handler(route) -> None:
+        list_queries.append(parse_qs(urlparse(route.request.url).query))
+        current_jobs = json.loads(json.dumps(jobs))
+        if collected["value"]:
+            current_jobs[1]["collection"] = {
+                "state": "collected",
+                "result": result,
+            }
+        fulfill_json(route, {"jobs": current_jobs, "next_cursor": None})
+
+    def detail_or_collect_handler(route) -> None:
+        path = urlparse(route.request.url).path
+        if path.endswith("/import-result"):
+            collection_requests.append(route.request.post_data_json)
+            assert historical_job["job_id"] in path
+            collected["value"] = True
+            fulfill_json(
+                route,
+                {
+                    "result": result,
+                    "created": len(collection_requests) == 1,
+                    "evaluation_url": f"/bop-evaluation?result_id={result['result_id']}",
+                    "inspection_url": f"/pose-results?result_id={result['result_id']}",
+                    "download_url": f"/mock/{result['result_id']}.csv",
+                    "package_url": f"/mock/{result['result_id']}.zip",
+                    "provenance_url": f"/mock/{result['result_id']}-provenance.json",
+                },
+                status=201,
+            )
+            return
+        current = next(
+            json.loads(json.dumps(item))
+            for item in jobs
+            if item["job_id"] in path
+        )
+        current.pop("collection", None)
+        fulfill_json(route, {"job": current, "log": "complete\n"})
+
+    page.route("**/cluster/jobs?**", list_handler)
+    page.route("**/cluster/jobs/**", detail_or_collect_handler)
+    page.goto(f"{console_server.url}/#/pose-estimation", wait_until="networkidle")
+
+    current = page.get_by_test_id("pose-estimation-current-job")
+    expect(current).to_contain_text("Selected estimator job")
+    expect(current).to_contain_text(latest_job["job_id"])
+    metrics = page.get_by_test_id("pose-estimation-job-metrics")
+    expect(metrics).to_contain_text("Continuous Tracking")
+    expect(metrics).not_to_contain_text("continuous_tracking")
+    assert metrics.evaluate("node => node.scrollWidth <= node.clientWidth")
+    page.get_by_label("Estimator job for active run").click()
+    page.get_by_role("option", name=re.compile("Independent Registration")).click()
+    expect(current).to_contain_text(historical_job["job_id"])
+    expect(metrics).to_contain_text("Independent Registration")
+    collect = current.get_by_role("button", name="Collect result")
+    expect(collect).to_be_visible()
+    page.wait_for_timeout(250)
+    assert collection_requests == []
+    assert list_queries
+    assert list_queries[0]["run_root"] == [RUN_ROOT]
+    assert list_queries[0]["estimator_id"] == ["foundationpose"]
+    assert list_queries[0]["limit"] == ["50"]
+
+    collect.click()
+    retained = page.get_by_test_id("pose-estimation-collected-result")
+    expect(retained).to_contain_text("Immutable BOP19 result collected")
+    expect(retained.get_by_role("link", name="Inspect poses")).to_have_attribute(
+        "href", f"#/pose-results?result_id={result['result_id']}"
+    )
+    expect(retained.get_by_role("link", name="Evaluate")).to_have_attribute(
+        "href", f"#/bop-evaluation?result_id={result['result_id']}"
+    )
+    expect(retained.get_by_role("link", name="Package")).to_be_visible()
+    expect(retained.get_by_role("link", name="CSV")).to_be_visible()
+    expect(retained.get_by_role("link", name="Provenance")).to_be_visible()
+    assert collection_requests == [{"run_root": RUN_ROOT}]
+
+    page.reload(wait_until="networkidle")
+    expect(current).to_contain_text(latest_job["job_id"])
+    page.get_by_label("Estimator job for active run").click()
+    page.get_by_role("option", name=re.compile("Independent Registration")).click()
+    retained = page.get_by_test_id("pose-estimation-collected-result")
+    expect(retained).to_be_visible()
+    expect(retained).to_contain_text(result["result_id"])
+    expect(page.get_by_role("button", name="Collect result")).to_have_count(0)
+    assert collection_requests == [{"run_root": RUN_ROOT}]
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
+def test_jobs_collects_and_hands_off_each_active_run_estimator_result(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    page.set_viewport_size({"width": 1440, "height": 900})
+    result_a = bop_result_fixture("a")
+    result_b = bop_result_fixture("b")
+    available_job = cluster_pose_job(state="succeeded", with_result=True)
+    available_job["collection"] = {"state": "available", "result": None}
+    collected_job = cluster_pose_job(state="succeeded", with_result=True)
+    collected_job["job_id"] = "pose-22222222-2222-4222-8222-222222222222"
+    collected_job["updated_at"] = "2026-08-04T09:01:00Z"
+    collected_job["collection"] = {"state": "collected", "result": result_b}
+    other_run_job = cluster_pose_job(state="succeeded", with_result=True)
+    other_run_job["job_id"] = "pose-33333333-3333-4333-8333-333333333333"
+    other_run_job["updated_at"] = "2026-08-04T08:01:00Z"
+    for job in (available_job, collected_job, other_run_job):
+        job["payload"].pop("run_root", None)
+    active_jobs = [available_job, collected_job]
+    global_jobs = [available_job, collected_job, other_run_job]
+    collection_requests: list[dict] = []
+    active_list_queries: list[dict[str, list[str]]] = []
+
+    def list_handler(route) -> None:
+        params = parse_qs(urlparse(route.request.url).query)
+        if "run_root" in params:
+            active_list_queries.append(params)
+            response_jobs = active_jobs
+        else:
+            response_jobs = global_jobs
+        fulfill_json(
+            route,
+            {"jobs": json.loads(json.dumps(response_jobs)), "next_cursor": None},
+        )
+
+    def detail_or_collect_handler(route) -> None:
+        path = urlparse(route.request.url).path
+        if path.endswith("/import-result"):
+            assert available_job["job_id"] in path
+            collection_requests.append(route.request.post_data_json)
+            available_job["collection"] = {
+                "state": "collected",
+                "result": result_a,
+            }
+            fulfill_json(
+                route,
+                {
+                    "result": result_a,
+                    "created": True,
+                    "evaluation_url": (
+                        f"/bop-evaluation?result_id={result_a['result_id']}"
+                    ),
+                    "inspection_url": (
+                        f"/pose-results?result_id={result_a['result_id']}"
+                    ),
+                    "download_url": f"/mock/{result_a['result_id']}.csv",
+                    "package_url": f"/mock/{result_a['result_id']}.zip",
+                    "provenance_url": (
+                        f"/mock/{result_a['result_id']}-provenance.json"
+                    ),
+                },
+                status=201,
+            )
+            return
+        current = next(
+            json.loads(json.dumps(job))
+            for job in global_jobs
+            if job["job_id"] in path
+        )
+        current.pop("collection", None)
+        fulfill_json(route, {"job": current, "log": "completed safely\n"})
+
+    page.route("**/cluster/jobs?**", list_handler)
+    page.route("**/cluster/jobs/**", detail_or_collect_handler)
+    page.goto(f"{console_server.url}/#/jobs", wait_until="networkidle")
+
+    section = page.get_by_test_id("cluster-jobs-section")
+    expect(section).to_contain_text("Active-run jobs include explicit collection")
+    available_row = page.get_by_test_id(
+        f"cluster-job-{available_job['job_id']}"
+    )
+    collected_row = page.get_by_test_id(
+        f"cluster-job-{collected_job['job_id']}"
+    )
+    other_row = page.get_by_test_id(f"cluster-job-{other_run_job['job_id']}")
+    expect(available_row).to_contain_text("Active run")
+    expect(other_row).to_contain_text("Other run")
+    expect(other_row.get_by_role("button", name="Collect result")).to_have_count(0)
+    expect(collected_row.get_by_role("link", name="Inspect poses")).to_have_attribute(
+        "href", f"#/pose-results?result_id={result_b['result_id']}"
+    )
+    expect(collected_row.get_by_role("link", name="Evaluate")).to_have_attribute(
+        "href", f"#/bop-evaluation?result_id={result_b['result_id']}"
+    )
+
+    available_row.get_by_role("button", name="Collect result").click()
+    expect(page.get_by_text("Cluster result collected")).to_be_visible()
+    expect(available_row.get_by_role("link", name="Inspect poses")).to_have_attribute(
+        "href", f"#/pose-results?result_id={result_a['result_id']}"
+    )
+    expect(available_row.get_by_role("link", name="Evaluate")).to_have_attribute(
+        "href", f"#/bop-evaluation?result_id={result_a['result_id']}"
+    )
+    assert collection_requests == [{"run_root": RUN_ROOT}]
+    assert active_list_queries
+    assert active_list_queries[0]["run_root"] == [RUN_ROOT]
+    assert active_list_queries[0]["limit"] == ["50"]
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
+def test_bop_evaluation_keeps_history_and_metrics_result_scoped(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    result_a = bop_result_fixture("a")
+    result_b = bop_result_fixture("b")
+    setup = {
+        "schema_version": "bop_evaluation_setup.v1",
+        "run_root": RUN_ROOT,
+        "toolkit": {
+            "status": "ready",
+            "available": True,
+            "revision": "cea62d651c7e395b2e1962b9749e4e89693c6ac4",
+            "required_revision": "cea62d651c7e395b2e1962b9749e4e89693c6ac4",
+            "environment_ready": True,
+            "renderer": "vispy",
+            "install_command": None,
+            "reason": None,
+        },
+        "dataset": bop_evaluation_dataset_fixture(),
+        "results": [result_a, result_b],
+        "evaluations": [
+            bop_evaluation_fixture(result_a, token="a", metric=0.111),
+            bop_evaluation_fixture(result_b, token="b", metric=0.999),
+        ],
+    }
+    page.route(
+        "**/bop/evaluation/setup?**",
+        lambda route: fulfill_json(route, setup),
+    )
+    page.goto(
+        f"{console_server.url}/#/bop-evaluation?result_id={result_a['result_id']}",
+        wait_until="networkidle",
+    )
+
+    source = page.get_by_test_id("bop-evaluation-source")
+    expect(source).to_contain_text("1 · Retained result selection and readiness")
+    expect(source).to_contain_text("Collected cluster results are the primary path")
+    expect(page.get_by_test_id("bop-manual-import")).not_to_have_attribute(
+        "open", ""
+    )
+    expect(page.get_by_test_id("bop-test-simulation")).to_contain_text("Test only")
+    details = page.get_by_test_id("bop-result-details")
+    expect(details.get_by_role("link", name="Inspect poses")).to_have_attribute(
+        "href", f"#/pose-results?result_id={result_a['result_id']}"
+    )
+    for name in ("Package", "CSV", "Provenance"):
+        expect(details.get_by_role("link", name=name)).to_be_visible()
+    history = page.get_by_test_id("bop-evaluation-history")
+    expect(history).to_contain_text(f"evaluation-{'a' * 12}")
+    expect(history).not_to_contain_text(f"evaluation-{'b' * 12}")
+    report = page.get_by_test_id("bop-evaluation-report")
+    expect(report).to_contain_text("0.111")
+    expect(report).not_to_contain_text("0.999")
+
+    page.get_by_label("Retained pose result").click()
+    page.get_by_role("option", name=re.compile("FoundationPose result B")).click()
+    expect(page).to_have_url(re.compile(f"result_id={result_b['result_id']}$"))
+    history = page.get_by_test_id("bop-evaluation-history")
+    expect(history).to_contain_text(f"evaluation-{'b' * 12}")
+    expect(history).not_to_contain_text(f"evaluation-{'a' * 12}")
+    report = page.get_by_test_id("bop-evaluation-report")
+    expect(report).to_contain_text("0.999")
+    expect(report).not_to_contain_text("0.111")
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
+@pytest.mark.parametrize(
+    "viewport",
+    [{"width": 1920, "height": 1080}, {"width": 1440, "height": 900}],
+    ids=["1920x1080", "1440x900"],
+)
+def test_pose_results_controls_projection_pixels_and_desktop_reachability(
+    console_server, page, viewport
+) -> None:
+    install_common_mocks(page)
+    results = install_pose_inspection_mocks(page)
+    page.set_viewport_size(viewport)
+    page.goto(
+        f"{console_server.url}/#/pose-results?result_id={results[0]['result_id']}&scene_id=1&frame_id=0",
+        wait_until="networkidle",
+    )
+
+    expect(page.get_by_role("heading", name="Pose Results")).to_be_visible()
+    viewer = page.get_by_test_id("pose-result-viewer")
+    expect(viewer).to_be_visible()
+    controls = page.get_by_test_id("pose-layer-controls")
+    expect(controls.get_by_role("checkbox", name="Estimated surface")).to_be_checked()
+    expect(controls.get_by_role("checkbox", name="Ground-truth wireframe")).to_be_checked()
+    expect(controls.get_by_role("checkbox", name="Estimated axes")).not_to_be_checked()
+    expect(controls.get_by_role("checkbox", name="Full GT mask")).not_to_be_checked()
+    canvas = viewer.locator("canvas")
+    expect(canvas).to_be_visible()
+    page.wait_for_timeout(500)
+    before = cv2.imdecode(
+        np.frombuffer(viewer.screenshot(), dtype=np.uint8), cv2.IMREAD_COLOR
+    )
+    assert before is not None
+    opacity = page.get_by_label("Estimated opacity")
+    opacity.focus()
+    opacity.press("Home")
+    expect(opacity).to_have_value("0.05")
+    page.wait_for_timeout(150)
+    faded = cv2.imdecode(
+        np.frombuffer(viewer.screenshot(), dtype=np.uint8), cv2.IMREAD_COLOR
+    )
+    assert faded is not None and faded.shape == before.shape
+    opacity_delta = np.max(
+        np.abs(before.astype(np.int16) - faded.astype(np.int16)), axis=2
+    )
+    assert np.count_nonzero(opacity_delta > 16) > 500
+    controls.get_by_role("checkbox", name="Estimated surface").uncheck()
+    page.wait_for_timeout(150)
+    after = cv2.imdecode(
+        np.frombuffer(viewer.screenshot(), dtype=np.uint8), cv2.IMREAD_COLOR
+    )
+    assert after is not None and after.shape == before.shape
+    pixel_delta = np.max(
+        np.abs(before.astype(np.int16) - after.astype(np.int16)), axis=2
+    )
+    assert np.count_nonzero(pixel_delta > 24) > 500
+
+    controls.get_by_role("checkbox", name="Full GT mask").check()
+    expect(viewer.get_by_test_id("pose-full-mask")).to_be_visible()
+    page.get_by_role("button", name="Depth", exact=True).click()
+    expect(page.get_by_test_id("pose-base-layer")).to_have_attribute(
+        "src", "/mock/depth.png"
+    )
+    page.get_by_role("button", name="Next pose frame").click()
+    expect(page).to_have_url(re.compile("scene_id=1.*frame_id=1"))
+    expect(page.get_by_test_id("pose-result-evidence")).to_contain_text("Tracking")
+    page.get_by_label("Frame filter").click()
+    page.get_by_role("option", name="Tracking", exact=True).click()
+    expect(page.get_by_test_id("pose-frame-strip").get_by_role("button")).to_have_count(1)
+    page.get_by_label("Frame filter").click()
+    page.get_by_role("option", name="All exported frames", exact=True).click()
+    page.get_by_label("Sensor scene").click()
+    page.get_by_role("option", name=re.compile("Right · scene 2")).click()
+    expect(page).to_have_url(re.compile("scene_id=2.*frame_id=5"))
+    page.get_by_label("Retained result").click()
+    page.get_by_role("option", name=re.compile("FoundationPose result B")).click()
+    expect(page).to_have_url(re.compile(f"result_id={results[1]['result_id']}"))
+    expect(page.get_by_text("X-ray diagnostic.")).to_be_visible()
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+    result_page = page.get_by_test_id("pose-results-page")
+    for label in ("Pose Estimation", "Review dataset workflow"):
+        expect(result_page.get_by_role("link", name=label)).to_be_visible()
+
+
+def test_pose_results_webgl_fallback_retains_images_masks_and_evidence(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    install_pose_inspection_mocks(page)
+    page.set_viewport_size({"width": 1440, "height": 900})
+    page.add_init_script("HTMLCanvasElement.prototype.getContext = () => null")
+    page.goto(f"{console_server.url}/#/pose-results", wait_until="networkidle")
+
+    fallback = page.get_by_test_id("pose-webgl-fallback")
+    expect(fallback).to_contain_text("WebGL geometry unavailable")
+    expect(page.get_by_test_id("pose-result-viewer")).to_be_visible()
+    expect(page.get_by_test_id("pose-result-evidence")).to_contain_text(
+        "Translation delta"
+    )
+    expect(
+        page.get_by_role("checkbox", name="Estimated surface")
+    ).to_be_disabled()
+    page.get_by_role("checkbox", name="Visible mask").check()
+    expect(page.get_by_test_id("pose-visible-mask")).to_be_visible()
+    page.get_by_role("button", name="Depth", exact=True).click()
+    expect(page.get_by_test_id("pose-base-layer")).to_have_attribute(
+        "src", "/mock/depth.png"
+    )
+    expect(page.get_by_role("button", name="Next pose frame")).to_be_enabled()
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
     )

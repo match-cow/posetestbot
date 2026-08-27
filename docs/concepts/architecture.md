@@ -45,7 +45,7 @@ external job rather than to `run_config.json` or a global catalogue.
 | Workpieces | `posetestbot.pose_templates.catalog` | Global JSON catalogue and managed assets |
 | Pose templates | remaining `posetestbot.pose_templates.*` | Immutable global bundles and run snapshots |
 | BOP export | `posetestbot.bop.writer` | `bop/` below the run |
-| Inspect evaluation | `posetestbot.bop.evaluation` | `processed/bop_evaluation/` only |
+| Inspect results and evaluation | `posetestbot.bop.inspection`, `.evaluation` | Read-only BOP/result views; retained evidence only in `processed/bop_evaluation/` |
 | Web interface | `posetestbot.web.routes.*` | Delegates mutations to domain code or queued jobs |
 
 ## Request and job boundary
@@ -92,3 +92,10 @@ sensor-subset result, the adapter recomputes the selected inventory from the
 unchanged local export, writes an immutable filtered BOP19 targets file inside
 the evaluation folder, and constrains the pinned toolkit to those scenes. No
 tracking or estimator logic crosses back into this repository.
+
+The sibling read-only inspection adapter resolves only validated result, scene,
+frame, GT-instance, and object identifiers. It hash-checks retained CSV,
+provenance, and model evidence; bounds JSON rows and media; rejects symlinks and
+path escapes; and serves the existing BOP RGB, colorized depth, masks, and
+evaluation PLY without writing visualization artifacts. Browser projection is
+an x-ray view of saved BOP poses, not another pipeline stage or metric engine.

@@ -16,7 +16,9 @@ from flask import Blueprint, jsonify, request
 from posetestbot.bop.evaluation import (
     import_external_bop_result,
     inspect_dataset,
+    list_results,
     public_dataset_descriptor,
+    public_result_descriptor,
 )
 from posetestbot.cluster.client import ClusterClientError, new_idempotency_key
 from posetestbot.jobs.runner import ResourceBusyError, TERMINAL_STATUSES
@@ -515,6 +517,23 @@ def _public_job_response(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise RuntimeError("The controller returned an invalid response")
     return {"job": _public_job(value.get("job"))}
+
+
+def _job_collection(
+    job: Mapping[str, Any],
+    *,
+    results_by_job: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    job_id = str(job.get("job_id") or "")
+    collected = results_by_job.get(job_id)
+    if collected is not None:
+        return {
+            "state": "collected",
+            "result": public_result_descriptor(collected),
+        }
+    if job.get("state") in SUCCESS_STATES:
+        return {"state": "available", "result": None}
+    return {"state": "unavailable", "result": None}
 
 
 def _public_archive(value: Any) -> dict[str, Any]:
@@ -1462,17 +1481,75 @@ def list_cluster_jobs():
         limit = request.args.get("limit", default=50, type=int)
         if limit is None or not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
+        run_root_value = request.args.get("run_root")
+        run_root = (
+            resolve_web_run_root(run_root_value)
+            if run_root_value is not None
+            else None
+        )
+        estimator_id = request.args.get("estimator_id")
+        if (
+            estimator_id is not None
+            and PUBLIC_ESTIMATOR_ID_RE.fullmatch(estimator_id) is None
+        ):
+            raise ValueError("estimator_id is invalid")
         response = get_cluster_client().estimation_jobs(
-            limit=limit,
+            limit=100 if run_root is not None or estimator_id is not None else limit,
             state=request.args.get("state"),
         )
         jobs = response.get("jobs") if isinstance(response, Mapping) else None
         if not isinstance(jobs, list):
             raise RuntimeError("The controller returned an invalid job list")
+        filtered: list[Mapping[str, Any]] = []
+        for job in jobs:
+            if not isinstance(job, Mapping):
+                raise RuntimeError("The controller returned an invalid job")
+            payload = job.get("payload")
+            if not isinstance(payload, Mapping):
+                if run_root is not None or estimator_id is not None:
+                    continue
+            elif (
+                run_root is not None
+                and payload.get("run_root") != run_root.as_posix()
+            ) or (
+                estimator_id is not None
+                and payload.get("estimator_id") != estimator_id
+            ):
+                continue
+            filtered.append(job)
+        filtered = filtered[:limit]
+        results_by_job: dict[str, Mapping[str, Any]] = {}
+        if run_root is not None:
+            dataset = inspect_dataset(run_root)
+            for result in list_results(run_root, dataset=dataset):
+                external_job = result.get("external_job")
+                job_id = (
+                    external_job.get("job_id")
+                    if isinstance(external_job, Mapping)
+                    else None
+                )
+                if isinstance(job_id, str):
+                    if job_id in results_by_job:
+                        raise RuntimeError(
+                            "Multiple retained results claim one controller job"
+                        )
+                    results_by_job[job_id] = result
+        public_jobs = []
+        for job in filtered:
+            public = _public_job(job)
+            if run_root is not None:
+                public["collection"] = _job_collection(
+                    job, results_by_job=results_by_job
+                )
+            public_jobs.append(public)
         return jsonify(
             {
-                "jobs": [_public_job(job) for job in jobs],
-                "next_cursor": response.get("next_cursor"),
+                "jobs": public_jobs,
+                "next_cursor": (
+                    None
+                    if run_root is not None or estimator_id is not None
+                    else response.get("next_cursor")
+                ),
             }
         )
     except Exception as exc:
@@ -1655,11 +1732,20 @@ def import_cluster_result(job_id: str):
         return (
             jsonify(
                 {
-                    "result": registered,
+                    "result": public_result_descriptor(registered),
                     "created": created,
                     "evaluation_url": f"/bop-evaluation?result_id={result_id}",
+                    "inspection_url": f"/pose-results?result_id={result_id}",
                     "download_url": (
                         f"/bop/evaluation/results/{result_id}/download"
+                        f"?run_root={run_root.as_posix()}"
+                    ),
+                    "package_url": (
+                        f"/bop/evaluation/results/{result_id}/package"
+                        f"?run_root={run_root.as_posix()}"
+                    ),
+                    "provenance_url": (
+                        f"/bop/evaluation/results/{result_id}/provenance"
                         f"?run_root={run_root.as_posix()}"
                     ),
                 }

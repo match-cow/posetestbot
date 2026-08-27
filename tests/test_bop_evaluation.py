@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import re
 import stat
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,7 @@ import cv2
 import numpy as np
 import pytest
 
+from posetestbot.bop import evaluation as bop_evaluation
 from posetestbot.bop.evaluation import (
     create_evaluation_request,
     create_simulated_bop_result,
@@ -19,6 +22,7 @@ from posetestbot.bop.evaluation import (
     inspect_dataset,
     list_evaluations,
     list_results,
+    result_package_bytes,
     result_file_path,
     validate_bop_result_csv,
 )
@@ -432,6 +436,181 @@ def test_result_import_is_immutable_hashed_and_listed(tmp_path: Path) -> None:
     assert [item["result_id"] for item in list_results(run_root)] == [
         record["result_id"]
     ]
+
+
+def test_manual_result_package_is_deterministic_path_free_and_hash_checked(
+    tmp_path: Path,
+) -> None:
+    run_root = make_tiny_evaluation_run(tmp_path)
+    dataset = inspect_dataset(run_root)
+    source = write_result_csv(
+        tmp_path / f"method_{dataset['dataset_alias']}-test.csv"
+    )
+    result = import_bop_result(run_root, source, method_name="Manual method")
+
+    first, first_manifest = result_package_bytes(run_root, result["result_id"])
+    second, second_manifest = result_package_bytes(run_root, result["result_id"])
+
+    assert first == second
+    assert first_manifest == second_manifest
+    assert first_manifest["schema_version"] == "bop_result_package_manifest.v1"
+    assert first_manifest["provenance"] is None
+    assert first_manifest["external_job"] is None
+    assert first_manifest["dataset"] == {
+        "dataset_alias": dataset["dataset_alias"],
+        "split": "test",
+        "sha256": dataset["dataset_sha256"],
+    }
+    assert run_root.as_posix() not in json.dumps(first_manifest)
+    with zipfile.ZipFile(io.BytesIO(first)) as archive:
+        assert archive.namelist() == sorted([source.name, "manifest.json"])
+        assert archive.read(source.name) == source.read_bytes()
+        assert json.loads(archive.read("manifest.json")) == first_manifest
+
+    stored = result_file_path(run_root, result["result_id"])
+    stored.chmod(0o600)
+    stored.write_bytes(stored.read_bytes() + b"tampered")
+    with pytest.raises(RuntimeError, match="size|integrity"):
+        result_package_bytes(run_root, result["result_id"])
+
+
+def test_foundationpose_failure_retention_strips_messages_and_paths(
+    tmp_path: Path,
+) -> None:
+    run_root = make_tiny_evaluation_run(tmp_path)
+    inventory = bop_evaluation._dataset_inventory(run_root)
+    evidence = bop_evaluation._foundationpose_execution_evidence(
+        {
+            "oracle_mask_contract": "bop_mask_visib_gt_instance.v1",
+            "score_contract": "constant_1.0_no_detection_confidence",
+            "execution_contract": "independent_register_per_target.v2",
+            "track_segment_count": 0,
+            "recorded_track_segment_count": 0,
+            "omitted_track_segment_count": 0,
+            "track_segments": [],
+            "failures": [
+                {
+                    "scene_id": 1,
+                    "im_id": 0,
+                    "obj_id": 1,
+                    "gt_id": 0,
+                    "instance_uuid": "11111111-1111-4111-8111-111111111111",
+                    "operation": "registration",
+                    "error_type": "RuntimeError",
+                    "message": "weights missing below /secret/cluster/path",
+                    "remote_path": "/secret/cluster/path",
+                }
+            ],
+            "image_timings_seconds": {"1/0": 0.125},
+        },
+        inventory=inventory,
+        execution_mode="independent_registration",
+        counts={
+            "registration_count": 1,
+            "tracking_count": 0,
+            "reinitialization_count": 0,
+            "selected_target_count": 1,
+            "processed_target_count": 1,
+            "selected_scope_excluded_target_count": 0,
+            "profile_excluded_target_count": 0,
+            "estimate_count": 0,
+            "failure_count": 1,
+        },
+    )
+
+    assert evidence["failure_identities"] == [
+        {
+            "scene_id": 1,
+            "im_id": 0,
+            "obj_id": 1,
+            "gt_id": 0,
+            "instance_uuid": "11111111-1111-4111-8111-111111111111",
+            "operation": "registration",
+            "error_type": "RuntimeError",
+        }
+    ]
+    assert "/secret" not in json.dumps(evidence)
+
+
+def test_foundationpose_image_timing_evidence_is_deterministically_bounded() -> None:
+    frame_count = 10_001
+    evidence = bop_evaluation._foundationpose_execution_evidence(
+        {
+            "oracle_mask_contract": "bop_mask_visib_gt_instance.v1",
+            "score_contract": "constant_1.0_no_detection_confidence",
+            "execution_contract": "independent_register_per_target.v2",
+            "track_segment_count": 0,
+            "recorded_track_segment_count": 0,
+            "omitted_track_segment_count": 0,
+            "track_segments": [],
+            "failures": [],
+            "image_timings_seconds": {
+                f"1/{im_id}": im_id / 10_000 for im_id in range(frame_count)
+            },
+        },
+        inventory={
+            "manifest": {
+                "exports": [{"scene_id": 1, "sensor_name": "fixture"}]
+            },
+            "target_rows": {
+                (1, im_id, 1): {"inst_count": 1}
+                for im_id in range(frame_count)
+            },
+            "object_ids": {1},
+        },
+        execution_mode="independent_registration",
+        counts={
+            "registration_count": frame_count,
+            "tracking_count": 0,
+            "reinitialization_count": 0,
+            "selected_target_count": frame_count,
+            "processed_target_count": frame_count,
+            "selected_scope_excluded_target_count": 0,
+            "profile_excluded_target_count": 0,
+            "estimate_count": frame_count,
+            "failure_count": 0,
+        },
+    )
+
+    assert evidence["recorded_image_timing_count"] == 10_000
+    assert evidence["omitted_image_timing_count"] == 1
+    assert list(evidence["image_timings_seconds"])[-1] == "1/9999"
+
+
+def test_public_result_descriptor_never_copies_unsafe_extension_values() -> None:
+    public = bop_evaluation.public_result_descriptor(
+        {
+            "result_id": "result-aaaaaaaaaaaa",
+            "external_job": {
+                "provider": "posetestbot-cluster",
+                "job_id": "/secret/remote/job",
+                "slurm_job_id": "/secret/slurm",
+            },
+            "sensor_scope": {
+                "schema_version": "bop_result_sensor_scope.v1",
+                "scope_kind": "selected_bop_sensor_scenes",
+                "execution_mode": "continuous_tracking",
+                "selected_scene_ids": ["/secret/scene"],
+                "eligible_scene_ids": [1],
+                "selected_target_inventory_sha256": "a" * 64,
+                "selected_target_count": 1,
+                "full_dataset_target_count": 1,
+                "excluded_target_count": 0,
+                "is_sensor_scoped": False,
+            },
+            "tracking": {
+                "oracle_mask_contract": "/secret/mask",
+                "registration_count": 1,
+            },
+            "controller_provenance_sha256": "/secret/provenance",
+        }
+    )
+
+    assert "external_job" not in public
+    assert "sensor_scope" not in public
+    assert public["tracking"] == {"registration_count": 1}
+    assert public["provenance_available"] is False
+    assert "/secret" not in json.dumps(public)
 
 
 def test_registered_result_metadata_cannot_escape_its_immutable_folder(

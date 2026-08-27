@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import shutil
 import uuid
 from pathlib import Path
@@ -21,7 +22,10 @@ from posetestbot.bop.evaluation import (
     list_evaluations,
     list_results,
     public_dataset_descriptor,
+    public_result_descriptor,
     result_download_path,
+    result_package_bytes,
+    result_provenance_path,
     toolkit_status,
 )
 from posetestbot.jobs.runner import ResourceBusyError
@@ -80,17 +84,18 @@ def bop_evaluation_setup():
         run_root = resolve_web_run_root(request.args.get("run_root"))
         dataset = inspect_dataset(run_root)
         results = list_results(run_root, dataset=dataset)
+        public_results = [public_result_descriptor(result) for result in results]
         return jsonify(
             {
                 "schema_version": "bop_evaluation_setup.v1",
                 "run_root": run_root.as_posix(),
                 "toolkit": toolkit_status(APP_ROOT),
                 "dataset": public_dataset_descriptor(dataset),
-                "results": results,
+                "results": public_results,
                 "evaluations": list_evaluations(
                     run_root,
                     dataset=dataset,
-                    results=results,
+                    results=public_results,
                 ),
             }
         )
@@ -133,7 +138,7 @@ def bop_result_import():
             staged,
             method_name=display_name,
         )
-        return jsonify({"result": result}), 201
+        return jsonify({"result": public_result_descriptor(result)}), 201
     except Exception as exc:
         return _error(exc)
     finally:
@@ -206,6 +211,28 @@ def queue_bop_evaluation():
         return _error(exc)
 
 
+@bop_evaluation_bp.get("/bop/evaluation/results")
+def bop_result_list():
+    try:
+        run_root = resolve_web_run_root(request.args.get("run_root"))
+        limit = request.args.get("limit", default=100, type=int)
+        if limit is None or not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        dataset = inspect_dataset(run_root)
+        results = list_results(run_root, dataset=dataset)
+        return jsonify(
+            {
+                "schema_version": "bop_result_list.v1",
+                "results": [
+                    public_result_descriptor(result) for result in results[:limit]
+                ],
+                "total_count": len(results),
+            }
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
 @bop_evaluation_bp.get("/bop/evaluation/results/<result_id>/download")
 def download_bop_result(result_id: str):
     try:
@@ -217,6 +244,37 @@ def download_bop_result(result_id: str):
             as_attachment=True,
             download_name=str(result["filename"]),
             mimetype="text/csv",
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
+@bop_evaluation_bp.get("/bop/evaluation/results/<result_id>/provenance")
+def download_bop_result_provenance(result_id: str):
+    try:
+        run_root = resolve_web_run_root(request.args.get("run_root"))
+        path = result_provenance_path(run_root, result_id)
+        return send_file(
+            path,
+            as_attachment=True,
+            download_name=f"{result_id}-provenance.json",
+            mimetype="application/json",
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
+@bop_evaluation_bp.get("/bop/evaluation/results/<result_id>/package")
+def download_bop_result_package(result_id: str):
+    try:
+        run_root = resolve_web_run_root(request.args.get("run_root"))
+        package, _manifest = result_package_bytes(run_root, result_id)
+        return send_file(
+            io.BytesIO(package),
+            as_attachment=True,
+            download_name=f"{result_id}-package.zip",
+            mimetype="application/zip",
+            max_age=0,
         )
     except Exception as exc:
         return _error(exc)
