@@ -180,7 +180,16 @@ Attempt creation records stable sensor keys and queues one `cpu`/`disk_io`
 parent job. Promotion is a separate queued transaction and requires passing
 recommendations or explicit passing candidate IDs. Failed alternative solver
 combinations remain diagnostic evidence and do not invalidate a selected
-passing combination. Multi-camera attempts retain the common algorithm bundle
+passing combination. The 15-view target and image-centroid coverage targets
+are quality recommendations, not extrinsic-solver admission gates. A smaller
+capture or limited image coverage retains its solution when motion observability,
+inlier support, and geometric validation pass. The review page displays selected
+candidate warnings and their measured values alongside the recommendations;
+promoted profiles retain them in `metadata.quality_warnings`. Missing or malformed
+coverage input still fails. These extrinsic recommendations do not change the
+separate validation required to replace a factory lens model with fitted intrinsics.
+
+Multi-camera attempts retain the common algorithm bundle
 whose independently estimated companion transform is most suitable under the
 recorded ranking policy. Pairwise companion disagreement above 10 mm or 5° is
 promotable with a preserved quality warning; disagreement above 20 mm or 10°

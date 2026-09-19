@@ -880,37 +880,70 @@ def test_degenerate_motion_is_reported_as_candidate_failure() -> None:
     assert "degenerate robot motion" in candidate["error"]
 
 
-def test_attempt_quality_gates_require_fifteen_views_and_six_coverage_cells() -> None:
-    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+@pytest.mark.parametrize("mode", ["eye_in_hand", "eye_to_hand"])
+@pytest.mark.parametrize("count", [8, 18])
+@pytest.mark.parametrize("continuous", [False, True])
+def test_view_count_and_coverage_are_advisory(
+    mode: str, count: int, continuous: bool
+) -> None:
+    observations, expected, _companion = _fixture_observations(mode, count=count)
+    for observation in observations:
+        observation["image_coverage_cell"] = 4
+        observation["image_centroid_px"] = [320.0, 240.0]
+    candidate = evaluate_extrinsic_candidate(
+        observations,
+        mode=mode,
+        pnp_method="ITERATIVE",
+        extrinsic_method="park",
+        sensor_key="realsense_d435:1",
+        min_accepted_views=15,
+        min_coverage_cells=6,
+        min_image_centroid_x_span_ratio=0.45 if continuous else 0.0,
+        min_image_centroid_y_span_ratio=0.35 if continuous else 0.0,
+        min_image_centroid_hull_area_ratio=0.10 if continuous else 0.0,
+    )
 
-    too_few = evaluate_extrinsic_candidate(
+    assert candidate["status"] == "passing"
+    checks = {check["name"]: check for check in candidate["checks"]}
+    assert checks["accepted_views"]["status"] == ("warning" if count < 15 else "ok")
+    assert checks["image_centroid_coverage"]["status"] == "warning"
+    if continuous:
+        assert checks["continuous_image_centroid_coverage"]["status"] == "warning"
+        evidence = checks["continuous_image_centroid_coverage"]["actual"]
+        assert evidence["tail_support_views"] == min(5, count // 2)
+    actual = np.asarray(candidate["primary_transform"]["matrix"], dtype=float)
+    assert transform_residual(actual, expected)["translation_mm"] < 1e-5
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("image_centroid_px", None, "continuous image-centroid coverage"),
+        (
+            "image_centroid_px",
+            [float("nan"), 240.0],
+            "continuous image-centroid coverage",
+        ),
+        ("image_centroid_px", [-1.0, 240.0], "continuous image-centroid coverage"),
+        ("frame_id", None, "accepted view evidence requires frame identities"),
+    ],
+)
+def test_advisory_coverage_still_rejects_invalid_evidence(
+    field, value, message
+) -> None:
+    observations, _expected, _companion = _fixture_observations("eye_in_hand")
+    observations[0][field] = value
+    candidate = evaluate_extrinsic_candidate(
         observations,
         mode="eye_in_hand",
         pnp_method="ITERATIVE",
         extrinsic_method="park",
         sensor_key="realsense_d435:1",
+        min_image_centroid_x_span_ratio=0.45,
         min_accepted_views=15,
-        min_coverage_cells=6,
     )
-
-    assert too_few["status"] == "error"
-    assert "accepted view count 10 is below required 15" in too_few["error"]
-
-    many, _expected, _companion = _fixture_observations("eye_in_hand", count=18)
-    for observation in many:
-        observation["image_coverage_cell"] = 4
-    poor_coverage = evaluate_extrinsic_candidate(
-        many,
-        mode="eye_in_hand",
-        pnp_method="ITERATIVE",
-        extrinsic_method="park",
-        sensor_key="realsense_d435:1",
-        min_accepted_views=15,
-        min_coverage_cells=6,
-    )
-
-    assert poor_coverage["status"] == "error"
-    assert "image-centroid coverage 1/9 is below required 6/9" in poor_coverage["error"]
+    assert candidate["status"] == "error"
+    assert message in candidate["error"]
 
 
 def _coplanar_pnp_ransac_regression_fixture() -> tuple[

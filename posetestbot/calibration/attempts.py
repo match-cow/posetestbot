@@ -3847,6 +3847,11 @@ def _candidate_profile(
             "robot_pose_reference": request_value["robot_pose_reference"],
             "companion_transform": candidate["companion_transform"],
             "held_out_residuals": candidate["held_out_residuals"],
+            "quality_warnings": [
+                dict(check)
+                for check in candidate.get("checks", [])
+                if check.get("status") == "warning"
+            ],
             "outlier_count": candidate["outlier_count"],
             "outlier_ratio": candidate["outlier_ratio"],
             "intrinsic_profile_id": intrinsic_profile["profile_id"],
@@ -4818,6 +4823,13 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
             if isinstance(joint_recommendation, Mapping)
             else 0
         )
+        candidate_has_warnings = any(
+            check.get("status") == "warning"
+            for result in ranking.get("results", [])
+            for candidate in result.get("candidates", [])
+            if candidate.get("recommended")
+            for check in candidate.get("checks", [])
+        )
         _update_progress(
             attempt_root,
             status="complete",
@@ -4826,7 +4838,7 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
             message=(
                 "Calibration calculations are complete with quality warnings and "
                 "are awaiting review."
-                if timing_warning_count or joint_warning_count
+                if timing_warning_count or joint_warning_count or candidate_has_warnings
                 else "Calibration calculations are complete and awaiting review."
             ),
         )
@@ -6512,6 +6524,11 @@ def _selected_profiles(
             {
                 "promotion_attempt_id": request_value["attempt_id"],
                 "promotion_candidate_id": candidate_id,
+                "quality_warnings": [
+                    dict(check)
+                    for check in candidate.get("checks", [])
+                    if check.get("status") == "warning"
+                ],
                 "promotion_solver_provenance": {
                     "solver_policy": request_value["solver_policy"],
                     "pnp_method": candidate["pnp_method"],

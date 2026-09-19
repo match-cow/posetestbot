@@ -921,12 +921,11 @@ def continuous_image_coverage_evidence(
         ):
             raise ValueError("continuous image-centroid coverage mixes image sizes")
         normalized_points.append(point / dimensions)
-    minimum_view_count = 2 * tail_support_views
-    if len(normalized_points) < minimum_view_count:
-        raise ValueError(
-            "continuous image-centroid coverage requires at least "
-            f"{minimum_view_count} views"
-        )
+    if not normalized_points:
+        raise ValueError("continuous image-centroid coverage requires observations")
+    # Small research captures still have measurable coverage. Record the actual
+    # support used rather than rejecting them before geometric validation.
+    tail_support_views = min(tail_support_views, max(1, len(normalized_points) // 2))
     points = np.asarray(normalized_points, dtype=float)
     ordered = np.sort(points, axis=0)
     supported_minimum = ordered[tail_support_views - 1]
@@ -1096,6 +1095,7 @@ def evaluate_extrinsic_candidate(
     input_observation_count = len(input_observations)
     balance_evidence: dict[str, Any] | None = None
     continuous_coverage: dict[str, Any] | None = None
+    continuous_coverage_ok = True
     try:
         if max_mean_translation_mm <= 0 or max_mean_rotation_deg <= 0:
             raise ValueError("residual thresholds must be greater than zero")
@@ -1117,11 +1117,10 @@ def evaluate_extrinsic_candidate(
             for item in observations
             if item.get("frame_id") not in {None, ""}
         }
-        if len(accepted_views) < min_accepted_views:
-            raise ValueError(
-                f"accepted view count {len(accepted_views)} is below "
-                f"required {min_accepted_views}"
-            )
+        if min_accepted_views > 0 and any(
+            item.get("frame_id") in {None, ""} for item in observations
+        ):
+            raise ValueError("accepted view evidence requires frame identities")
         coverage_cells = {
             int(item["image_coverage_cell"])
             for item in observations
@@ -1146,24 +1145,12 @@ def evaluate_extrinsic_candidate(
             hull_area_ratio = float(
                 continuous_coverage["supported_convex_hull_area_ratio"]
             )
-            if (
-                span_x < min_image_centroid_x_span_ratio
-                or span_y < min_image_centroid_y_span_ratio
-                or hull_area_ratio < min_image_centroid_hull_area_ratio
-            ):
-                raise ValueError(
-                    "continuous image-centroid coverage is below required "
-                    "field-of-view diversity: "
-                    f"x span {span_x:.3f}/{min_image_centroid_x_span_ratio:.3f}, "
-                    f"y span {span_y:.3f}/{min_image_centroid_y_span_ratio:.3f}, "
-                    "hull area "
-                    f"{hull_area_ratio:.3f}/"
-                    f"{min_image_centroid_hull_area_ratio:.3f}"
-                )
-        elif len(coverage_cells) < min_coverage_cells:
-            raise ValueError(
-                f"image-centroid coverage {len(coverage_cells)}/9 is below "
-                f"required {min_coverage_cells}/9"
+            continuous_coverage_ok = (
+                span_x >= min_image_centroid_x_span_ratio
+                and span_y >= min_image_centroid_y_span_ratio
+                and hull_area_ratio >= min_image_centroid_hull_area_ratio
+                and continuous_coverage["tail_support_views"]
+                >= image_coverage_tail_support_views
             )
         observations, balance_evidence = _balanced_motion_observations(
             input_observations
@@ -1330,7 +1317,9 @@ def evaluate_extrinsic_candidate(
         checks = [
             {
                 "name": "accepted_views",
-                "status": "ok",
+                "status": (
+                    "ok" if len(accepted_views) >= min_accepted_views else "warning"
+                ),
                 "actual": len(accepted_views),
                 "threshold": min_accepted_views,
             },
@@ -1375,7 +1364,7 @@ def evaluate_extrinsic_candidate(
                 [
                     {
                         "name": "continuous_image_centroid_coverage",
-                        "status": "ok",
+                        "status": "ok" if continuous_coverage_ok else "warning",
                         "actual": continuous_coverage,
                         "threshold": {
                             "minimum_x_span_ratio": (min_image_centroid_x_span_ratio),

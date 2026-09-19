@@ -113,12 +113,15 @@ invalidate and recommission every connected path.
   valid calibration attempt solely for this conservative cadence target.
 - [ ] Create the calibration attempt, inspect timestamp/intrinsic/geometric
   evidence per camera, and explicitly promote only reviewed passing profiles.
-- [ ] For every required camera, retain at least 15 accepted views and confirm
-  supported field coverage. For eye-in-hand captures, require normalized
+- [ ] For every required camera, aim for at least 15 accepted views and inspect
+  supported field coverage. For eye-in-hand captures, aim for normalized
   centroid spans of at least 45% image width and 35% image height plus at least
   10% supported centroid-hull area. For research-stage static eye-to-hand captures,
-  require 15% width, 20% height, and 3% hull area; treat the 3 × 3
-  centroid-cell count as a warning rather than an absolute-position veto.
+  aim for 15% width, 20% height, and 3% hull area. View count and both
+  continuous and 3 × 3 cell coverage are advisory: valid solutions remain
+  promotable with visible warnings when these targets are missed. Small
+  captures use the available tail support and record the reduced support.
+  Missing or malformed coverage evidence and degenerate motion still fail.
 - [ ] Keep factory projection when compatible. Activate a fitted OpenCV model
   only when factory projection is unusable and training covers at least 6/9 image-centroid cells
   with passing held-out, plausibility, per-view, and RMS checks.

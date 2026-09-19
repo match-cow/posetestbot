@@ -1033,6 +1033,13 @@ def _exercise_promotion_transaction(
     )
     candidate_evidence = _motion_balanced_candidate(candidate_id)
     candidate_evidence["synchronization"] = synchronization
+    quality_warning = {
+        "name": "image_centroid_coverage",
+        "status": "warning",
+        "actual": 1,
+        "threshold": 6,
+    }
+    candidate_evidence["checks"].append(quality_warning)
     write_profile_collection([candidate], attempt_root / "candidate_profiles.json")
     intrinsic = factory_intrinsic_profile(run_root / "realsense_1")
     write_intrinsic_profile_collection(
@@ -1216,6 +1223,7 @@ def _exercise_promotion_transaction(
     )
     assert promoted.status == CalibrationStatus.VALID
     assert promoted.operator == "test-operator"
+    assert promoted.metadata["quality_warnings"] == [quality_warning]
     assert promoted.intrinsics.distortion_model == (
         "inverse_brown_conrady" if sdk_inverse_projection else "brown_conrady"
     )
