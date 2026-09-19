@@ -4768,6 +4768,14 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
         "pnp_method": "IPPE",
         "extrinsic_method": "park",
         "algorithms": ["IPPE", "park"],
+        "checks": [
+            {
+                "name": "accepted_views",
+                "status": "warning",
+                "actual": 10,
+                "threshold": 15,
+            }
+        ],
         "status": "passing",
         "validation_state": "passed",
         "recommended": True,
@@ -5424,6 +5432,16 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     expect(clutter_warning).to_contain_text("743 views")
     expect(clutter_warning).to_contain_text("47552 off-instance corner correspondences")
     expect(clutter_warning).to_contain_text("result remains usable with this warning")
+    quality_warning = page.get_by_test_id(
+        "calibration-quality-warnings-realsense_d435:wrist-1"
+    )
+    expect(quality_warning).to_be_visible()
+    expect(quality_warning).to_contain_text("accepted views")
+    expect(quality_warning).to_contain_text("10")
+    expect(quality_warning).to_contain_text("15")
+    expect(quality_warning).to_contain_text(
+        "do not block a geometrically valid solution"
+    )
     wrist_result = page.locator('[data-camera-key="realsense_d435:wrist-1"]')
     expect(wrist_result).to_contain_text("Reusable robot-mounted-camera transform")
     expect(wrist_result).to_contain_text("camera → robot_flange")
