@@ -39,7 +39,7 @@ Options:
 
 Default behavior is a safe project bootstrap:
   - ensure uv is available,
-  - run uv sync --all-groups,
+  - run uv sync --all-groups --locked,
   - run lightweight PoseTestBot readiness checks.
 
 Vendor SDKs such as the Stereolabs ZED SDK are reported by the checks but are
@@ -208,8 +208,8 @@ sync_python_environment() {
     return
   fi
 
-  log "Synchronizing the uv Python environment."
-  run uv sync --all-groups
+  log "Synchronizing the committed uv lockfile, including patched runtime dependencies."
+  run uv sync --all-groups --locked
 }
 
 install_posegridgen() {

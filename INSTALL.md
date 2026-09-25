@@ -20,7 +20,7 @@ bash scripts/install.sh --with-posegridgen --with-posetemplatecreator \
 This safe project bootstrap:
 
 - ensures `uv` is available,
-- runs `uv sync --all-groups`,
+- runs `uv sync --all-groups --locked`,
 - initializes and verifies the exact, clean PoseGridGen source submodule,
 - initializes and verifies the exact, clean PoseTemplateCreator source submodule,
 - initializes the exact, clean BOP Toolkit source submodule and synchronizes
@@ -39,6 +39,13 @@ signaling; browsers use the advertised STUN port to obtain numeric candidates
 and exchange media directly over the trusted lab LAN. Set
 `POSETESTBOT_MONITOR_STUN_PORT` to use a different UDP port. TURN and Internet
 NAT traversal remain out of scope.
+
+The installer uses the committed `uv.lock` and rejects an out-of-date lockfile.
+The application requires Flask 3.1.3+, aiohttp 3.14.3+, and Pillow 12.3+; the lock
+also includes patched cryptography, pyOpenSSL, lxml, fontTools, and Werkzeug
+dependencies. Rerun the installer after updating the checkout to apply these
+versions. Use `uv add` or `uv lock` for deliberate dependency updates and commit
+the generated lockfile with the change.
 
 If `UV_CACHE_DIR` is unset, the installer uses `/tmp/uv-cache`.
 Browser binaries for Playwright UI tests are not installed by default.
@@ -189,7 +196,7 @@ instructions, then verify:
 
 ```bash
 uv --version
-uv sync --all-groups
+uv sync --all-groups --locked
 ```
 
 Run project scripts through `uv`:
@@ -672,7 +679,7 @@ detailed reusable teaching checklist remains in
 
 The GitHub Pages site is built from `docs/` and `mkdocs.yml` with Material for
 MkDocs. Documentation dependencies are locked in the `docs` dependency group
-and are included by the default `uv sync --all-groups` installer path.
+and are included by the default `uv sync --all-groups --locked` installer path.
 
 Build the site with strict link and configuration checks:
 
@@ -712,7 +719,7 @@ uv run python scripts/generate_http_api_reference.py --check
 ### Playwright Browser Tests
 
 The Python Playwright package is a dev dependency installed by
-`uv sync --all-groups`, but browser binaries are intentionally optional. Install
+`uv sync --all-groups --locked`, but browser binaries are intentionally optional. Install
 Chromium only when running browser UI coverage:
 
 ```bash
@@ -828,8 +835,8 @@ git diff --check
 ## Troubleshooting
 
 - `uv` missing: run `bash scripts/install.sh` without `--check-only`, or install
-  `uv` manually and rerun `uv sync --all-groups`.
-- Python import smoke fails: rerun `uv sync --all-groups`; add or update
+  `uv` manually and rerun `uv sync --all-groups --locked`.
+- Python import smoke fails: rerun `uv sync --all-groups --locked`; add or update
   dependencies with `uv add ...` rather than hand-editing lock files.
 - Calibration target generation is unavailable: run
   `git submodule update --init --checkout third_party/PoseGridGen`, confirm the

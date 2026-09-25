@@ -14,9 +14,14 @@ cd PoseTestBot
 bash scripts/install.sh
 ```
 
-The default installer runs `uv sync --all-groups`, verifies the bundled web
+The default installer runs `uv sync --all-groups --locked`, verifies the bundled web
 console, imports required Python modules, and performs acquisition-runtime and
 adapter checks without opening hardware for capture.
+
+The committed lockfile includes the patched application dependencies; an
+out-of-date lockfile fails installation instead of silently resolving different
+versions. Rerun the installer after updating the checkout. Current minimums are
+Flask 3.1.3, aiohttp 3.14.3, and Pillow 12.3.
 
 To verify an existing environment without changing it:
 
