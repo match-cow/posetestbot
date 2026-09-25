@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import io
 from typing import Any
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 
 from posetestbot.bop.annotations import (
     inspect_annotation_setup,
     validate_annotation_mode,
 )
+from posetestbot.bop.ground_truth import combined_scene_gt_bytes
 from posetestbot.jobs.runner import ResourceBusyError
 from posetestbot.web.paths import APP_ROOT
 from posetestbot.web.runtime import job_runner
@@ -92,6 +94,22 @@ def queue_bop_annotations():
                 }
             ),
             202,
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
+@bop_annotations_bp.get("/bop/annotations/ground-truth/download")
+def download_combined_scene_gt():
+    try:
+        run_root = resolve_web_run_root(request.args.get("run_root"))
+        content = combined_scene_gt_bytes(run_root)
+        return send_file(
+            io.BytesIO(content),
+            as_attachment=True,
+            download_name="scene_gt_all_sensors.json",
+            mimetype="application/json",
+            max_age=0,
         )
     except Exception as exc:
         return _error(exc)

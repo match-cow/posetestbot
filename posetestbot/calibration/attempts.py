@@ -6592,22 +6592,31 @@ def _transactional_replace(
             destination.parent.mkdir(parents=True, exist_ok=True)
             if destination.exists():
                 backup = backup_root / str(index)
-                os.replace(destination, backup)
                 backups.append((backup, destination))
-            os.replace(source, destination)
+                os.replace(destination, backup)
+            # Record intent before rename so an asynchronous interruption after
+            # the rename cannot leave an untracked original in the backup tree.
             installed.append(destination)
-    except Exception:
-        for destination in reversed(installed):
-            if destination.is_dir():
-                shutil.rmtree(destination)
-            elif destination.exists():
-                destination.unlink()
-        for backup, destination in reversed(backups):
-            os.replace(backup, destination)
+            os.replace(source, destination)
+    except BaseException:
+        try:
+            for destination in reversed(installed):
+                if destination.is_dir():
+                    shutil.rmtree(destination)
+                elif destination.exists():
+                    destination.unlink()
+            for backup, destination in reversed(backups):
+                if backup.exists():
+                    os.replace(backup, destination)
+        except BaseException as recovery_error:
+            raise RuntimeError(
+                "Calibration promotion rollback failed; retained originals at "
+                f"{backup_root}"
+            ) from recovery_error
+        shutil.rmtree(backup_root)
         raise
-    finally:
-        if backup_root.exists():
-            shutil.rmtree(backup_root)
+    else:
+        shutil.rmtree(backup_root)
 
 
 def promote_calibration_attempt(

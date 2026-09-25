@@ -6,6 +6,9 @@ import json
 import shutil
 import uuid
 import zipfile
+import urllib.request
+import urllib.response
+from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +55,28 @@ class FakeRunner:
                 }
 
         return FakeJob()
+
+
+def test_cluster_client_keeps_authentication_on_loopback_with_http_proxy(monkeypatch) -> None:
+    monkeypatch.setenv("http_proxy", "http://proxy.invalid:8888")
+    monkeypatch.setenv("no_proxy", "")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    requests = []
+
+    def fake_http_open(_handler, request):
+        requests.append(request)
+        response = urllib.response.addinfourl(io.BytesIO(b"{}"), {}, request.full_url, 200)
+        response.msg = "OK"
+        return response
+
+    # Intercept only the HTTP transport; the real opener and any proxy handlers
+    # still run, without opening a socket or exposing a real controller token.
+    monkeypatch.setattr(urllib.request.HTTPHandler, "http_open", fake_http_open)
+    controller = ClusterControllerClient("http://127.0.0.1:8765", "x" * 32)
+    assert controller.status() == {}
+    assert requests[0].host == "127.0.0.1:8765"
+    assert requests[0].selector == "/v1/status"
+    assert requests[0].get_header("Authorization") == "Bearer " + "x" * 32
 
 
 def test_cluster_client_delete_archive_uses_opaque_versioned_route(monkeypatch) -> None:
@@ -1290,7 +1315,7 @@ def test_external_result_import_is_idempotent_and_historical_download_survives_d
 ) -> None:
     controller = FakeController()
     app, runs_root = _app(tmp_path, controller)
-    run = _pose_ready_run(runs_root)
+    run = _pose_ready_run(runs_root / "folder with & and #")
     monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs_root.as_posix())
     job_id = _successful_external_job(controller, run, tmp_path)
     client = app.test_client()
@@ -1308,6 +1333,13 @@ def test_external_result_import_is_idempotent_and_historical_download_survives_d
         == second.get_json()["result"]["result_id"]
     )
     assert second.get_json()["created"] is False
+    for field in ("evaluation_url", "inspection_url"):
+        assert parse_qs(urlsplit(first.get_json()[field]).query) == {
+            "result_id": [first.get_json()["result"]["result_id"]],
+            "run_root": [run.as_posix()],
+        }
+    for field in ("download_url", "package_url", "provenance_url"):
+        assert client.get(first.get_json()[field]).status_code == 200
     records = list_results(run)
     assert len(records) == 1
     assert records[0]["source_kind"] == "external_controller"

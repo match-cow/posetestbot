@@ -198,6 +198,21 @@ colorized depth image with projected evaluation-model geometry. The default is
 a translucent cyan estimated surface and magenta GT wireframe. Estimated and GT
 surfaces, wireframes, axes, boxes, full masks, and visible masks are independent
 browser-local controls. The overlay does not claim observed-depth occlusion.
+Direct result links include the run root, so they keep inspecting the correct
+export even if another run is active in the browser. Older links containing
+only a result ID are resolved against directly indexed, approved run folders;
+missing or ambiguous IDs fail closed. When the linked run differs from the
+active operator run, the page shows both scopes and offers **Make linked run
+active** before returning to other workflow pages.
+Evaluation links also carry the run root. A missing linked result disables
+evaluation until a retained result is explicitly selected; it never substitutes
+another result's metrics.
+Next to the result CSV download, **All-sensor GT JSON** downloads one
+`scene_gt_all_sensors.json` collection for the full exported dataset. It maps
+each BOP scene ID to its sensor in `sensor_by_scene_id`, and stores poses under
+`scene_gt[scene_id][im_id]`. Match those IDs with the result CSV's `scene_id`
+and `im_id` for manual comparison. The translation values are in millimetres.
+The original per-scene BOP `scene_gt.json` files remain unchanged.
 Translation and symmetry-unaware rotation deltas appear only for an unambiguous
 single estimate-to-GT association. Repeated identical objects remain visibly
 ambiguous. Registration/tracking labels appear only when the retained sanitized
@@ -234,7 +249,10 @@ program** controls.
   and exits only an idle waiting program.
 - The target is always the fixed lab profile `172.31.1.147:30300`; the browser
   cannot override IP or port.
-- Capture cancellation stops/cleans child processes but never sends IIWA Stop.
+- Capture cancellation signals every local child process group before waiting on
+  the shared grace period. Repeated cancellation signals are idempotent and do
+  not interrupt cleanup. Descendants are stopped even if their launcher has
+  already exited. Cancellation never sends IIWA Stop.
 
 See [Safety and authorization](concepts/safety.md) and [Physical
 commissioning](COMMISSIONING.md).

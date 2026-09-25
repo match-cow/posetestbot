@@ -1273,6 +1273,47 @@ def _exercise_promotion_transaction(
     assert (attempt_root / attempt_module.CHECKS_FILE).is_file()
 
 
+@pytest.mark.parametrize(
+    ("rollback_fails", "interrupt_after_backup"),
+    [(False, False), (True, False), (False, True)],
+)
+def test_promotion_interruption_restores_or_retains_originals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rollback_fails: bool,
+    interrupt_after_backup: bool,
+) -> None:
+    root = tmp_path / "run"
+    root.mkdir()
+    old = root / "calibration_profiles.json"
+    old.write_text("original calibration")
+    staged = root / "staged.json"
+    staged.write_text("replacement calibration")
+    original_replace = attempt_module.os.replace
+
+    def interrupted_replace(source, destination):
+        if source == staged:
+            raise KeyboardInterrupt("interrupted promotion")
+        if rollback_fails and Path(source).parent.name.startswith(".calibration-promotion-backup-"):
+            raise OSError("simulated restore failure")
+        result = original_replace(source, destination)
+        if interrupt_after_backup and source == old:
+            raise KeyboardInterrupt("interrupted after backup rename")
+        return result
+
+    monkeypatch.setattr(attempt_module.os, "replace", interrupted_replace)
+    expected_error = RuntimeError if rollback_fails else KeyboardInterrupt
+    with pytest.raises(expected_error):
+        attempt_module._transactional_replace(root, [(staged, old)])
+
+    assert staged.read_text() == "replacement calibration"
+    backups = list(root.glob(".calibration-promotion-backup-*"))
+    if rollback_fails:
+        assert len(backups) == 1
+        assert (backups[0] / "0").read_text() == "original calibration"
+    else:
+        assert old.read_text() == "original calibration"
+        assert backups == []
+
+
 def prepare_promoted_calibration_for_workflow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Path:

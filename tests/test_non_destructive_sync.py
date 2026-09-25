@@ -178,6 +178,35 @@ def create_sync_fixture(tmp_path: Path) -> tuple[Path, Path]:
     return run_root, sensor_folder
 
 
+@pytest.mark.parametrize("target", ["raw", "nested", "symlink"])
+def test_sync_rejects_output_overlapping_raw_capture(tmp_path: Path, target: str) -> None:
+    run_root, sensor = create_sync_fixture(tmp_path)
+    before = {path.relative_to(run_root): path.read_bytes()
+              for path in run_root.rglob("*") if path.is_file()}
+    output_root = run_root if target == "raw" else sensor / "derived"
+    if target == "symlink":
+        output_root = tmp_path / "alias"
+        output_root.symlink_to(run_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="overlaps retained input"):
+        synchronize_sensor_folder(sensor, run_root=run_root, output_root=output_root)
+
+    assert {path.relative_to(run_root): path.read_bytes()
+            for path in run_root.rglob("*") if path.is_file()} == before
+    assert not list(run_root.rglob("*.tmp"))
+
+
+def test_nearest_pose_matches_linear_lookup_at_boundaries_and_timestamp_ties() -> None:
+    from posetestbot.sync.non_destructive import closest_robot_pose
+
+    records = [{"timestamp_ns": timestamp, "pose_index": index}
+               for index, timestamp in enumerate([10, 10, 20, 30, 30, 50])]
+    for timestamp in range(61):
+        assert closest_robot_pose(timestamp, records) is min(
+            records, key=lambda record: abs(record["timestamp_ns"] - timestamp)
+        )
+
+
 def test_synchronize_sensor_folder_preserves_raw_frames(tmp_path: Path) -> None:
     run_root, sensor_folder = create_sync_fixture(tmp_path)
 

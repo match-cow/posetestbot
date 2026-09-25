@@ -10,6 +10,7 @@ import shutil
 import uuid
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlencode
 
 from flask import Blueprint, jsonify, request
 
@@ -1729,24 +1730,26 @@ def import_cluster_result(job_id: str):
             method_name=method_name,
         )
         result_id = registered["result_id"]
+        run_query = urlencode({"run_root": run_root.as_posix()})
+        result_query = urlencode({"result_id": result_id, "run_root": run_root.as_posix()})
         return (
             jsonify(
                 {
                     "result": public_result_descriptor(registered),
                     "created": created,
-                    "evaluation_url": f"/bop-evaluation?result_id={result_id}",
-                    "inspection_url": f"/pose-results?result_id={result_id}",
+                    "evaluation_url": f"/bop-evaluation?{result_query}",
+                    "inspection_url": f"/pose-results?{result_query}",
                     "download_url": (
                         f"/bop/evaluation/results/{result_id}/download"
-                        f"?run_root={run_root.as_posix()}"
+                        f"?{run_query}"
                     ),
                     "package_url": (
                         f"/bop/evaluation/results/{result_id}/package"
-                        f"?run_root={run_root.as_posix()}"
+                        f"?{run_query}"
                     ),
                     "provenance_url": (
                         f"/bop/evaluation/results/{result_id}/provenance"
-                        f"?run_root={run_root.as_posix()}"
+                        f"?{run_query}"
                     ),
                 }
             ),

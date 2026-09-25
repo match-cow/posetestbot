@@ -43,6 +43,13 @@ The lower-level capture-plan, preflight, execution-plan, execution, sync,
 quality, rectification, and BOP scripts remain implementation workers for the
 fixed recipes. They are not alternative operator workflows.
 
+Explicit sync, rectification, and BOP output directories must be separate from
+their inputs, raw sensor folders, and run-level artifacts. Output paths that
+would replace the run, overwrite inputs, or write inside raw capture folders
+are rejected, including paths that resolve there through symlinks. Separate
+external output directories remain supported; `--overwrite` only permits
+replacing derived output.
+
 ## Calibration and reusable inputs
 
 | Command | Purpose |

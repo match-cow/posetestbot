@@ -2,9 +2,9 @@
 
 # Complete HTTP route index
 
-This index contains all **126** non-static Flask rules registered by
+This index contains all **128** non-static Flask rules registered by
 `posetestbot.web.app.create_app`, rendered as
-**130** method-specific operations. It is generated from the
+**132** method-specific operations. It is generated from the
 running route map, so aliases remain explicit and every application-declared
 method has its own row. Flask's implicit `HEAD` and `OPTIONS` methods are
 excluded.
@@ -26,6 +26,7 @@ uv run python scripts/generate_http_api_reference.py --check
 | Method | Path | Returns | Purpose | Flask endpoint |
 | --- | --- | --- | --- | --- |
 | `POST` | `/bop/annotations` | JSON | Queue bop annotations | `bop_annotations.queue_bop_annotations` |
+| `GET` | `/bop/annotations/ground-truth/download` | File | Download combined scene gt | `bop_annotations.download_combined_scene_gt` |
 | `GET` | `/bop/annotations/setup` | JSON | Bop annotations setup | `bop_annotations.bop_annotations_setup` |
 | `GET` | `/bop/evaluation/results` | JSON | Bop result list | `bop_evaluation.bop_result_list` |
 | `POST` | `/bop/evaluation/results` | JSON | Bop result import | `bop_evaluation.bop_result_import` |
@@ -40,6 +41,7 @@ uv run python scripts/generate_http_api_reference.py --check
 | `GET` | `/bop/inspection/masks/<result_id>/<int:scene_id>/<int:im_id>/<int:gt_id>/<kind>` | PNG | Bop inspection mask | `bop_inspection.bop_inspection_mask` |
 | `GET` | `/bop/inspection/media/<result_id>/<int:scene_id>/<int:im_id>/<kind>` | File | Bop inspection image | `bop_inspection.bop_inspection_image` |
 | `GET` | `/bop/inspection/models/<result_id>/<int:obj_id>` | PLY | Bop inspection model | `bop_inspection.bop_inspection_model` |
+| `GET` | `/bop/inspection/result-location` | JSON | Bop inspection result location | `bop_inspection.bop_inspection_result_location` |
 | `GET` | `/bop/inspection/setup` | JSON | Bop inspection setup | `bop_inspection.bop_inspection_setup` |
 
 ## Calibration

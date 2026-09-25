@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import threading
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import cv2
 import numpy as np
@@ -960,12 +960,15 @@ end_header
 """
 
 
-def install_pose_inspection_mocks(page) -> list[dict]:
+def install_pose_inspection_mocks(page, *, expected_run_root: str | None = None) -> list[dict]:
     results = [bop_result_fixture("a"), bop_result_fixture("b")]
     scenes = [bop_inspection_scene(1), bop_inspection_scene(2)]
 
     def setup_handler(route) -> None:
         params = parse_qs(urlparse(route.request.url).query)
+        if expected_run_root and params.get("run_root") != [expected_run_root]:
+            fulfill_json(route, {"output": "'Unknown BOP result'"}, status=404)
+            return
         requested = params.get("result_id", [results[0]["result_id"]])[0]
         selected = next(
             (item for item in results if item["result_id"] == requested), results[0]
@@ -2561,6 +2564,39 @@ def test_pose_estimation_blockers_submission_and_cluster_job_handoff(
     )
 
 
+def test_pose_results_legacy_direct_link_recovers_the_result_run(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    results = install_pose_inspection_mocks(page, expected_run_root=RUN_ROOT)
+    page.add_init_script(
+        "localStorage.setItem('posetestbot.currentContracts.v4', 'reset');"
+        "localStorage.setItem('posetestbot.selectedRun', '/tmp/posetestbot-console/old-run')"
+    )
+    location_requests: list[str] = []
+
+    def location_handler(route) -> None:
+        location_requests.append(route.request.url)
+        fulfill_json(
+            route,
+            {"result_id": results[0]["result_id"], "run_root": RUN_ROOT},
+        )
+
+    page.route("**/bop/inspection/result-location?**", location_handler)
+    page.goto(
+        f"{console_server.url}/#/pose-results?result_id={results[0]['result_id']}&scene_id=1&frame_id=0",
+        wait_until="networkidle",
+    )
+
+    expect(page.get_by_test_id("pose-result-viewer")).to_be_visible()
+    assert parse_qs(urlparse(page.url).fragment.split("?", 1)[1])["run_root"] == [RUN_ROOT]
+    expect(page.get_by_role("button", name="Make linked run active")).to_be_visible()
+    assert len(location_requests) == 1
+    page.reload(wait_until="networkidle")
+    expect(page.get_by_test_id("pose-result-viewer")).to_be_visible()
+    assert len(location_requests) == 1
+
+
 @pytest.mark.parametrize(
     "viewport",
     [{"width": 1920, "height": 1080}, {"width": 1440, "height": 900}],
@@ -2667,10 +2703,10 @@ def test_pose_estimation_selects_historical_jobs_collects_and_survives_reload(
     retained = page.get_by_test_id("pose-estimation-collected-result")
     expect(retained).to_contain_text("Immutable BOP19 result collected")
     expect(retained.get_by_role("link", name="Inspect poses")).to_have_attribute(
-        "href", f"#/pose-results?result_id={result['result_id']}"
+        "href", f"#/pose-results?{urlencode({'result_id': result['result_id'], 'run_root': RUN_ROOT})}"
     )
     expect(retained.get_by_role("link", name="Evaluate")).to_have_attribute(
-        "href", f"#/bop-evaluation?result_id={result['result_id']}"
+        "href", f"#/bop-evaluation?{urlencode({'result_id': result['result_id'], 'run_root': RUN_ROOT})}"
     )
     expect(retained.get_by_role("link", name="Package")).to_be_visible()
     expect(retained.get_by_role("link", name="CSV")).to_be_visible()
@@ -2780,19 +2816,19 @@ def test_jobs_collects_and_hands_off_each_active_run_estimator_result(
     expect(other_row).to_contain_text("Other run")
     expect(other_row.get_by_role("button", name="Collect result")).to_have_count(0)
     expect(collected_row.get_by_role("link", name="Inspect poses")).to_have_attribute(
-        "href", f"#/pose-results?result_id={result_b['result_id']}"
+        "href", f"#/pose-results?{urlencode({'result_id': result_b['result_id'], 'run_root': RUN_ROOT})}"
     )
     expect(collected_row.get_by_role("link", name="Evaluate")).to_have_attribute(
-        "href", f"#/bop-evaluation?result_id={result_b['result_id']}"
+        "href", f"#/bop-evaluation?{urlencode({'result_id': result_b['result_id'], 'run_root': RUN_ROOT})}"
     )
 
     available_row.get_by_role("button", name="Collect result").click()
     expect(page.get_by_text("Cluster result collected")).to_be_visible()
     expect(available_row.get_by_role("link", name="Inspect poses")).to_have_attribute(
-        "href", f"#/pose-results?result_id={result_a['result_id']}"
+        "href", f"#/pose-results?{urlencode({'result_id': result_a['result_id'], 'run_root': RUN_ROOT})}"
     )
     expect(available_row.get_by_role("link", name="Evaluate")).to_have_attribute(
-        "href", f"#/bop-evaluation?result_id={result_a['result_id']}"
+        "href", f"#/bop-evaluation?{urlencode({'result_id': result_a['result_id'], 'run_root': RUN_ROOT})}"
     )
     assert collection_requests == [{"run_root": RUN_ROOT}]
     assert active_list_queries
@@ -2807,6 +2843,10 @@ def test_bop_evaluation_keeps_history_and_metrics_result_scoped(
     console_server, page
 ) -> None:
     install_common_mocks(page)
+    page.add_init_script(
+        "localStorage.setItem('posetestbot.currentContracts.v4', 'reset');"
+        "localStorage.setItem('posetestbot.selectedRun', '/tmp/posetestbot-console/old-run')"
+    )
     page.set_viewport_size({"width": 1920, "height": 1080})
     result_a = bop_result_fixture("a")
     result_b = bop_result_fixture("b")
@@ -2830,14 +2870,16 @@ def test_bop_evaluation_keeps_history_and_metrics_result_scoped(
             bop_evaluation_fixture(result_b, token="b", metric=0.999),
         ],
     }
-    page.route(
-        "**/bop/evaluation/setup?**",
-        lambda route: fulfill_json(route, setup),
-    )
+    def setup_handler(route):
+        assert parse_qs(urlparse(route.request.url).query)["run_root"] == [RUN_ROOT]
+        fulfill_json(route, setup)
+
+    page.route("**/bop/evaluation/setup?**", setup_handler)
     page.goto(
-        f"{console_server.url}/#/bop-evaluation?result_id={result_a['result_id']}",
+        f"{console_server.url}/#/bop-evaluation?{urlencode({'result_id': result_a['result_id'], 'run_root': RUN_ROOT})}",
         wait_until="networkidle",
     )
+    expect(page.get_by_role("button", name="Make linked run active")).to_be_visible()
 
     source = page.get_by_test_id("bop-evaluation-source")
     expect(source).to_contain_text("1 · Retained result selection and readiness")
@@ -2848,7 +2890,7 @@ def test_bop_evaluation_keeps_history_and_metrics_result_scoped(
     expect(page.get_by_test_id("bop-test-simulation")).to_contain_text("Test only")
     details = page.get_by_test_id("bop-result-details")
     expect(details.get_by_role("link", name="Inspect poses")).to_have_attribute(
-        "href", f"#/pose-results?result_id={result_a['result_id']}"
+        "href", f"#/pose-results?{urlencode({'result_id': result_a['result_id'], 'run_root': RUN_ROOT})}"
     )
     for name in ("Package", "CSV", "Provenance"):
         expect(details.get_by_role("link", name=name)).to_be_visible()
@@ -2861,7 +2903,7 @@ def test_bop_evaluation_keeps_history_and_metrics_result_scoped(
 
     page.get_by_label("Retained pose result").click()
     page.get_by_role("option", name=re.compile("FoundationPose result B")).click()
-    expect(page).to_have_url(re.compile(f"result_id={result_b['result_id']}$"))
+    expect(page).to_have_url(re.compile(f"result_id={result_b['result_id']}&"))
     history = page.get_by_test_id("bop-evaluation-history")
     expect(history).to_contain_text(f"evaluation-{'b' * 12}")
     expect(history).not_to_contain_text(f"evaluation-{'a' * 12}")
@@ -2871,6 +2913,19 @@ def test_bop_evaluation_keeps_history_and_metrics_result_scoped(
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
     )
+
+    page.goto(
+        f"{console_server.url}/#/bop-evaluation?{urlencode({'result_id': 'result-missing', 'run_root': RUN_ROOT})}",
+        wait_until="networkidle",
+    )
+    expect(page.get_by_role("button", name="Queue BOP evaluation")).to_be_disabled()
+    expect(page.get_by_test_id("bop-evaluation-disabled-reasons")).to_contain_text(
+        "The linked result is unavailable in this run"
+    )
+    expect(page.get_by_test_id("bop-evaluation-report")).to_have_count(0)
+    page.get_by_label("Retained pose result").click()
+    page.get_by_role("option", name=re.compile("FoundationPose result A")).click()
+    expect(page.get_by_role("button", name="Queue BOP evaluation")).to_be_enabled()
 
 
 @pytest.mark.parametrize(
@@ -2890,6 +2945,13 @@ def test_pose_results_controls_projection_pixels_and_desktop_reachability(
     )
 
     expect(page.get_by_role("heading", name="Pose Results")).to_be_visible()
+    result_actions = page.get_by_test_id("pose-result-selection")
+    all_sensor_gt = result_actions.get_by_role("link", name="All-sensor GT JSON")
+    expect(all_sensor_gt).to_be_visible()
+    gt_href = all_sensor_gt.get_attribute("href")
+    assert gt_href is not None
+    assert urlparse(gt_href).path == "/bop/annotations/ground-truth/download"
+    assert parse_qs(urlparse(gt_href).query) == {"run_root": [RUN_ROOT]}
     viewer = page.get_by_test_id("pose-result-viewer")
     expect(viewer).to_be_visible()
     controls = page.get_by_test_id("pose-layer-controls")
@@ -2945,6 +3007,8 @@ def test_pose_results_controls_projection_pixels_and_desktop_reachability(
     page.get_by_label("Sensor scene").click()
     page.get_by_role("option", name=re.compile("Right · scene 2")).click()
     expect(page).to_have_url(re.compile("scene_id=2.*frame_id=5"))
+    expect(result_actions.get_by_role("link", name="All-sensor GT JSON")).to_have_count(1)
+    expect(all_sensor_gt).to_have_attribute("href", gt_href)
     page.get_by_label("Retained result").click()
     page.get_by_role("option", name=re.compile("FoundationPose result B")).click()
     expect(page).to_have_url(re.compile(f"result_id={results[1]['result_id']}"))

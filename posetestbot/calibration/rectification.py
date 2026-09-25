@@ -34,6 +34,7 @@ from posetestbot.io.artifacts import (
     SYNCHRONIZED_DIR,
 )
 from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
+from posetestbot.io.derived import validate_derived_output
 
 
 SCHEMA_VERSION = "camera_rectification.v1"
@@ -303,6 +304,7 @@ def rectify_sensor_folder(
         if provenance_output_sensor is not None
         else destination
     )
+    validate_derived_output(source.parent, destination, sources=(source,))
     source_fingerprint = rgbd_camera_artifact_fingerprint(source)
     sensor_id, orientation, image_size = sensor_intrinsic_identity(source)
     expected = (
@@ -438,6 +440,7 @@ def rectify_run(
     )
     if not sensors:
         raise FileNotFoundError(f"No synchronized RGB-D sensor folders: {source_root}")
+    validate_derived_output(root, destination_root, sources=sensors)
     staging = destination_root.with_name(
         f".{destination_root.name}.{uuid.uuid4().hex}.tmp"
     )

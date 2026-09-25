@@ -189,6 +189,12 @@ promoted profiles retain them in `metadata.quality_warnings`. Missing or malform
 coverage input still fails. These extrinsic recommendations do not change the
 separate validation required to replace a factory lens model with fitted intrinsics.
 
+Promotion rolls back handled errors, including keyboard interruption.
+If the filesystem also prevents rollback, the error identifies a retained
+`.calibration-promotion-backup-*` directory. Preserve that directory and repair
+the filesystem problem before recovering the originals; do not delete it as
+temporary output.
+
 Multi-camera attempts retain the common algorithm bundle
 whose independently estimated companion transform is most suitable under the
 recorded ranking policy. Pairwise companion disagreement above 10 mm or 5° is
