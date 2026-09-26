@@ -128,6 +128,7 @@ function estimatorMode(job: ClusterJob) {
 function ClusterJobActions({
   job,
   activeRun,
+  runRoot,
   collectPending,
   collectingJobId,
   cancelPending,
@@ -137,6 +138,7 @@ function ClusterJobActions({
 }: {
   job: ClusterJob
   activeRun: boolean
+  runRoot: string
   collectPending: boolean
   collectingJobId?: string
   cancelPending: boolean
@@ -148,7 +150,7 @@ function ClusterJobActions({
   const retained = activeRun && job.collection?.state === "collected" ? job.collection.result : null
   return <>
     {activeRun && job.collection?.state === "available" && CLUSTER_SUCCESS.has(job.state) && <Button variant="outline" size="sm" onClick={onCollect} disabled={collectPending}>{collecting ? <LoaderCircle className="animate-spin" /> : <Download />}{collecting ? "Collecting…" : "Collect result"}</Button>}
-    {retained && <><Button asChild size="sm"><Link to={`/pose-results?result_id=${retained.result_id}`}><ScanSearch />Inspect poses</Link></Button><Button asChild variant="outline" size="sm"><Link to={`/bop-evaluation?result_id=${retained.result_id}`}>Evaluate<ArrowRight /></Link></Button></>}
+    {retained && <><Button asChild size="sm"><Link to={query("/pose-results", { result_id: retained.result_id, run_root: runRoot })}><ScanSearch />Inspect poses</Link></Button><Button asChild variant="outline" size="sm"><Link to={query("/bop-evaluation", { result_id: retained.result_id, run_root: runRoot })}>Evaluate<ArrowRight /></Link></Button></>}
     {onLog && <Button variant="outline" size="sm" onClick={onLog}><FileText />Log</Button>}
     {CLUSTER_ACTIVE.has(job.state) && <Button variant="destructive" size="sm" onClick={onCancel} disabled={cancelPending || job.state === "canceling"}><Ban />{job.state === "canceling" ? "Canceling…" : "Cancel"}</Button>}
   </>
@@ -254,7 +256,7 @@ function ClusterJobsSection() {
                   <div><div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">SLURM</div><div className="mt-1 font-mono text-xs">{job.slurm_job_id ?? "not assigned"}</div></div>
                   <div><div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Updated</div><div className="mt-1 text-xs">{formatDate(job.updated_at)}</div>{job.result && <div className="mt-1 text-[10px] text-muted-foreground">{job.result.estimate_count} estimates · {job.result.failure_count} failures</div>}</div>
                   <div className="flex min-w-0 flex-wrap gap-2 xl:justify-end" data-testid="cluster-job-actions">
-                    <ClusterJobActions job={job} activeRun={activeRunIds.has(job.job_id)} collectPending={collect.isPending} collectingJobId={collect.variables?.jobId} cancelPending={cancel.isPending} onCollect={() => collect.mutate({ jobId: job.job_id, runRoot: selectedRun })} onCancel={() => cancel.mutate(job)} onLog={() => setDetailId(job.job_id)} />
+                    <ClusterJobActions job={job} activeRun={activeRunIds.has(job.job_id)} runRoot={selectedRun} collectPending={collect.isPending} collectingJobId={collect.variables?.jobId} cancelPending={cancel.isPending} onCollect={() => collect.mutate({ jobId: job.job_id, runRoot: selectedRun })} onCancel={() => cancel.mutate(job)} onLog={() => setDetailId(job.job_id)} />
                   </div>
                 </div>)}
               </div>}
@@ -266,7 +268,7 @@ function ClusterJobsSection() {
         <div className="flex items-center justify-between gap-3"><StatusBadge status={current?.state} tone={clusterTone(current?.state ?? "unknown")} /><span className="text-xs text-muted-foreground">Controller state survives UI and PoseTestBot restarts.</span></div>
         <pre className="min-h-0 flex-1 overflow-auto rounded-lg bg-[#11130d] p-4 text-xs leading-relaxed text-[#dce4c4]">{detail.isError ? `Log unavailable: ${errorMessage(detail.error)}` : detail.data?.log || "Waiting for controller log output…"}</pre>
         {current?.error && <p className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{current.error}</p>}
-        {current && <div className="flex flex-wrap gap-2"><ClusterJobActions job={current} activeRun={activeRunIds.has(current.job_id)} collectPending={collect.isPending} collectingJobId={collect.variables?.jobId} cancelPending={cancel.isPending} onCollect={() => collect.mutate({ jobId: current.job_id, runRoot: selectedRun })} onCancel={() => cancel.mutate(current)} /></div>}
+        {current && <div className="flex flex-wrap gap-2"><ClusterJobActions job={current} activeRun={activeRunIds.has(current.job_id)} runRoot={selectedRun} collectPending={collect.isPending} collectingJobId={collect.variables?.jobId} cancelPending={cancel.isPending} onCollect={() => collect.mutate({ jobId: current.job_id, runRoot: selectedRun })} onCancel={() => cancel.mutate(current)} /></div>}
       </SheetContent>
     </Sheet>
   </Card>

@@ -45,6 +45,7 @@ from posetestbot.calibration.static_reuse import (
     verify_static_profile_destination_reference,
 )
 from posetestbot.io.atomic import replace_directory
+from posetestbot.io.derived import validate_derived_output
 from posetestbot.io.artifacts import (
     BOP_DIR,
     BOP_COCO_ANNOTATIONS,
@@ -313,6 +314,14 @@ def main() -> None:
         _run_input_path(run_root, args.calibration_profiles)
         if args.calibration_profiles
         else None
+    )
+    validate_derived_output(
+        run_root,
+        output_folder,
+        sources=[
+            *([input_folder] if input_folder.resolve() != run_root.resolve() else []),
+            *([calibration_profiles_path] if calibration_profiles_path else []),
+        ],
     )
 
     manifest = load_or_create_run_manifest(run_root)

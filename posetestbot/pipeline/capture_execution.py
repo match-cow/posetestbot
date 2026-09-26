@@ -553,26 +553,84 @@ def _terminate_process_group(
     *,
     timeout_s: float,
 ) -> None:
-    if process.poll() is not None:
-        return
+    survivors = _terminate_process_groups((process,), timeout_s=timeout_s)
+    if survivors:
+        raise RuntimeError(f"Process group {process.pid} did not stop after SIGKILL.")
+
+
+def _signal_process_group(process: subprocess.Popen, signum: int) -> None:
     if os.name == "nt":
-        process.terminate()
+        if process.poll() is None:
+            process.terminate() if signum == signal.SIGTERM else process.kill()
     else:
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            os.killpg(process.pid, signum)
         except ProcessLookupError:
             return
+
+
+def _process_group_alive(process: subprocess.Popen) -> bool:
+    # Reap the leader, but also check descendants left behind by a launcher.
+    running = process.poll() is None
+    if running or os.name == "nt":
+        return running
     try:
-        process.wait(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        if os.name == "nt":
-            process.kill()
-        else:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                return
-        process.wait(timeout=timeout_s)
+        os.killpg(process.pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def _wait_for_process_groups(
+    processes: list[subprocess.Popen],
+    *,
+    timeout_s: float,
+) -> list[subprocess.Popen]:
+    deadline = time.monotonic() + max(timeout_s, 0.0)
+    pending = list(processes)
+    while pending:
+        pending = [process for process in pending if _process_group_alive(process)]
+        if not pending:
+            break
+        remaining_s = deadline - time.monotonic()
+        if remaining_s <= 0:
+            break
+        time.sleep(min(0.02, remaining_s))
+    return pending
+
+
+def _terminate_process_groups(
+    processes: tuple[subprocess.Popen, ...] | list[subprocess.Popen],
+    *,
+    timeout_s: float,
+) -> list[subprocess.Popen]:
+    """Stop child groups concurrently within one shared grace period."""
+
+    active: list[subprocess.Popen] = []
+    seen: set[int] = set()
+    for process in processes:
+        identity = id(process)
+        if identity in seen or not _process_group_alive(process):
+            continue
+        seen.add(identity)
+        active.append(process)
+
+    # Signal every group before waiting. Sequential per-process grace periods can
+    # outlive the outer job supervisor's own grace period and orphan later groups.
+    for process in active:
+        _signal_process_group(process, signal.SIGTERM)
+    survivors = _wait_for_process_groups(active, timeout_s=timeout_s)
+    for process in survivors:
+        _signal_process_group(process, signal.SIGKILL)
+    # Reap direct children within one final budget. Orphaned descendant zombies
+    # may remain visible to killpg until the OS reaps them after SIGKILL.
+    deadline = time.monotonic() + min(timeout_s, 1.0)
+    for process in survivors:
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            pass
+    return [process for process in survivors if process.poll() is None]
 
 
 def _preflight_gate(preflight: Mapping[str, Any]) -> CaptureExecutionGate:
@@ -1199,7 +1257,8 @@ def run_capture_execution(
 
     status_path = record_status("starting", "Capture execution supervisor starting.")
 
-    def cleanup_processes(reason: str) -> None:
+    def cleanup_processes(reason: str) -> list[str]:
+        active_infos: list[dict[str, Any]] = []
         for info in process_infos:
             process = info.get("process")
             if process is None:
@@ -1209,28 +1268,53 @@ def run_capture_execution(
                         "canceled" if reason == "cancellation_cleanup" else "failed"
                     )
                     info["termination_reason"] = f"not_spawned_during_{reason}"
-            elif process.poll() is None:
-                preserve_failure = (
-                    info.get("status") == "failed"
-                    and isinstance(info.get("termination_reason"), str)
-                    and bool(info["termination_reason"])
-                )
-                _terminate_process_group(process, timeout_s=terminate_timeout_s)
-                _mark_process_ended(info)
-                if not preserve_failure:
-                    info["status"] = "terminated"
-                    info["termination_reason"] = reason
+            elif _process_group_alive(process):
+                active_infos.append(info)
             elif info.get("status") in {"starting", "running"}:
                 _mark_process_ended(info)
                 info["status"] = "succeeded" if process.returncode == 0 else "failed"
                 info["termination_reason"] = f"exited_during_{reason}"
+
+        survivors = _terminate_process_groups(
+            [info["process"] for info in active_infos],
+            timeout_s=terminate_timeout_s,
+        )
+        survivor_ids = {id(process) for process in survivors}
+        survivor_names: list[str] = []
+        for info in active_infos:
+            process = info["process"]
+            preserve_failure = (
+                info.get("status") == "failed"
+                and isinstance(info.get("termination_reason"), str)
+                and bool(info["termination_reason"])
+            )
+            if id(process) in survivor_ids:
+                info["status"] = "running"
+                info["termination_reason"] = f"{reason}_survived_sigkill"
+                survivor_names.append(str(info["command"].get("name") or process.pid))
+            else:
+                _mark_process_ended(info)
+                if not preserve_failure:
+                    info["status"] = "terminated"
+                    info["termination_reason"] = reason
+
+        for info in process_infos:
             log_file = info.get("log_file")
             if log_file is not None and not log_file.closed:
                 log_file.close()
+        return survivor_names
 
     previous_signal_handlers: dict[int, Any] = {}
+    cancellation_signal: int | None = None
+    cleanup_in_progress = False
 
     def cancel_from_signal(signum: int, _frame: Any) -> None:
+        nonlocal cancellation_signal
+        if cancellation_signal is not None:
+            return
+        cancellation_signal = signum
+        if cleanup_in_progress:
+            return
         raise _capture_cancellation_error(signum)
 
     for supervisor_signal in CAPTURE_CANCELLATION_SIGNALS:
@@ -1630,17 +1714,36 @@ def run_capture_execution(
                 + ", ".join(camera_failures)
                 + "."
             )
+        survivors = _terminate_process_groups(
+            [info["process"] for info in process_infos if info.get("process") is not None],
+            timeout_s=terminate_timeout_s,
+        )
+        if survivors:
+            raise RuntimeError("Capture child processes did not stop after SIGKILL.")
 
     except CaptureExecutionCanceled as exc:
         status = "canceled"
         message = str(exc)
-        cleanup_processes("cancellation_cleanup")
+        cleanup_in_progress = True
+        survivors = cleanup_processes("cancellation_cleanup")
+        if survivors:
+            message += (
+                " Child process groups still active: " + ", ".join(survivors) + "."
+            )
         record_status("canceled", message)
     except Exception as exc:
         status = "failed"
         message = str(exc)
-        cleanup_processes("failure_cleanup")
-        record_status("failed", message)
+        cleanup_in_progress = True
+        survivors = cleanup_processes("failure_cleanup")
+        if cancellation_signal is not None:
+            status = "canceled"
+            message = str(_capture_cancellation_error(cancellation_signal))
+        if survivors:
+            message += (
+                " Child process groups still active: " + ", ".join(survivors) + "."
+            )
+        record_status(status, message)
     finally:
         for supervisor_signal, previous_handler in previous_signal_handlers.items():
             signal.signal(supervisor_signal, previous_handler)

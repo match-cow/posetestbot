@@ -5,12 +5,17 @@ remain run-scoped. Cluster routes proxy a separate loopback controller and do
 not import estimator code, credentials, or scheduler arguments into
 PoseTestBot.
 
+Controller requests use direct loopback HTTP and ignore environment proxy
+settings. Redirects are rejected, so the controller token stays on the local
+controller connection.
+
 ## Optional BOP annotations
 
 | Method and path | Contract |
 | --- | --- |
 | `GET /bop/annotations/setup?run_root=…` | Inspect exported dataset and readiness blockers per annotation mode |
 | `POST /bop/annotations` | Queue the run-configured `pose` or `pose_and_masks` product after mode-specific readiness validation |
+| `GET /bop/annotations/ground-truth/download?run_root=…` | Download one JSON collection of all exported sensor-scene poses after manifest, scene, and SHA-256 validation |
 
 The request is:
 
@@ -24,6 +29,17 @@ The request is:
 The job writes only below `processed/bop_annotations/` and the BOP scene
 directories governed by the annotation/export writer. It declares CPU,
 render, and disk resources.
+
+The ground-truth download is read-only and available for completed `pose` and
+`pose_and_masks` exports. `scene_gt_all_sensors.json` is a PoseTestBot collection,
+not a standard single-scene BOP `scene_gt.json`. It contains `split`,
+`sensor_by_scene_id`, `scene_gt_sha256_by_scene_id`, and
+`scene_gt[scene_id][im_id]` for every exported sensor scene. Each image maps to
+instance rows with `obj_id`, `cam_R_m2c` (row-major model-to-camera rotation),
+and `cam_t_m2c` (model-to-camera translation in millimetres). Match `scene_id`
+and `im_id` with the standard result CSV. The endpoint rejects a missing or
+symlinked scene artifact, a duplicate scene ID, or any file that differs from
+its exported GT hash; it does not modify the original BOP scene files.
 
 ## Inspect-only official evaluation
 
@@ -78,6 +94,7 @@ result.
 
 | Method and path | Contract |
 | --- | --- |
+| `GET /bop/inspection/result-location?result_id=…` | Resolve one retained result ID to a directly indexed, approved run folder for legacy direct links; reject missing or ambiguous IDs |
 | `GET /bop/inspection/setup?run_root=…&result_id=…` | Return compatible retained results, validated objects/scenes, sensor labels, capabilities, limits, and visualization contract |
 | `GET /bop/inspection/frames?run_root=…&result_id=…&scene_id=…&filter=…&object_id=…&page=…&page_size=…` | Return a bounded paginated frame inventory and provenance-backed operation filters |
 | `GET /bop/inspection/frame?run_root=…&result_id=…&scene_id=…&im_id=…&max_hypotheses=…` | Return camera intrinsics, GT, ranked estimates, score/timing, visibility, optional operation evidence, and safe media URLs |
@@ -118,6 +135,9 @@ returned to the browser. Imported results bind the controller provenance,
 staged dataset hash, and local dataset hash. FoundationPose v2 import also
 requires the payload, public result, downloaded provenance, and independently
 recomputed selected-target hash to agree.
+The `inspection_url` and `evaluation_url` returned after collection carry the
+approved `run_root` alongside `result_id`, so direct links retain their dataset
+scope even when another operator run is active.
 
 The UI labels the import endpoint **Collect result** and never invokes it as a
 mount/reload side effect. Collection state is recovered by matching the

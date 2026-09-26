@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import cv2
@@ -441,3 +442,50 @@ def test_inspection_http_contract_uses_only_ids_for_media(
     assert client.get(payload["media"]["depth_url"]).status_code == 200
     assert client.get(payload["ground_truth"][0]["mask_urls"]["full"]).status_code == 200
     assert client.get(payload["model_urls"]["1"]).status_code == 200
+
+
+def test_inspection_result_location_recovers_legacy_direct_link_without_crossing_runs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runs_root = tmp_path / "runs"
+    run = make_inspection_run(runs_root)
+    result = _import_result(run, tmp_path)
+    other_run = runs_root / "other-run"
+    other_run.mkdir()
+    _write_json(other_run / "run_config.json", {"schema_version": "run_config.v4"})
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs_root.as_posix())
+    client = create_app().test_client()
+    result_id = result["result_id"]
+
+    assert client.get(
+        "/bop/inspection/setup",
+        query_string={"run_root": other_run.as_posix(), "result_id": result_id},
+    ).status_code == 404
+    location = client.get(
+        "/bop/inspection/result-location", query_string={"result_id": result_id}
+    )
+    assert location.status_code == 200
+    assert location.get_json() == {"result_id": result_id, "run_root": run.as_posix()}
+    assert client.get(
+        "/bop/inspection/result-location", query_string={"result_id": "result-000000000000"}
+    ).status_code == 404
+    assert client.get(
+        "/bop/inspection/result-location", query_string={"result_id": "../result.json"}
+    ).status_code == 400
+
+    duplicate = other_run / "processed" / "bop_evaluation" / "results" / result_id
+    duplicate.mkdir(parents=True)
+    shutil.copy2(
+        run / "processed" / "bop_evaluation" / "results" / result_id / "result.json",
+        duplicate / "result.json",
+    )
+    assert client.get(
+        "/bop/inspection/result-location", query_string={"result_id": result_id}
+    ).status_code == 400
+    (duplicate / "result.json").unlink()
+    (duplicate / "result.json").symlink_to(
+        run / "processed" / "bop_evaluation" / "results" / result_id / "result.json"
+    )
+    assert client.get(
+        "/bop/inspection/result-location", query_string={"result_id": result_id}
+    ).status_code == 200

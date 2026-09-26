@@ -27,7 +27,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
-import { api, errorMessage, query } from "@/lib/api"
+import { ApiError, api, errorMessage, query } from "@/lib/api"
 import type {
   BopInspectionAssociation,
   BopInspectionFrame,
@@ -112,8 +112,9 @@ function ResultActions({ result, runRoot }: { result: BopResultSubmission; runRo
   return <div className="flex flex-wrap gap-2">
     <Button asChild size="sm" variant="outline"><a href={query(`/bop/evaluation/results/${result.result_id}/package`, { run_root: runRoot })}><Box />Package</a></Button>
     <Button asChild size="sm" variant="outline"><a href={query(`/bop/evaluation/results/${result.result_id}/download`, { run_root: runRoot })}><Download />CSV</a></Button>
+    <Button asChild size="sm" variant="outline"><a href={query("/bop/annotations/ground-truth/download", { run_root: runRoot })} title="Download pose ground truth for all exported sensor scenes"><Download />All-sensor GT JSON</a></Button>
     {result.provenance_available && <Button asChild size="sm" variant="outline"><a href={query(`/bop/evaluation/results/${result.result_id}/provenance`, { run_root: runRoot })}><FileJson />Provenance</a></Button>}
-    <Button asChild size="sm" variant="outline"><Link to={`/bop-evaluation?result_id=${result.result_id}`}><Gauge />Evaluate</Link></Button>
+    <Button asChild size="sm" variant="outline"><Link to={query("/bop-evaluation", { result_id: result.result_id, run_root: runRoot })}><Gauge />Evaluate</Link></Button>
   </div>
 }
 
@@ -231,9 +232,11 @@ function Viewer({
 }
 
 export function PoseResultsPage() {
-  const { selectedRun } = useOperator()
+  const { selectedRun, selectRun } = useOperator()
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
+  const requestedRunRoot = searchParams.get("run_root") ?? ""
+  const runRoot = requestedRunRoot || selectedRun
   const requestedResultId = searchParams.get("result_id") ?? ""
   const requestedSceneValue = searchParams.get("scene_id")
   const requestedFrameValue = searchParams.get("frame_id")
@@ -251,24 +254,39 @@ export function PoseResultsPage() {
   const [overlayFailure, setOverlayFailure] = useState<{ scope: string; message: string } | null>(null)
 
   const setup = useQuery({
-    queryKey: ["bop-inspection", "setup", selectedRun, requestedResultId],
-    queryFn: () => api<BopInspectionSetup>(query("/bop/inspection/setup", { run_root: selectedRun, result_id: requestedResultId || undefined })),
+    queryKey: ["bop-inspection", "setup", runRoot, requestedResultId],
+    queryFn: () => api<BopInspectionSetup>(query("/bop/inspection/setup", { run_root: runRoot, result_id: requestedResultId || undefined })),
     retry: false,
   })
+  const locateLegacyResult = Boolean(
+    requestedResultId && !requestedRunRoot && setup.isError
+    && setup.error instanceof ApiError && setup.error.status === 404
+    && setup.error.message.includes("Unknown BOP result"),
+  )
+  const resultLocation = useQuery({
+    queryKey: ["bop-inspection", "result-location", requestedResultId],
+    queryFn: () => api<{ result_id: string; run_root: string }>(query("/bop/inspection/result-location", { result_id: requestedResultId })),
+    enabled: locateLegacyResult,
+    retry: false,
+  })
+  useEffect(() => {
+    if (!locateLegacyResult || !resultLocation.data || requestedRunRoot) return
+    setSearchParams(updateSearch(searchParams, { run_root: resultLocation.data.run_root }), { replace: true })
+  }, [locateLegacyResult, resultLocation.data, requestedRunRoot, searchParams, setSearchParams])
   const resultId = setup.data?.selected_result_id ?? ""
   const validRequestedScene = requestedSceneValue !== null && Number.isInteger(requestedSceneId) && requestedSceneId >= 0
   const scene = setup.data?.scenes.find((item) => validRequestedScene && item.scene_id === requestedSceneId) ?? setup.data?.scenes[0] ?? null
   const sceneId = scene?.scene_id ?? null
   const frames = useQuery({
-    queryKey: ["bop-inspection", "frames", selectedRun, resultId, sceneId, filter, objectId, page],
-    queryFn: () => api<BopInspectionFrameList>(query("/bop/inspection/frames", { run_root: selectedRun, result_id: resultId, scene_id: sceneId, filter, object_id: objectId, page, page_size: PAGE_SIZE })),
+    queryKey: ["bop-inspection", "frames", runRoot, resultId, sceneId, filter, objectId, page],
+    queryFn: () => api<BopInspectionFrameList>(query("/bop/inspection/frames", { run_root: runRoot, result_id: resultId, scene_id: sceneId, filter, object_id: objectId, page, page_size: PAGE_SIZE })),
     enabled: Boolean(resultId && sceneId != null),
   })
   const validRequestedFrame = requestedFrameValue !== null && Number.isInteger(requestedFrameId) && requestedFrameId >= 0
   const frameId = validRequestedFrame ? requestedFrameId : frames.data?.frames[0]?.im_id ?? null
   const detail = useQuery({
-    queryKey: ["bop-inspection", "frame", selectedRun, resultId, sceneId, frameId],
-    queryFn: () => api<BopInspectionFrame>(query("/bop/inspection/frame", { run_root: selectedRun, result_id: resultId, scene_id: sceneId, im_id: frameId })),
+    queryKey: ["bop-inspection", "frame", runRoot, resultId, sceneId, frameId],
+    queryFn: () => api<BopInspectionFrame>(query("/bop/inspection/frame", { run_root: runRoot, result_id: resultId, scene_id: sceneId, im_id: frameId })),
     enabled: Boolean(resultId && sceneId != null && frameId != null),
     placeholderData: (previous) => previous?.result.result_id === resultId && previous.scene.scene_id === sceneId ? previous : undefined,
   })
@@ -282,11 +300,12 @@ export function PoseResultsPage() {
   useEffect(() => {
     if (!resultId || sceneId == null) return
     const updates: Record<string, string | number | null> = {}
+    if (!requestedRunRoot) updates.run_root = runRoot
     if (requestedResultId !== resultId) updates.result_id = resultId
     if (requestedSceneId !== sceneId) updates.scene_id = sceneId
     if (!validRequestedFrame && frames.data?.frames[0]) updates.frame_id = frames.data.frames[0].im_id
     if (Object.keys(updates).length) setSearchParams(updateSearch(searchParams, updates), { replace: true })
-  }, [frames.data?.frames, requestedFrameId, requestedResultId, requestedSceneId, resultId, sceneId, searchParams, setSearchParams, validRequestedFrame])
+  }, [frames.data?.frames, requestedFrameId, requestedResultId, requestedRunRoot, requestedSceneId, resultId, runRoot, sceneId, searchParams, setSearchParams, validRequestedFrame])
 
   useEffect(() => {
     if (pendingOrdinal.current == null || !frames.data) return
@@ -357,11 +376,11 @@ export function PoseResultsPage() {
   }
 
   return <div className="space-y-5" data-testid="pose-results-page">
-    <PageHeader eyebrow="Inspect · retained estimator result" title="Pose Results" description="Compare one immutable standard BOP19 result with this run's ground truth, frame by frame." actions={<div className="flex gap-2"><Button asChild variant="outline"><Link to="/pose-estimation">Pose Estimation</Link></Button><Button variant="outline" onClick={refresh} disabled={setup.isFetching || frames.isFetching || detail.isFetching}><RefreshCw className={setup.isFetching || frames.isFetching || detail.isFetching ? "animate-spin" : undefined} />Refresh</Button></div>} />
-    <ProcessHandoff title="Read-only result inspection" description="This page consumes the active run's exported BOP dataset and a retained result. Overlay preferences are browser-local; raw capture, BOP export, results, and evaluation evidence remain unchanged." to="/workflow/dataset?step=export" action="Review dataset workflow" />
+    <PageHeader eyebrow="Inspect · retained estimator result" title="Pose Results" description="Compare one immutable standard BOP19 result with its run's ground truth, frame by frame." actions={<div className="flex gap-2">{runRoot !== selectedRun && <Button variant="outline" onClick={() => selectRun(runRoot)}>Make linked run active</Button>}<Button asChild variant="outline"><Link to="/pose-estimation" onClick={() => selectRun(runRoot)}>Pose Estimation</Link></Button><Button variant="outline" onClick={refresh} disabled={setup.isFetching || frames.isFetching || detail.isFetching}><RefreshCw className={setup.isFetching || frames.isFetching || detail.isFetching ? "animate-spin" : undefined} />Refresh</Button></div>} />
+    <ProcessHandoff title="Read-only result inspection" description={`Inspecting run ${runRoot}${runRoot !== selectedRun ? " from this direct link; the active operator run is different. Make this run active before returning to Workflow" : ""}. Overlay preferences are browser-local; raw capture, BOP export, results, and evaluation evidence remain unchanged.`} to="/workflow/dataset?step=export" action="Review dataset workflow" />
 
-    {setup.isPending ? <div className="space-y-4"><Skeleton className="h-32" /><div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]"><Skeleton className="aspect-video" /><Skeleton className="h-[640px]" /></div></div>
-      : setup.isError || !setup.data ? <Card className="border-destructive/40"><CardHeader><CardTitle>Pose inspection unavailable</CardTitle><CardDescription>{errorMessage(setup.error)}</CardDescription></CardHeader><CardContent><Button variant="outline" onClick={refresh}><RefreshCw />Try again</Button></CardContent></Card>
+    {setup.isPending || locateLegacyResult && !resultLocation.isError ? <div className="space-y-4"><Skeleton className="h-32" /><div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]"><Skeleton className="aspect-video" /><Skeleton className="h-[640px]" /></div></div>
+      : setup.isError || !setup.data ? <Card className="border-destructive/40"><CardHeader><CardTitle>Pose inspection unavailable</CardTitle><CardDescription>{errorMessage(resultLocation.isError ? resultLocation.error : setup.error)}</CardDescription></CardHeader><CardContent><Button variant="outline" onClick={refresh}><RefreshCw />Try again</Button></CardContent></Card>
         : !setup.data.ready || !resultId ? <Card className="border-dashed"><CardContent className="grid min-h-64 place-items-center p-8 text-center"><div><ScanSearch className="mx-auto size-8 text-muted-foreground" /><div className="mt-3 font-semibold">No compatible retained pose result</div><p className="mx-auto mt-2 max-w-lg text-xs leading-relaxed text-muted-foreground">Collect a succeeded cluster result on Pose Estimation, or import a standard BOP19 CSV from BOP Evaluation. The exported dataset must include ground-truth poses.</p><div className="mt-4 flex justify-center gap-2"><Button asChild><Link to="/pose-estimation">Open Pose Estimation</Link></Button><Button asChild variant="outline"><Link to="/bop-evaluation">Open BOP Evaluation</Link></Button></div>{setup.data.blockers.length > 0 && <ul className="mx-auto mt-4 max-w-xl list-disc text-left text-xs text-destructive">{setup.data.blockers.map((item) => <li key={item.code}>{item.message}</li>)}</ul>}</div></CardContent></Card>
           : <>
             <Card data-testid="pose-result-selection">
@@ -369,7 +388,7 @@ export function PoseResultsPage() {
                 <div className="space-y-1.5"><Label htmlFor="pose-result-selector">Retained result</Label><Select value={resultId} onValueChange={changeResult}><SelectTrigger id="pose-result-selector"><SelectValue /></SelectTrigger><SelectContent>{setup.data.results.map((item) => <SelectItem key={item.result_id} value={item.result_id} disabled={!item.compatible}>{item.display_name} · {item.estimate_count.toLocaleString()} estimates</SelectItem>)}</SelectContent></Select>{selectedResult && <p className="font-mono text-[9px] text-muted-foreground">{shortHash(selectedResult.sha256)} · collected {formatDate(selectedResult.created_at)}</p>}</div>
                 <div className="space-y-1.5"><Label htmlFor="pose-scene-selector">Sensor scene</Label><Select value={sceneId == null ? "" : String(sceneId)} onValueChange={changeScene}><SelectTrigger id="pose-scene-selector"><SelectValue /></SelectTrigger><SelectContent>{setup.data.scenes.map((item) => <SelectItem key={item.scene_id} value={String(item.scene_id)}>{item.display_name} · scene {item.scene_id}</SelectItem>)}</SelectContent></Select>{scene && <p className="truncate font-mono text-[9px] text-muted-foreground">{scene.physical_identity.family ?? scene.sensor_name} · {scene.physical_identity.device_id ?? scene.physical_identity.sensor_folder}</p>}</div>
                 <div className="space-y-1.5"><Label htmlFor="pose-frame-filter">Frame filter</Label><Select value={filter} onValueChange={(value) => changeFilter(value as BopInspectionFrameFilter)}><SelectTrigger id="pose-frame-filter"><SelectValue /></SelectTrigger><SelectContent>{FILTERS.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent></Select></div>
-                {selectedResult && <ResultActions result={selectedResult} runRoot={selectedRun} />}
+                {selectedResult && <ResultActions result={selectedResult} runRoot={runRoot} />}
               </CardContent>
             </Card>
 
@@ -388,7 +407,7 @@ export function PoseResultsPage() {
               </div>
               <div className="space-y-4 xl:sticky xl:top-20">
                 <LayerControls webgl={geometryReady} geometry={geometry} setGeometry={setGeometry} masks={masks} setMasks={setMasks} maskCapabilities={maskCapabilities} />
-                <Card><CardHeader className="pb-3"><CardTitle className="text-base">Inspection identity</CardTitle></CardHeader><CardContent className="space-y-2 text-[10px]"><div><span className="text-muted-foreground">Result</span><div className="mt-1 break-all font-mono">{resultId}</div></div><div><span className="text-muted-foreground">Scene / frame</span><div className="mt-1 font-mono">{sceneId ?? "—"} / {frameId ?? "—"}</div></div><div><span className="text-muted-foreground">Projection</span><div className="mt-1 font-mono">{setup.data.visualization_contract?.projection ?? "—"}</div></div><div><span className="text-muted-foreground">Object filter</span><Select value={objectId == null ? "all" : String(objectId)} onValueChange={changeObject}><SelectTrigger className="mt-1"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All objects</SelectItem>{setup.data.objects.map((item) => <SelectItem key={item.obj_id} value={String(item.obj_id)}>{item.name} · ID {item.obj_id}</SelectItem>)}</SelectContent></Select></div></CardContent></Card>
+                <Card><CardHeader className="pb-3"><CardTitle className="text-base">Inspection identity</CardTitle></CardHeader><CardContent className="space-y-2 text-[10px]"><div><span className="text-muted-foreground">Run</span><div className="mt-1 break-all font-mono">{runRoot}</div></div><div><span className="text-muted-foreground">Result</span><div className="mt-1 break-all font-mono">{resultId}</div></div><div><span className="text-muted-foreground">Scene / frame</span><div className="mt-1 font-mono">{sceneId ?? "—"} / {frameId ?? "—"}</div></div><div><span className="text-muted-foreground">Projection</span><div className="mt-1 font-mono">{setup.data.visualization_contract?.projection ?? "—"}</div></div><div><span className="text-muted-foreground">Object filter</span><Select value={objectId == null ? "all" : String(objectId)} onValueChange={changeObject}><SelectTrigger className="mt-1"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All objects</SelectItem>{setup.data.objects.map((item) => <SelectItem key={item.obj_id} value={String(item.obj_id)}>{item.name} · ID {item.obj_id}</SelectItem>)}</SelectContent></Select></div></CardContent></Card>
               </div>
             </div>
           </>}

@@ -111,7 +111,7 @@ function ResultDetails({ result, runRoot }: { result: BopResultSubmission; runRo
         <div className="mt-1 text-xs text-muted-foreground">{result.method} · imported {formatDate(result.created_at)}</div>
       </div>
       <div className="flex flex-wrap items-center gap-2"><span className="font-mono text-[10px] text-muted-foreground">{shortHash(result.sha256)}</span>
-        <Button asChild size="sm"><Link to={`/pose-results?result_id=${result.result_id}`}><ScanSearch />Inspect poses</Link></Button>
+        <Button asChild size="sm"><Link to={query("/pose-results", { result_id: result.result_id, run_root: runRoot })}><ScanSearch />Inspect poses</Link></Button>
         <Button asChild variant="outline" size="sm"><a href={query(`/bop/evaluation/results/${result.result_id}/package`, { run_root: runRoot })}><Box />Package</a></Button>
         <Button asChild variant="outline" size="sm"><a href={query(`/bop/evaluation/results/${result.result_id}/download`, { run_root: runRoot })}><Download />CSV</a></Button>
         {result.provenance_available && <Button asChild variant="outline" size="sm"><a href={query(`/bop/evaluation/results/${result.result_id}/provenance`, { run_root: runRoot })}><FileJson />Provenance</a></Button>}
@@ -234,8 +234,9 @@ function MetricsReport({ evaluation }: { evaluation: BopEvaluationSummary }) {
 }
 
 export function BopEvaluationPage() {
-  const { selectedRun } = useOperator()
+  const { selectedRun: activeRun, selectRun } = useOperator()
   const [searchParams, setSearchParams] = useSearchParams()
+  const selectedRun = searchParams.get("run_root") || activeRun
   const queryClient = useQueryClient()
   const terminalRefresh = useRef<string | null>(null)
   const [sourceKind, setSourceKind] = useState<SourceKind>("registered_result")
@@ -269,7 +270,7 @@ export function BopEvaluationPage() {
   )
   const requestedResultId = searchParams.get("result_id") ?? ""
   const savedResultId = resultSelection?.runRoot === selectedRun ? resultSelection.resultId : ""
-  const selectedResultId = realResults.some((result) => result.result_id === requestedResultId)
+  const selectedResultId = requestedResultId
     ? requestedResultId
     : realResults.some((result) => result.result_id === savedResultId)
       ? savedResultId
@@ -353,7 +354,7 @@ export function BopEvaluationPage() {
       if (resultId) {
         setSourceKind("registered_result")
         setResultSelection({ runRoot: selectedRun, resultId })
-        setSearchParams({ result_id: resultId })
+        setSearchParams({ result_id: resultId, run_root: selectedRun })
       }
       setUploadSelection(null)
       setUploadName(null)
@@ -402,7 +403,7 @@ export function BopEvaluationPage() {
       else blockers.push("The selected dataset is not ready for BOP metric evaluation.")
     }
     if (sourceKind === "registered_result") {
-      if (!selectedResult) blockers.push("Import or select a BOP result CSV.")
+      if (!selectedResult) blockers.push(requestedResultId ? "The linked result is unavailable in this run. Select a retained result or open its original run." : "Import or select a BOP result CSV.")
       else if (!selectedResult.compatible) blockers.push(...(selectedResult.blockers.length ? selectedResult.blockers.map((item) => item.message) : ["The selected result is not compatible with this dataset."]))
     } else {
       if (!dataset.simulation_ready) blockers.push("Ground-truth simulation is unavailable for this dataset.")
@@ -413,7 +414,7 @@ export function BopEvaluationPage() {
     }
     if (activeJob) blockers.push("Wait for the active BOP evaluation job to finish or cancel it from Jobs.")
     return [...new Set(blockers)]
-  }, [activeJob, dataset, rotationSigmaDeg, score, seed, selectedResult, setup.isError, setup.isPending, sourceKind, toolkit, translationSigmaMm])
+  }, [activeJob, dataset, requestedResultId, rotationSigmaDeg, score, seed, selectedResult, setup.isError, setup.isPending, sourceKind, toolkit, translationSigmaMm])
 
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: ["bop-evaluation", "setup", selectedRun] })
@@ -427,6 +428,7 @@ export function BopEvaluationPage() {
       description="Validate an exported dataset with official BOP metrics, using a compatible estimator result or a clearly marked GT-derived test fixture."
       actions={<Button variant="outline" onClick={refresh} disabled={setup.isFetching || jobs.isFetching}><RefreshCw className={setup.isFetching || jobs.isFetching ? "animate-spin" : undefined} />Refresh</Button>}
     />
+    {selectedRun !== activeRun && <div role="status" className="flex items-center justify-between gap-3 rounded-lg border p-3 text-xs"><span>Evaluating linked run <span className="font-mono">{selectedRun}</span>. The active operator run is different.</span><Button variant="outline" size="sm" onClick={() => selectRun(selectedRun)}>Make linked run active</Button></div>}
     <ProcessHandoff
       title="Evaluation consumes the selected run's BOP export"
       description="This page reads the run-owned export and writes separate result and evaluation evidence. It never changes raw capture, synchronization, calibration, or exported dataset files."
@@ -442,7 +444,7 @@ export function BopEvaluationPage() {
           <Card data-testid="bop-evaluation-dataset" className={dataset.evaluation_ready ? "border-success/30" : "border-warning/40"}>
             <CardHeader className="border-b border-border bg-muted/20">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div><CardTitle className="flex flex-wrap items-center gap-2 text-base"><Database aria-hidden="true" className="size-4 text-primary-strong" />Selected-run dataset <StatusBadge status={dataset.evaluation_ready ? "ready" : dataset.status} tone={dataset.evaluation_ready ? "success" : "destructive"}>{dataset.evaluation_ready ? "evaluation ready" : dataset.status}</StatusBadge></CardTitle><CardDescription className="mt-1">The console's global selected run is the dataset selector. This run owns one BOP export.</CardDescription></div>
+                <div><CardTitle className="flex flex-wrap items-center gap-2 text-base"><Database aria-hidden="true" className="size-4 text-primary-strong" />Selected-run dataset <StatusBadge status={dataset.evaluation_ready ? "ready" : dataset.status} tone={dataset.evaluation_ready ? "success" : "destructive"}>{dataset.evaluation_ready ? "evaluation ready" : dataset.status}</StatusBadge></CardTitle><CardDescription className="mt-1">A direct link selects its recorded run; otherwise this page uses the active operator run. This run owns one BOP export.</CardDescription></div>
                 <div className="max-w-full text-left sm:text-right"><div className="text-[9px] font-bold uppercase tracking-[0.12em] text-muted-foreground">Selected run</div><div className="mt-1 max-w-3xl truncate font-mono text-[10px]" title={selectedRun}>{selectedRun}</div></div>
               </div>
             </CardHeader>
@@ -473,7 +475,7 @@ export function BopEvaluationPage() {
               <CardContent className="space-y-5">
                 {sourceKind === "gt_simulation" && <div role="status" className="flex items-center justify-between gap-3 rounded-lg border border-warning/45 bg-warning/10 p-3 text-xs"><span><strong>Test-only simulation is selected.</strong> Its history and report are isolated from retained estimator results.</span>{selectedResult && <Button size="sm" variant="outline" onClick={() => setSourceKind("registered_result")}>Use retained result</Button>}</div>}
                 {realResults.length > 0 ? <div className="space-y-3">
-                  <div className="space-y-1.5"><Label htmlFor="bop-result-selection">Retained pose result</Label><Select value={selectedResultId} onValueChange={(resultId) => { setSourceKind("registered_result"); setResultSelection({ runRoot: selectedRun, resultId }); setSearchParams({ result_id: resultId }) }}><SelectTrigger id="bop-result-selection" aria-label="Retained pose result"><SelectValue /></SelectTrigger><SelectContent>{realResults.map((result) => <SelectItem key={result.result_id} value={result.result_id}>{result.display_name} · {result.method} · {result.compatible ? "compatible" : "incompatible"}</SelectItem>)}</SelectContent></Select></div>
+                  <div className="space-y-1.5"><Label htmlFor="bop-result-selection">Retained pose result</Label><Select value={selectedResultId} onValueChange={(resultId) => { setSourceKind("registered_result"); setResultSelection({ runRoot: selectedRun, resultId }); setSearchParams({ result_id: resultId, run_root: selectedRun }) }}><SelectTrigger id="bop-result-selection" aria-label="Retained pose result"><SelectValue /></SelectTrigger><SelectContent>{realResults.map((result) => <SelectItem key={result.result_id} value={result.result_id}>{result.display_name} · {result.method} · {result.compatible ? "compatible" : "incompatible"}</SelectItem>)}</SelectContent></Select></div>
                   {selectedResult && <ResultDetails result={selectedResult} runRoot={selectedRun} />}
                 </div> : <div className="rounded-lg border border-dashed p-6 text-center"><ScanSearch className="mx-auto size-6 text-muted-foreground" /><div className="mt-2 text-sm font-semibold">No retained estimator result</div><p className="mt-1 text-xs text-muted-foreground">Submit and collect a compatible external estimator result first, or expand manual import below.</p><Button asChild className="mt-4" size="sm"><Link to="/pose-estimation">Open Pose Estimation<ArrowRight /></Link></Button></div>}
 

@@ -67,7 +67,11 @@ class ClusterControllerClient:
             raise ValueError("Cluster controller token is not configured")
         self.__token = token
         self.timeout_seconds = timeout_seconds
-        self.__opener = urllib.request.build_opener(_NoRedirect)
+        # This authenticated client must stay on loopback even when the service
+        # inherits HTTP_PROXY without a matching NO_PROXY configuration.
+        self.__opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _NoRedirect
+        )
 
     def _url(self, path: str, query: Mapping[str, object] | None = None) -> str:
         if not path.startswith(("/v1/", "/v2/")) or "\0" in path or "\n" in path:

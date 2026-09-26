@@ -83,6 +83,29 @@ def export_command(run_root: Path, *, annotation_mode: str = "none") -> list[str
     ]
 
 
+@pytest.mark.parametrize("target", ["source", "run", "raw", "nested"])
+def test_bop_export_rejects_destructive_output_override(tmp_path: Path, target: str) -> None:
+    run = create_synchronized_sensor_fixture(tmp_path)
+    raw = run / "realsense_123"
+    raw.mkdir()
+    (raw / "raw-evidence.txt").write_text("keep")
+    output = {"source": run / "processed", "run": run,
+              "raw": raw, "nested": raw / "export"}[target]
+    before = {path.relative_to(run): path.read_bytes()
+              for path in run.rglob("*") if path.is_file()}
+
+    result = subprocess.run(
+        [*export_command(run), "--objectless", "--overwrite", "--output-folder", str(output)],
+        capture_output=True, text=True,
+    )
+
+    assert result.returncode != 0
+    assert "Derived output" in result.stderr
+    assert {path.relative_to(run): path.read_bytes()
+            for path in run.rglob("*") if path.is_file()} == before
+    assert not list(run.rglob("*.tmp"))
+
+
 def test_bop_export_uses_exact_selected_profile_for_ambiguous_sensor() -> None:
     intrinsics = CameraIntrinsics(
         cam_k=(10.0, 0.0, 3.0, 0.0, 10.0, 2.5, 0.0, 0.0, 1.0),

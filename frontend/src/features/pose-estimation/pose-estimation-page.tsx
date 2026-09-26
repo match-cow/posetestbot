@@ -352,8 +352,8 @@ export function PoseEstimationPage() {
                   <div className="flex items-center gap-2 text-sm font-semibold text-success"><CheckCircle2 className="size-4" />Immutable BOP19 result collected</div>
                   <p className="mt-1 break-all font-mono text-[9px] text-muted-foreground">{collectedResult.result_id} · {shortHash(collectedResult.sha256)}</p>
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <Button asChild size="sm"><Link to={collectedResponse?.inspection_url ?? `/pose-results?result_id=${collectedResult.result_id}`}><ScanSearch />Inspect poses</Link></Button>
-                    <Button asChild size="sm" variant="outline"><Link to={collectedResponse?.evaluation_url ?? `/bop-evaluation?result_id=${collectedResult.result_id}`}>Evaluate<ArrowRight /></Link></Button>
+                    <Button asChild size="sm"><Link to={query("/pose-results", { result_id: collectedResult.result_id, run_root: selectedRun })}><ScanSearch />Inspect poses</Link></Button>
+                    <Button asChild size="sm" variant="outline"><Link to={query("/bop-evaluation", { result_id: collectedResult.result_id, run_root: selectedRun })}>Evaluate<ArrowRight /></Link></Button>
                     <Button asChild size="sm" variant="outline"><a href={collectedResponse?.package_url ?? query(`/bop/evaluation/results/${collectedResult.result_id}/package`, { run_root: selectedRun })}><Box />Package</a></Button>
                     <Button asChild size="sm" variant="outline"><a href={collectedResponse?.download_url ?? query(`/bop/evaluation/results/${collectedResult.result_id}/download`, { run_root: selectedRun })}><Download />CSV</a></Button>
                     {collectedResult.provenance_available && <Button asChild size="sm" variant="outline"><a href={collectedResponse?.provenance_url ?? query(`/bop/evaluation/results/${collectedResult.result_id}/provenance`, { run_root: selectedRun })}><FileJson />Provenance</a></Button>}

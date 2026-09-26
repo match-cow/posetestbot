@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 from typing import Any
 
 from flask import Blueprint, jsonify, request, send_file, url_for
@@ -18,10 +19,13 @@ from posetestbot.bop.inspection import (
     inspection_setup,
     list_inspection_frames,
 )
+from posetestbot.bop.evaluation import RESULT_ID_RE
+from posetestbot.web.routes.ui import discover_web_runs
 from posetestbot.web.security import resolve_web_run_root
 
 
 bop_inspection_bp = Blueprint("bop_inspection", __name__)
+MAX_RESULT_METADATA_BYTES = 1024 * 1024
 
 
 def _error(exc: Exception):
@@ -67,6 +71,52 @@ def _media_url(
         result_id=result_id,
         **values,
     )
+
+
+@bop_inspection_bp.get("/bop/inspection/result-location")
+def bop_inspection_result_location():
+    """Locate one retained result in directly indexed, approved run folders."""
+
+    try:
+        result_id = request.args.get("result_id")
+        if not isinstance(result_id, str) or RESULT_ID_RE.fullmatch(result_id) is None:
+            raise ValueError("result_id must be a retained BOP result ID")
+        matches: list[str] = []
+        for run in discover_web_runs():
+            run_root = resolve_web_run_root(run["path"])
+            parts = [
+                run_root / "processed",
+                run_root / "processed" / "bop_evaluation",
+                run_root / "processed" / "bop_evaluation" / "results",
+                run_root / "processed" / "bop_evaluation" / "results" / result_id,
+            ]
+            record_path = parts[-1] / "result.json"
+            if any(part.is_symlink() for part in [*parts, record_path]):
+                continue
+            try:
+                if (
+                    not record_path.is_file()
+                    or record_path.stat().st_size > MAX_RESULT_METADATA_BYTES
+                ):
+                    continue
+                with record_path.open("rb") as handle:
+                    content = handle.read(MAX_RESULT_METADATA_BYTES + 1)
+                if len(content) > MAX_RESULT_METADATA_BYTES:
+                    continue
+                record = json.loads(content)
+            except (OSError, ValueError):
+                continue
+            if isinstance(record, dict) and record.get("result_id") == result_id:
+                matches.append(run_root.as_posix())
+        if not matches:
+            raise FileNotFoundError(
+                "Retained BOP result was not found in indexed run folders"
+            )
+        if len(matches) != 1:
+            raise ValueError("Retained BOP result ID is ambiguous across run folders")
+        return jsonify({"result_id": result_id, "run_root": matches[0]})
+    except Exception as exc:
+        return _error(exc)
 
 
 @bop_inspection_bp.get("/bop/inspection/setup")

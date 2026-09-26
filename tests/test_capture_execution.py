@@ -7,6 +7,8 @@ import os
 import signal
 
 import subprocess
+import sys
+import time
 
 from dataclasses import replace
 
@@ -29,6 +31,7 @@ from posetestbot.pipeline.capture_plan import build_capture_plan, write_capture_
 
 from posetestbot.pipeline.capture_execution import (
     CaptureExecutionPermissionError,
+    _terminate_process_groups,
     build_capture_execution_plan,
     run_capture_execution,
 )
@@ -783,7 +786,7 @@ def test_capture_execution_sigterm_cancels_every_spawned_process(
         ),
     )
     spawned: list[FakePersistentProcess] = []
-    terminated: list[FakePersistentProcess] = []
+    termination_batches: list[list[FakePersistentProcess]] = []
 
     def fake_popen(command, **kwargs):
         process: FakePersistentProcess
@@ -795,10 +798,14 @@ def test_capture_execution_sigterm_cancels_every_spawned_process(
         spawned.append(process)
         return process
 
-    def fake_terminate(process, *, timeout_s):
+    def fake_terminate(processes, *, timeout_s):
         del timeout_s
-        process.returncode = -signal.SIGTERM
-        terminated.append(process)
+        batch = list(processes)
+        termination_batches.append(batch)
+        os.kill(os.getpid(), signal.SIGTERM)
+        for process in batch:
+            process.returncode = -signal.SIGTERM
+        return []
 
     monkeypatch.setattr(
         "posetestbot.pipeline.capture_execution.subprocess.Popen", fake_popen
@@ -807,7 +814,7 @@ def test_capture_execution_sigterm_cancels_every_spawned_process(
         "posetestbot.pipeline.capture_execution.time.sleep", lambda _: None
     )
     monkeypatch.setattr(
-        "posetestbot.pipeline.capture_execution._terminate_process_group",
+        "posetestbot.pipeline.capture_execution._terminate_process_groups",
         fake_terminate,
     )
 
@@ -824,8 +831,77 @@ def test_capture_execution_sigterm_cancels_every_spawned_process(
     assert report["status"] == "canceled"
     assert "SIGTERM" in report["message"]
     assert len(spawned) == 2
-    assert terminated == spawned
+    assert termination_batches == [spawned]
     assert all(process["status"] == "terminated" for process in report["processes"])
     persisted = json.loads((run_root / CAPTURE_EXECUTION_STATUS).read_text())
     assert persisted["status"] == "canceled"
     assert persisted["active_process_count"] == 0
+
+
+def test_capture_cleanup_signals_all_process_groups_before_waiting(monkeypatch) -> None:
+    processes = [
+        FakePersistentProcess(["camera-a"], open(os.devnull, "w")),
+        FakePersistentProcess(["camera-b"], open(os.devnull, "w")),
+    ]
+    processes[0].pid = 41001
+    processes[1].pid = 41002
+    signals: list[tuple[int, int]] = []
+
+    def fake_killpg(pid: int, signum: int) -> None:
+        if signum == 0:
+            if all(process.returncode is not None for process in processes):
+                raise ProcessLookupError
+            return
+        signals.append((pid, signum))
+        if signum == signal.SIGTERM and len(signals) == len(processes):
+            for process in processes:
+                process.returncode = -signal.SIGTERM
+
+    monkeypatch.setattr("posetestbot.pipeline.capture_execution.os.killpg", fake_killpg)
+
+    survivors = _terminate_process_groups(processes, timeout_s=0.1)
+
+    assert survivors == []
+    assert signals == [
+        (41001, signal.SIGTERM),
+        (41002, signal.SIGTERM),
+    ]
+    for process in processes:
+        process.log_file.close()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux process group regression")
+@pytest.mark.parametrize("leader_exits_first", [False, True])
+def test_capture_cleanup_kills_descendants_after_launcher_exit(leader_exits_first: bool) -> None:
+    child = (
+        "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "print(os.getpid(), flush=True); time.sleep(30)"
+    )
+    leader = (
+        f"import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', {child!r}]); "
+        + ("sys.exit(0)" if leader_exits_first else "time.sleep(30)")
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", leader], start_new_session=True,
+        stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        child_pid = int(process.stdout.readline())
+        if leader_exits_first:
+            process.wait(timeout=5)
+        assert _terminate_process_groups([process], timeout_s=0.1) == []
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            stat_path = Path(f"/proc/{child_pid}/stat")
+            if not stat_path.exists() or stat_path.read_text().split(")", 1)[1].split()[0] == "Z":
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("Capture descendant survived cleanup")
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=5)
+        process.stdout.close()

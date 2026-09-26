@@ -92,6 +92,26 @@ def rectification_fixture(run_root: Path) -> tuple[Path, dict]:
     return sensor, factory_intrinsic_profile(sensor)
 
 
+@pytest.mark.parametrize("target", ["source", "run", "raw", "symlink"])
+def test_rectification_rejects_destructive_output_override(tmp_path: Path, target: str) -> None:
+    run = tmp_path / "run"
+    sensor, profile = rectification_fixture(run)
+    raw = run / sensor.name
+    raw.mkdir()
+    (raw / "raw-evidence.txt").write_text("keep")
+    output = {"source": sensor.parent, "run": run, "raw": raw}.get(target)
+    if target == "symlink":
+        output = tmp_path / "alias"
+        output.symlink_to(raw, target_is_directory=True)
+    before = digest_tree(run)
+
+    with pytest.raises(ValueError, match="Derived output"):
+        rectify_run(run, [profile], output_root=output, overwrite=True)
+
+    assert digest_tree(run) == before
+    assert not list(run.rglob("*.tmp"))
+
+
 def test_rectification_is_transactional_non_destructive_and_depth_nearest(
     tmp_path: Path,
 ) -> None:

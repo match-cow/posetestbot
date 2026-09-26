@@ -10,6 +10,7 @@ import json
 import math
 import shutil
 import uuid
+from bisect import bisect_left
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import mean
@@ -32,6 +33,7 @@ from posetestbot.io.artifacts import (
     SYNCHRONIZED_DIR,
 )
 from posetestbot.io.manifest import discover_sensor_records
+from posetestbot.io.derived import validate_derived_output
 from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
 from posetestbot.robot.reference_frames import (
@@ -328,10 +330,18 @@ def robot_pose_packet_loss(
 def closest_robot_pose(
     timestamp_ns: int, robot_records: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    return min(
-        robot_records,
+    """Find the nearest pose in timestamp-sorted records, keeping stable ties."""
+
+    def timestamp(record: Mapping[str, Any]) -> int:
+        return int(record["timestamp_ns"])
+
+    index = bisect_left(robot_records, timestamp_ns, key=timestamp)
+    nearest = min(
+        robot_records[max(0, index - 1) : index + 1],
         key=lambda record: abs(int(record["timestamp_ns"]) - timestamp_ns),
     )
+    # Equal timestamps retain the first record, matching stable linear lookup.
+    return robot_records[bisect_left(robot_records, timestamp(nearest), key=timestamp)]
 
 
 def _relative_path(path: Path, root: Path) -> str:
@@ -339,10 +349,6 @@ def _relative_path(path: Path, root: Path) -> str:
         return path.relative_to(root).as_posix()
     except ValueError:
         return path.as_posix()
-
-
-def _sensor_sync_keys(sensor_folder_name: str) -> tuple[str, ...]:
-    return (sensor_folder_name,)
 
 
 def resolve_sync_delta_ms(
@@ -357,10 +363,7 @@ def resolve_sync_delta_ms(
         if isinstance(sync_delta, int | float):
             value = sync_delta
         elif isinstance(sync_delta, Mapping):
-            for key in _sensor_sync_keys(Path(sensor_folder).name):
-                if key in sync_delta:
-                    value = sync_delta[key]
-                    break
+            value = sync_delta.get(Path(sensor_folder).name, value)
         else:
             raise ValueError("Synchronization delta must be a number or sensor mapping")
     try:
@@ -521,6 +524,7 @@ def synchronize_sensor_folder(
         else run_path / PROCESSED_DIR / SYNCHRONIZED_DIR
     )
     output_folder = output_base / sensor_path.name
+    validate_derived_output(run_path, output_folder, sources=(sensor_path,))
     output_base.mkdir(parents=True, exist_ok=True)
     staging_folder = output_base / f".{sensor_path.name}.{uuid.uuid4().hex}.tmp"
     staging_folder.mkdir(parents=False, exist_ok=False)
