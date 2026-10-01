@@ -92,6 +92,11 @@ from posetestbot.calibration.targets import (
     validate_target_identity,
 )
 from posetestbot.calibration.transforms import transform_from_record, transform_residual
+from posetestbot.calibration.rotational_timing import (
+    STRATEGY as ROTATIONAL_TIMING_STRATEGY,
+    configuration as rotational_timing_configuration,
+    estimate_rotational_timing,
+)
 from posetestbot.calibration.time_offset import (
     DEFAULT_MAX_NEAREST_POSE_DELTA_MS,
     DEFAULT_MAX_LOMO_SEARCH_ADJUSTED_SIGN_P_VALUE,
@@ -103,6 +108,7 @@ from posetestbot.calibration.time_offset import (
     LOMO_CONSISTENCY_STRATEGY,
     POLICIES as SYNCHRONIZATION_POLICIES,
     SCHEMA_VERSION as TIME_OFFSET_SEARCH_SCHEMA_VERSION,
+    _median_robot_sample_period_ms,
     apply_sensor_time_offset,
     estimate_sensor_time_offset,
     failed_sensor_result,
@@ -998,9 +1004,9 @@ def calibration_setup(run_root: str | Path) -> dict[str, Any]:
                         "id": "auto_offset",
                         "label": "Auto-estimate robot-pose offset — recommended",
                         "description": (
-                            "Estimate effective per-camera latency with "
-                            "motion-disjoint cross-validation and "
-                            "search-corrected leave-one-motion-out evidence."
+                            "Measure robot-mounted camera latency from reversible "
+                            "optical-axis rotations with uncertainty checks; "
+                            "otherwise use motion-disjoint spatial evidence."
                         ),
                     },
                     {
@@ -3161,6 +3167,11 @@ def _estimate_and_apply_time_offsets(
             "Unsupported calibration time-offset implementation revision: "
             f"{implementation_revision}"
         )
+    if (
+        search_configuration.get("rotational_timing")
+        != rotational_timing_configuration()
+    ):
+        raise ValueError("Calibration angular timing configuration is invalid")
     failure_policy = FAILURE_POLICY_WARN_KEEP_ZERO
     recorded_failure_policy = search_configuration.get("time_offset_failure_policy")
     if recorded_failure_policy != failure_policy:
@@ -4740,8 +4751,8 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
             phase="estimate_time_offsets",
             phase_status="running",
             message=(
-                "Estimating effective camera-to-robot latency on fixed "
-                "motion-disjoint evidence."
+                "Measuring angular camera-to-robot latency and evaluating "
+                "motion-disjoint spatial evidence."
             ),
         )
         time_offset_search, adjusted_observations = _estimate_and_apply_time_offsets(
@@ -5699,6 +5710,20 @@ def _promotion_time_offset_evidence(
             if isinstance(check, Mapping)
         }
         if policy == "auto_offset":
+            if item.get("improvement_evidence_strategy") == ROTATIONAL_TIMING_STRATEGY:
+                if not required_auto_checks.issubset(check_by_name):
+                    raise ValueError(
+                        f"Rotational timing checks are incomplete for {sensor_key}"
+                    )
+                _validate_promotion_rotational_timing(
+                    attempt,
+                    item,
+                    sensor_key=sensor_key,
+                    recorded_search=recorded_search,
+                    search_grid=search_grid,
+                    check_by_name=check_by_name,
+                )
+                continue
             if (
                 item.get("improvement_evidence_strategy")
                 != IMPROVEMENT_EVIDENCE_STRATEGY
@@ -5834,6 +5859,150 @@ def _promotion_time_offset_evidence(
         sensors,
     )
     return sensors
+
+
+def _validate_promotion_rotational_timing(
+    attempt: Mapping[str, Any],
+    item: Mapping[str, Any],
+    *,
+    sensor_key: str,
+    recorded_search: Mapping[str, Any],
+    search_grid: Sequence[float],
+    check_by_name: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Reproduce angular latency from retained PnP and hash-bound raw poses."""
+
+    request_value = attempt["request"]
+    evidence = item.get("rotational_timing")
+    if (
+        request_value.get("mode") != "eye_in_hand"
+        or recorded_search.get("rotational_timing") != rotational_timing_configuration()
+        or not isinstance(evidence, Mapping)
+        or evidence.get("status") != "identified"
+        or evidence.get("strategy") != ROTATIONAL_TIMING_STRATEGY
+        or item.get("boundary_hit") is not False
+        or item.get("motion_consistency") is not None
+    ):
+        raise ValueError(f"Rotational timing evidence is invalid for {sensor_key}")
+    run_root = Path(str(attempt["run_root"]))
+    attempt_root = calibration_attempt_root(run_root, str(request_value["attempt_id"]))
+    sensor = next(
+        entry for entry in request_value["sensors"] if entry["sensor_key"] == sensor_key
+    )
+    policy = _timestamp_policy_for_sensor(request_value["timestamp_policy"], sensor)
+    run_config = load_run_config_for_run_root(run_root)
+    artifacts = _verify_robot_pose_artifact_bindings(run_root, request_value)
+    records = indexed_robot_poses(
+        _robot_poses_for_sensor(run_root, sensor, artifacts),
+        timestamp_source=str(policy["robot_timestamp_source"]),
+        expected_run_id=str(run_config["run_id"]),
+        expected_reference_frame_path=configured_sunrise_reference_frame_path(
+            run_config
+        ),
+    )
+    observations = _read_json(attempt_root / OBSERVATIONS_FILE)["observations"]
+    reference = [
+        observation
+        for observation in observations
+        if observation.get("sensor_type") == sensor["sensor_type"]
+        and observation.get("device_id") == sensor["device_id"]
+        and observation.get("pnp_method") == DEFAULT_REFERENCE_PNP_METHOD
+    ]
+    maximum_uncertainty = max(
+        float(recorded_search["minimum_offset_stability_ms"]),
+        2.0
+        * _median_robot_sample_period_ms([entry["timestamp_ns"] for entry in records]),
+    )
+    recomputed = estimate_rotational_timing(
+        reference,
+        robot_records=records,
+        offsets_ms=search_grid,
+        maximum_uncertainty_ms=maximum_uncertainty,
+    )
+    # The source frame identity survives authoritative synchronization. Its
+    # full-range selection cannot cross a motion boundary for any tested offset.
+    if recomputed != dict(evidence):
+        raise ValueError(f"Rotational timing could not be reproduced for {sensor_key}")
+    candidate = float(recomputed["candidate_robot_pose_time_offset_ms"])
+    expected_actual = {
+        "estimated_robot_pose_time_offset_ms": recomputed[
+            "estimated_robot_pose_time_offset_ms"
+        ],
+        "confidence_interval_ms": recomputed["confidence_interval_ms"],
+        "motion_count": recomputed["motion_count"],
+        "view_count": recomputed["view_count"],
+    }
+    timing_check = check_by_name.get("rotational_timing_identifiability", {})
+    diagnostics = {
+        "cross_validation_offset_stability",
+        "reference_method_sensitivity",
+        "cross_validated_translation_improvement",
+        "cross_validation_fold_materiality",
+        "leave_one_motion_out_timing_consistency",
+    }
+    rotation_check = check_by_name["cross_validated_rotation_guard"]
+    rotation_values = rotation_check.get("per_fold")
+    rotation_limit = float(
+        recorded_search["maximum_cross_validated_rotation_degradation_deg"]
+    )
+    rotation_ok = (
+        isinstance(rotation_values, list)
+        and len(rotation_values) == 3
+        and all(
+            math.isfinite(float(value)) and float(value) <= rotation_limit
+            for value in rotation_values
+        )
+    )
+    fallback = item.get("warning_fallback_used") is True
+    if (
+        not math.isclose(
+            float(item["candidate_robot_pose_time_offset_ms"]), candidate, abs_tol=1e-9
+        )
+        or candidate == 0.0
+        or not min(search_grid) < candidate < max(search_grid)
+        or timing_check.get("status") != "ok"
+        or timing_check.get("actual") != expected_actual
+        or timing_check.get("threshold")
+        != {
+            "maximum_uncertainty_ms": maximum_uncertainty,
+            "nonzero_interval_required": True,
+        }
+        or any(
+            check_by_name[name].get("status") != "not_needed" for name in diagnostics
+        )
+        or check_by_name["fixed_full_range_observation_set"].get("status") != "ok"
+        or check_by_name["search_optimum_not_at_boundary"].get("status") != "ok"
+        or check_by_name["zero_offset_identifiability"].get("status") != "not_needed"
+        or any(check.get("status") == "error" for check in check_by_name.values())
+        or rotation_check.get("threshold") != rotation_limit
+    ):
+        raise ValueError(f"Rotational timing decision is inconsistent for {sensor_key}")
+    if fallback:
+        if (
+            rotation_ok
+            or rotation_check.get("status") != "warning"
+            or rotation_check.get("original_status") != "error"
+            or rotation_check.get("fallback") != "recorded timing retained at 0 ms"
+            or item.get("status") != "kept_zero"
+            or item.get("decision") != "recorded_timing_kept"
+            or item.get("decision_reason") != "ambiguous_auto_offset_kept_recorded_zero"
+            or item.get("evidence_strength") != "degraded"
+            or float(item["selected_robot_pose_time_offset_ms"]) != 0.0
+        ):
+            raise ValueError(f"Rotational timing fallback is invalid for {sensor_key}")
+    elif (
+        not rotation_ok
+        or rotation_check.get("status") != "ok"
+        or item.get("status") != "applied"
+        or item.get("decision") != "auto_offset_applied"
+        or item.get("decision_reason")
+        != "optical_axis_rotation_alignment_identified_latency"
+        or item.get("evidence_strength") != "motion_identified"
+        or not math.isclose(
+            float(item["selected_robot_pose_time_offset_ms"]), candidate, abs_tol=1e-9
+        )
+    ):
+        raise ValueError(f"Applied rotational timing is invalid for {sensor_key}")
 
 
 def _promotion_time_offset_artifact_bindings(
@@ -5999,6 +6168,28 @@ def create_promotion_request(
     *,
     selections: Mapping[str, Any] | None = None,
     operator: str | None = None,
+    reprojection_refinement_id: str | None = None,
+    replace_promoted_refinement: bool = False,
+) -> dict[str, Any]:
+    with run_config_lock(run_root) as locked_root:
+        return _create_promotion_request_locked(
+            locked_root,
+            attempt_id,
+            selections=selections,
+            operator=operator,
+            reprojection_refinement_id=reprojection_refinement_id,
+            replace_promoted_refinement=replace_promoted_refinement,
+        )
+
+
+def _create_promotion_request_locked(
+    run_root: str | Path,
+    attempt_id: str,
+    *,
+    selections: Mapping[str, Any] | None,
+    operator: str | None,
+    reprojection_refinement_id: str | None,
+    replace_promoted_refinement: bool,
 ) -> dict[str, Any]:
     root = Path(run_root)
     attempt = load_calibration_attempt(root, attempt_id)
@@ -6006,9 +6197,23 @@ def create_promotion_request(
     if attempt["progress"].get("status") != "complete":
         raise ValueError("Calibration attempt is not complete")
     prior_promotion = attempt.get("promotion")
+    replacing = (
+        replace_promoted_refinement
+        and reprojection_refinement_id is not None
+        and isinstance(prior_promotion, Mapping)
+        and prior_promotion.get("status") == "promoted"
+        and isinstance(prior_promotion.get("reprojection_refinement"), Mapping)
+        and prior_promotion["reprojection_refinement"].get("refinement_id")
+        != reprojection_refinement_id
+    )
+    if replace_promoted_refinement and not replacing:
+        raise ValueError(
+            "Refinement replacement requires a different report and an already promoted refinement"
+        )
     if (
         isinstance(prior_promotion, Mapping)
         and prior_promotion.get("status") != "failed"
+        and not replacing
     ):
         raise ValueError("Calibration attempt already has promotion evidence")
     _promotion_time_offset_evidence(attempt)
@@ -6033,10 +6238,56 @@ def create_promotion_request(
             joint_bundle["quality_warnings"] if joint_bundle is not None else []
         ),
         "previous_failure": (
-            dict(prior_promotion) if isinstance(prior_promotion, Mapping) else None
+            dict(prior_promotion)
+            if isinstance(prior_promotion, Mapping)
+            and prior_promotion.get("status") == "failed"
+            else None
         ),
     }
+    if reprojection_refinement_id is not None:
+        from posetestbot.calibration.reprojection_refinement import (
+            validate_reprojection_refinement,
+        )
+
+        value["reprojection_refinement"] = {
+            "refinement_id": reprojection_refinement_id,
+            "report": validate_reprojection_refinement(
+                root, attempt, reprojection_refinement_id, selected
+            ),
+        }
     attempt_root = calibration_attempt_root(root, attempt_id)
+    if replacing:
+        from posetestbot.calibration.reprojection_refinement import _binding
+
+        # Retain the entire prior canonical selection before any new request or
+        # status replaces the mutable promotion pointer. Raw/solver evidence is
+        # already immutable and remains in its original locations.
+        snapshot = attempt_root / "promotion_history" / uuid.uuid4().hex
+        if not snapshot.resolve().is_relative_to(
+            attempt_root.resolve() / "promotion_history"
+        ):
+            raise ValueError("Prior promotion snapshot escapes its attempt")
+        snapshot.mkdir(parents=True, exist_ok=False)
+        files = [
+            (attempt_root / PROMOTION_REQUEST_FILE, "promotion_request.json"),
+            (attempt_root / PROMOTION_FILE, "promotion.json"),
+            *(
+                (root / name, name)
+                for name in (
+                    CALIBRATION_PROFILES,
+                    INTRINSIC_CALIBRATION_PROFILES,
+                    CALIBRATION_TARGET,
+                    RUN_CONFIG,
+                    DATASET_MANIFEST,
+                )
+            ),
+        ]
+        history = []
+        for source, name in files:
+            destination = snapshot / name
+            shutil.copy2(source, destination)
+            history.append(_binding(root, destination))
+        value["previous_promotion"] = history
     atomic_write_json(attempt_root / PROMOTION_REQUEST_FILE, value)
     atomic_write_json(
         attempt_root / PROMOTION_FILE,
@@ -6054,6 +6305,14 @@ def create_promotion_request(
                 "joint_consistency_quality_warnings"
             ],
             "operator": value["operator"],
+            **(
+                {"reprojection_refinement": value["reprojection_refinement"]}
+                if "reprojection_refinement" in value
+                else {}
+            ),
+            **(
+                {"previous_promotion": value["previous_promotion"]} if replacing else {}
+            ),
         },
     )
     return value
@@ -6100,12 +6359,31 @@ def _validate_promotion_request_identity(
     for key in (
         "joint_consistency_policy_revision",
         "joint_consistency_quality_warnings",
+        "reprojection_refinement",
+        "previous_promotion",
     ):
         if promotion_request.get(key) != promotion_status.get(key):
             raise ValueError(
                 "Calibration promotion request/status consistency evidence is "
                 "inconsistent"
             )
+    history = promotion_request.get("previous_promotion")
+    if history is not None:
+        from posetestbot.calibration.reprojection_refinement import _binding
+
+        if not isinstance(history, list) or not history:
+            raise ValueError("Invalid retained prior promotion evidence")
+        expected_parent = (
+            calibration_attempt_root(run_root, attempt_id) / "promotion_history"
+        )
+        for binding in history:
+            if not isinstance(binding, Mapping):
+                raise ValueError("Invalid retained prior promotion binding")
+            path = run_root / str(binding.get("path", ""))
+            if not path.resolve().is_relative_to(expected_parent) or _binding(
+                run_root, path
+            ) != dict(binding):
+                raise ValueError("Retained prior promotion evidence changed")
 
 
 def _promotion_count(value: Any, *, label: str, candidate_id: str) -> int:
@@ -6576,6 +6854,21 @@ def _selected_profiles(
                 metadata=metadata,
             )
         )
+    refinement = promotion_request.get("reprojection_refinement")
+    if refinement is not None:
+        if not isinstance(refinement, Mapping):
+            raise ValueError("Invalid reprojection refinement promotion evidence")
+        from posetestbot.calibration.reprojection_refinement import (
+            apply_reprojection_refinement,
+        )
+
+        selected = apply_reprojection_refinement(
+            attempt_root.parents[2],
+            attempt,
+            selected,
+            refinement,
+            promotion_request["selections"],
+        )
     return selected
 
 
@@ -6809,6 +7102,20 @@ def _promote_calibration_attempt_locked(
             "operator": promotion_request.get("operator"),
             "selections": dict(promotion_request["selections"]),
             "joint_bundle_id": promotion_request.get("joint_bundle_id"),
+            **(
+                {
+                    "reprojection_refinement": promotion_request[
+                        "reprojection_refinement"
+                    ]
+                }
+                if "reprojection_refinement" in promotion_request
+                else {}
+            ),
+            **(
+                {"previous_promotion": promotion_request["previous_promotion"]}
+                if "previous_promotion" in promotion_request
+                else {}
+            ),
             "promoted_profile_ids": [
                 profile.profile_id for profile in selected_profiles
             ],

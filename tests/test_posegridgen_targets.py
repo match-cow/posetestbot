@@ -141,7 +141,7 @@ def test_din_a5_and_a6_generate_through_the_immutable_bundle_pipeline(
     assert (bundle_path / "calibration_target.pdf").read_bytes().startswith(b"%PDF")
 
 
-def test_anisotropic_geometry_is_authoritative_for_generic_opencv_board(
+def test_pdf_compensation_is_separate_from_physical_opencv_board(
     tmp_path: Path,
 ) -> None:
     bundle = generate_target_bundle(
@@ -153,19 +153,25 @@ def test_anisotropic_geometry_is_authoritative_for_generic_opencv_board(
     _dictionary, board = opencv_grid_board(target)
     points = [np.asarray(item) for item in board.getObjPoints()]
 
-    assert target["schema_version"] == "calibration_target.v2"
+    assert target["schema_version"] == "calibration_target.v3"
     assert target["print_compensation"] == {
         "x_percent": 101.0,
         "y_percent": 99.0,
-        "application": "already_applied",
+        "application": "pdf_only",
     }
-    assert target["target_bounds"]["width_mm"] == pytest.approx(111.1)
-    assert target["target_bounds"]["height_mm"] == pytest.approx(69.3)
-    assert points[0][1, 0] - points[0][0, 0] == pytest.approx(30.3)
-    assert points[0][3, 1] - points[0][0, 1] == pytest.approx(29.7)
-    assert points[1][0, 0] - points[0][1, 0] == pytest.approx(10.1)
-    assert points[3][0, 1] - points[0][3, 1] == pytest.approx(9.9)
+    assert target["target_bounds"]["width_mm"] == pytest.approx(110.0)
+    assert target["target_bounds"]["height_mm"] == pytest.approx(70.0)
+    assert points[0][1, 0] - points[0][0, 0] == pytest.approx(30.0)
+    assert points[0][3, 1] - points[0][0, 1] == pytest.approx(30.0)
+    assert points[1][0, 0] - points[0][1, 0] == pytest.approx(10.0)
+    assert points[3][0, 1] - points[0][3, 1] == pytest.approx(10.0)
     assert target["geometry_sha256"] == geometry_sha256(target)
+    source = json.loads(
+        (Path(bundle["bundle_path"]) / "posegridgen_source.json").read_text()
+    )
+    assert source["target_bounds"]["width_mm"] == pytest.approx(111.1)
+    assert source["target_bounds"]["height_mm"] == pytest.approx(69.3)
+    assert source["features"][0]["corners_mm"][1][0] == pytest.approx(30.3)
 
     object_points = np.concatenate(points).astype(np.float32)
     true_k = np.asarray(
@@ -229,7 +235,49 @@ def test_anisotropic_geometry_is_authoritative_for_generic_opencv_board(
     assert np.allclose(recovered_rvec.reshape(3), expected_rvec, atol=1e-3)
 
 
-def test_v2_validation_rejects_hash_winding_bounds_and_dictionary_capacity(
+def test_measured_375mm_board_keeps_pdf_printer_compensation(tmp_path: Path) -> None:
+    configuration = aruco_configuration()
+    configuration["page"]["paper_size"] = "A2"
+    configuration["board"].update(
+        dictionary="DICT_5X5_100", columns=7, rows=5, marker_size_mm=45.0
+    )
+    configuration["print_compensation"] = {"x_percent": 100.5, "y_percent": 100.0}
+    bundle = generate_target_bundle(
+        display_name="Measured 375 x 265",
+        configuration=configuration,
+        library_root=tmp_path,
+    )
+    source = json.loads(
+        (Path(bundle["bundle_path"]) / "posegridgen_source.json").read_text()
+    )
+    target = bundle["target"]
+    assert source["target_bounds"]["width_mm"] == pytest.approx(376.875)
+    assert target["target_bounds"]["width_mm"] == pytest.approx(375.0)
+    assert target["target_bounds"]["height_mm"] == pytest.approx(265.0)
+    assert target["markers"][0]["corners_mm"][1] == [45.0, 0.0, 0.0]
+    assert target["print_compensation"]["x_percent"] == 100.5
+    assert validate_target_bundle(bundle["bundle_path"])["target"] == target
+
+
+def test_retired_print_geometry_contracts_fail_closed(tmp_path: Path) -> None:
+    bundle = generate_target_bundle(
+        display_name="Current physical geometry",
+        configuration=aruco_configuration(),
+        library_root=tmp_path,
+    )
+    target = copy.deepcopy(bundle["target"])
+    target["schema_version"] = "calibration_target.v2"
+    with pytest.raises(ValueError, match="schema must be"):
+        normalize_calibration_target_spec(target)
+    manifest = Path(bundle["bundle_path"]) / "calibration_target_bundle.json"
+    value = json.loads(manifest.read_text())
+    value["schema_version"] = "calibration_target_bundle.v1"
+    manifest.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match="Bundle schema"):
+        validate_target_bundle(bundle["bundle_path"])
+
+
+def test_current_validation_rejects_hash_winding_bounds_and_dictionary_capacity(
     tmp_path: Path,
 ) -> None:
     target = generate_target_bundle(

@@ -21,6 +21,11 @@ import numpy as np
 from posetestbot.calibration.attempt_solver import (
     solve_extrinsic_consensus,
 )
+from posetestbot.calibration.rotational_timing import (
+    STRATEGY as ROTATIONAL_TIMING_STRATEGY,
+    configuration as rotational_timing_configuration,
+    estimate_rotational_timing,
+)
 from posetestbot.calibration.transforms import (
     invert_transform,
     residual_summary,
@@ -31,7 +36,7 @@ from posetestbot.calibration.transforms import (
 
 
 SCHEMA_VERSION = "calibration_time_offset_search.v1"
-IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5"
+IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_optical_spin.v6"
 SUPPORTED_IMPLEMENTATION_REVISIONS = frozenset({IMPLEMENTATION_REVISION})
 POLICIES = ("auto_offset", "fixed_zero")
 DEFAULT_POLICY = "fixed_zero"
@@ -899,10 +904,44 @@ def estimate_sensor_time_offset(
         minimum_offset_stability_ms * 2.0,
         4.0 * sample_period_ms,
     )
+    rotational_timing = (
+        estimate_rotational_timing(
+            observations,
+            robot_records=robot_records,
+            offsets_ms=values,
+            maximum_uncertainty_ms=offset_stability_threshold_ms,
+        )
+        if mode == "eye_in_hand"
+        else {
+            "strategy": ROTATIONAL_TIMING_STRATEGY,
+            "status": "unavailable",
+            "reason": "robot_mounted_camera_required",
+            "configuration": rotational_timing_configuration(),
+        }
+    )
+    rotational_timing_identified = rotational_timing["status"] == "identified"
+    spatial_candidate_offset_ms = candidate_offset_ms
+    if rotational_timing_identified:
+        candidate_offset_ms = float(
+            rotational_timing["candidate_robot_pose_time_offset_ms"]
+        )
+        best = next(
+            item
+            for item in curve
+            if math.isclose(
+                float(item["robot_pose_time_offset_ms"]),
+                candidate_offset_ms,
+                abs_tol=1e-9,
+            )
+        )
     boundary_hit = any(
         math.isclose(value, min(values), abs_tol=1e-9)
         or math.isclose(value, max(values), abs_tol=1e-9)
-        for value in fold_candidate_offsets
+        for value in (
+            [candidate_offset_ms]
+            if rotational_timing_identified
+            else fold_candidate_offsets
+        )
     )
     tuning_improvement = _improvement(zero, best)
     fold_selected_records = [
@@ -1015,7 +1054,7 @@ def estimate_sensor_time_offset(
                 max_leave_one_motion_out_search_adjusted_sign_p_value
             ),
         )
-        if candidate_offset_ms != 0.0
+        if candidate_offset_ms != 0.0 and not rotational_timing_identified
         else None
     )
     improvement_evidence_ok = (
@@ -1207,8 +1246,52 @@ def estimate_sensor_time_offset(
             },
         },
     ]
+    if rotational_timing_identified:
+        # Spatial residual materiality does not identify a small latency on slow
+        # motions. Retain these curves as diagnostics, and use the independent
+        # angular timing interval for offset selection and stability instead.
+        diagnostic_checks = {
+            "cross_validation_offset_stability",
+            "reference_method_sensitivity",
+            "cross_validated_translation_improvement",
+            "cross_validation_fold_materiality",
+            "leave_one_motion_out_timing_consistency",
+        }
+        checks = [
+            {
+                **item,
+                "status": "not_needed",
+                "reason": "latency_measured_independently_from_angular_motion",
+            }
+            if item["name"] in diagnostic_checks
+            else item
+            for item in checks
+        ]
+        checks.append(
+            {
+                "name": "rotational_timing_identifiability",
+                "status": "ok",
+                "actual": {
+                    "estimated_robot_pose_time_offset_ms": rotational_timing[
+                        "estimated_robot_pose_time_offset_ms"
+                    ],
+                    "confidence_interval_ms": rotational_timing[
+                        "confidence_interval_ms"
+                    ],
+                    "motion_count": rotational_timing["motion_count"],
+                    "view_count": rotational_timing["view_count"],
+                },
+                "threshold": {
+                    "maximum_uncertainty_ms": offset_stability_threshold_ms,
+                    "nonzero_interval_required": True,
+                },
+                "unit": "ms",
+            }
+        )
     blocking = [item for item in checks if item["status"] == "error"]
-    apply_candidate = materially_better and not blocking
+    apply_candidate = (
+        rotational_timing_identified or materially_better
+    ) and not blocking
     selected_offset_ms = candidate_offset_ms if apply_candidate else 0.0
     strict_status = (
         "applied"
@@ -1232,7 +1315,9 @@ def estimate_sensor_time_offset(
             for item in checks
         ]
     reason = (
-        "motion_disjoint_cross_validation_and_leave_one_motion_out_consistency_passed"
+        "optical_axis_rotation_alignment_identified_latency"
+        if status == "applied" and rotational_timing_identified
+        else "motion_disjoint_cross_validation_and_leave_one_motion_out_consistency_passed"
         if status == "applied"
         else (
             "ambiguous_auto_offset_kept_recorded_zero"
@@ -1269,6 +1354,8 @@ def estimate_sensor_time_offset(
     evidence_strength = (
         "degraded"
         if warning_fallback_used
+        else "motion_identified"
+        if status == "applied" and rotational_timing_identified
         else "strong"
         if status == "applied"
         and float(cross_validated_relative or 0.0) >= 0.15
@@ -1302,7 +1389,13 @@ def estimate_sensor_time_offset(
         "reference_pnp_method": DEFAULT_REFERENCE_PNP_METHOD,
         "reference_extrinsic_methods": list(methods),
         "selection_extrinsic_method": selection_method,
-        "improvement_evidence_strategy": IMPROVEMENT_EVIDENCE_STRATEGY,
+        "improvement_evidence_strategy": (
+            ROTATIONAL_TIMING_STRATEGY
+            if rotational_timing_identified
+            else IMPROVEMENT_EVIDENCE_STRATEGY
+        ),
+        "rotational_timing": rotational_timing,
+        "spatial_candidate_robot_pose_time_offset_ms": spatial_candidate_offset_ms,
         "method_optima_robot_pose_time_offset_ms": optima,
         "fold_candidate_robot_pose_time_offsets_ms": (fold_candidate_offsets),
         "fold_candidate_spread_ms": fold_candidate_spread_ms,
@@ -1318,7 +1411,7 @@ def estimate_sensor_time_offset(
         },
         "cross_validation": {
             "transform_training_motion_disjoint": True,
-            "offset_selection_uses_validation_metrics": True,
+            "offset_selection_uses_validation_metrics": not rotational_timing_identified,
             "untouched_offset_audit": False,
             "zero_offset": cross_validated_zero,
             "candidate": cross_validated_candidate,
@@ -1365,6 +1458,7 @@ def search_configuration() -> dict[str, Any]:
         "maximum_leave_one_motion_out_search_adjusted_sign_p_value": (
             DEFAULT_MAX_LOMO_SEARCH_ADJUSTED_SIGN_P_VALUE
         ),
+        "rotational_timing": rotational_timing_configuration(),
     }
 
 

@@ -60,7 +60,9 @@ def detect_sensor_folder(
     folder = Path(sensor_folder)
     normalized = normalize_calibration_target_spec(target)
     dictionary, _board = opencv_grid_board(normalized)
-    detector = cv2.aruco.ArucoDetector(dictionary, cv2.aruco.DetectorParameters())
+    parameters = cv2.aruco.DetectorParameters()
+    parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+    detector = cv2.aruco.ArucoDetector(dictionary, parameters)
     allowed_ids = {int(marker["id"]) for marker in normalized["markers"]}
     frames: dict[str, Any] = {}
     image_size: list[int] | None = None
@@ -106,6 +108,12 @@ def detect_sensor_folder(
         "schema_version": DETECTION_SCHEMA_VERSION,
         "sensor_name": folder.name,
         "source_projection": "synchronized_native_rgb",
+        "detector": {
+            "corner_refinement": "SUBPIX",
+            "window_size_px": parameters.cornerRefinementWinSize,
+            "max_iterations": parameters.cornerRefinementMaxIterations,
+            "minimum_accuracy_px": parameters.cornerRefinementMinAccuracy,
+        },
         "image_size": image_size,
         "target": _target_provenance(normalized),
         "frame_count": len(frames),

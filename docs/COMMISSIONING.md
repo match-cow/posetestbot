@@ -79,5 +79,8 @@ static calibration](IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md), and
   immutable printable pose-template bundle from reviewed active revisions.
 - Verify the printed arrangement and the full
   `template_base_from_pose_template` transform for a fresh dataset run.
+- Measure the calibration grid's physical marker span and marker sizes after
+  compensated printing. Use nominal physical dimensions in calibration; the
+  enlarged PDF dimensions correct the printer and are not measured geometry.
 - Retain the selected bundle, object-instance snapshot, print, photographs,
   measurements, and reviewer sign-off as run provenance.
