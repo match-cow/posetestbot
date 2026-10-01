@@ -64,6 +64,60 @@ The exact accepted fields and candidate modes are returned by
 `/calibration/setup`; clients should use that setup payload rather than assume
 a mode is available.
 
+Optional shared-grid reprojection refinement is an advanced recorded-data CLI
+operation, described in [Calibration targets](../../POSEGRIDGEN_CALIBRATION_TARGETS.md#recorded-shared-grid-refinement).
+It retains the attempt's ranking and seed profiles. Explicit CLI acceptance
+adds a hash-bound `reprojection_refinement` to promotion request/status evidence
+and reproduces its inputs, optimization, and motion-disjoint audit inside the
+ordinary promotion transaction. Browser promotion submits the ordinary seed
+selection; no refinement creation or acceptance HTTP route is exposed.
+
+## Automatic time alignment
+
+The current implementation is `constant_latency_nearest_pose_optical_spin.v6`.
+Create a new calculation attempt with `synchronization_policy: auto_offset` to
+analyze an existing recording after restarting the backend. Existing attempts
+remain immutable; older timing revisions are not migrated or reinterpreted.
+
+For `eye_in_hand`, timing first looks for a common group of at least three
+single-axis rotations at the same flange location, including opposite
+directions. Each motion needs at least 5° of rotation and 20 usable IPPE views;
+flange translation must stay within 0.5 mm and the camera rotation axis must
+align with the optical axis by at least 0.85. Selection uses geometry before
+testing offsets. Every selected frame needs valid robot samples across the full
+±300 ms search range, with no interpolation across a gap above 40 ms.
+
+The estimator aligns camera and robot angular trajectories with a shared
+angular mapping across forward and reverse motions. Its uncertainty interval
+envelops the 95% percentile interval from 200 resamples of 0.5 s frame blocks,
+estimates with each motion omitted, and linear/quadratic/cubic mapping estimates,
+then expands by half the median robot sample period. Applying an offset requires
+an interval that excludes zero, stays inside the search range, and is no wider
+than `max(20 ms, 2 × median robot sample period)`. The measured continuous estimate
+is rounded to the nearest 5 ms grid value for authoritative nearest-pose pairing.
+Raw timestamps and poses remain unchanged.
+
+`time_offset_search.json` retains each sensor's `rotational_timing` configuration,
+status, source frame identities, angular search curve, measured offset,
+`confidence_interval_ms`, motion-omission estimates, and mapping sensitivity.
+An accepted measurement uses `improvement_evidence_strategy:
+optical_axis_spin_block_bootstrap.v1`; spatial translation materiality is then
+diagnostic and does not veto an independently identified delay. The spatial
+rotation-degradation guard and final residual/reprojection checks still apply.
+Promotion reproduces the angular measurement from retained IPPE observations
+and the request's hash-bound raw robot poses before accepting it.
+
+When this motion evidence is unavailable or inconclusive, the existing
+motion-disjoint spatial search and search-corrected leave-one-motion-out checks
+remain the fallback. Weak evidence retains 0 ms with a visible warning; 0 ms is
+not a claim that the camera has no delay. Camera-to-SDK arrival time is a separate
+delivery measurement and must not be substituted for image-to-robot alignment.
+
+Angular motion as a timing signal is motivated by
+[Furrer et al., *Evaluation of Combined Time-Offset Estimation and Hand-Eye Calibration on Robotic Datasets*](https://tisl.cs.utoronto.ca/publication/201709-fsr-hand_eye_calibration/fsr17-hand_eye_calibration.pdf).
+The restricted optical-axis selection and uncertainty procedure above are
+PoseTestBot's implementation.
+
 ## Reusable profile selection
 
 | Method and path | Contract |

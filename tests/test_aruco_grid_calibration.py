@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import pytest
 
+from posetestbot.aruco.grid import detect_sensor_folder
 from posetestbot.calibration.intrinsics import (
     IntrinsicCalibrationError,
     calibrate_intrinsic_profile,
@@ -117,14 +118,14 @@ def current_target() -> dict:
         )
     return normalize_calibration_target_spec(
         {
-            "schema_version": "calibration_target.v2",
+            "schema_version": "calibration_target.v3",
             "target_type": "aruco_grid",
             "dictionary": "DICT_5X5_50",
             "grid_size": [3, 2],
             "unit": "mm",
             "frame": {
                 "name": "aruco_grid",
-                "origin": "compensated_outer_board_top_left",
+                "origin": "physical_outer_board_top_left",
                 "axes": {"x": "right", "y": "down", "z": "into_board"},
             },
             "target_bounds": {
@@ -136,7 +137,7 @@ def current_target() -> dict:
             "print_compensation": {
                 "x_percent": 100.0,
                 "y_percent": 100.0,
-                "application": "already_applied",
+                "application": "pdf_only",
             },
             "markers": markers,
         }
@@ -162,6 +163,34 @@ def test_synthetic_intrinsic_recovery(tmp_path: Path) -> None:
     )
     assert profile["rectified"]["distortion"] == [0.0] * 5
     assert profile["depth"]["alignment"]["recalibrated"] is False
+
+
+def test_subpixel_detection_improves_fractional_marker_localization(
+    tmp_path: Path,
+) -> None:
+    folder = tmp_path / "realsense_SUBPIX"
+    (folder / "rgb").mkdir(parents=True)
+    target = current_target()
+    dictionary, _board = opencv_grid_board(target)
+    image = np.full((240, 320), 255, dtype=np.uint8)
+    image[70:170, 100:200] = cv2.aruco.generateImageMarker(dictionary, 0, 100)
+    image = cv2.warpAffine(
+        image,
+        np.asarray([[1.0, 0.0, 0.35], [0.0, 1.0, 0.6]]),
+        (320, 240),
+        borderValue=255,
+    )
+    cv2.imwrite(str(folder / "rgb" / "000000.png"), image)
+    report = detect_sensor_folder(folder, target)
+    refined = np.asarray(report["frames"]["000000.png"]["corners"])[0]
+    plain, _ids, _rejected = cv2.aruco.ArucoDetector(dictionary).detectMarkers(image)
+    expected = np.asarray(
+        [[99.85, 70.1], [199.85, 70.1], [199.85, 170.1], [99.85, 170.1]]
+    )
+    assert np.linalg.norm(refined - expected) < np.linalg.norm(
+        plain[0].reshape(4, 2) - expected
+    )
+    assert report["detector"]["corner_refinement"] == "SUBPIX"
 
 
 def test_intrinsic_coverage_failure_reports_rejected_audit(tmp_path: Path) -> None:

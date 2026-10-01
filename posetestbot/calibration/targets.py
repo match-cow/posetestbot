@@ -13,7 +13,7 @@ import numpy as np
 from posetestbot.io.atomic import atomic_write_json
 
 
-SCHEMA_VERSION = "calibration_target.v2"
+SCHEMA_VERSION = "calibration_target.v3"
 POSEGRIDGEN_SCHEMA_VERSION = "2.0"
 SUPPORTED_TARGET_TYPES = ("aruco_grid",)
 SUPPORTED_ARUCO_DICTIONARIES = frozenset(
@@ -39,14 +39,14 @@ DEFAULT_TARGET_SPEC = {
     "unit": "mm",
     "frame": {
         "name": "aruco_grid",
-        "origin": "compensated_outer_board_top_left",
+        "origin": "physical_outer_board_top_left",
         "axes": {"x": "right", "y": "down", "z": "into_board"},
     },
     "target_bounds": {"x_mm": 0.0, "y_mm": 0.0, "width_mm": 245.0, "height_mm": 180.0},
     "print_compensation": {
         "x_percent": 100.0,
         "y_percent": 100.0,
-        "application": "already_applied",
+        "application": "pdf_only",
     },
     "markers": [
         {
@@ -130,7 +130,7 @@ def _dictionary_capacity(dictionary: str) -> int:
 def _normalized_grid_frame() -> dict[str, Any]:
     return {
         "name": "aruco_grid",
-        "origin": "compensated_outer_board_top_left",
+        "origin": "physical_outer_board_top_left",
         "axes": {"x": "right", "y": "down", "z": "into_board"},
     }
 
@@ -198,13 +198,13 @@ def _normalized_compensation(value: Any) -> dict[str, Any]:
     y_percent = _positive_float(source.get("y_percent", 100.0), label="y_percent")
     if x_percent > 200 or y_percent > 200:
         raise ValueError("Print compensation percentages must not exceed 200")
-    application = str(source.get("application", "already_applied"))
-    if application != "already_applied":
-        raise ValueError("Compensated target geometry must be marked already_applied")
+    application = str(source.get("application", "pdf_only"))
+    if application != "pdf_only":
+        raise ValueError("Print compensation must apply to the PDF only")
     return {
         "x_percent": x_percent,
         "y_percent": y_percent,
-        "application": "already_applied",
+        "application": "pdf_only",
     }
 
 
@@ -357,9 +357,9 @@ def _normalized_placement(value: Any) -> dict[str, Any]:
     return placement
 
 
-def _normalize_v2(value: Mapping[str, Any]) -> dict[str, Any]:
+def _normalize_v3(value: Mapping[str, Any]) -> dict[str, Any]:
     if str(value.get("target_type", "")) != "aruco_grid":
-        raise ValueError("calibration_target.v2 currently supports only aruco_grid")
+        raise ValueError("calibration_target.v3 currently supports only aruco_grid")
     if str(value.get("unit", "")) != "mm":
         raise ValueError("Calibration target geometry must use millimetres")
     dictionary = _validate_dictionary(value.get("dictionary"))
@@ -371,7 +371,7 @@ def _normalize_v2(value: Mapping[str, Any]) -> dict[str, Any]:
     expected_frame = _normalized_grid_frame()
     if not isinstance(frame, Mapping) or dict(frame) != expected_frame:
         raise ValueError(
-            "Calibration target frame must use the compensated board top-left "
+            "Calibration target frame must use the physical board top-left "
             "aruco_grid convention"
         )
     normalized: dict[str, Any] = {
@@ -432,7 +432,7 @@ def normalize_calibration_target_spec(
         raise ValueError("Calibration target must be a JSON object")
     if target.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"Calibration target schema must be {SCHEMA_VERSION!r}")
-    return _normalize_v2(target)
+    return _normalize_v3(target)
 
 
 def target_from_posegridgen_manifest(
@@ -455,11 +455,24 @@ def target_from_posegridgen_manifest(
     features = source.get("features")
     if not isinstance(features, list):
         raise ValueError("PoseGridGen source requires features")
-    markers = [
-        {"id": item.get("id"), "corners_mm": item.get("corners_mm")}
-        for item in features
-        if isinstance(item, Mapping) and item.get("kind") == "marker"
-    ]
+    compensation = _normalized_compensation(
+        {**dict(configuration.get("print_compensation", {})), "application": "pdf_only"}
+    )
+    scale = np.asarray(
+        [compensation["x_percent"] / 100.0, compensation["y_percent"] / 100.0, 1.0]
+    )
+    # PoseGridGen features describe the precompensated PDF. The printer is
+    # expected to restore the nominal dimensions; PnP needs that physical board.
+    markers = []
+    for item in features:
+        if not isinstance(item, Mapping) or item.get("kind") != "marker":
+            continue
+        corners = np.asarray(item.get("corners_mm"), dtype=float)
+        if corners.shape != (4, 3) or not np.isfinite(corners).all():
+            raise ValueError("PoseGridGen marker corners must be finite 4x3 points")
+        markers.append(
+            {"id": item.get("id"), "corners_mm": (corners / scale).round(9).tolist()}
+        )
     target_bounds = source.get("target_bounds")
     if not isinstance(target_bounds, Mapping):
         raise ValueError("PoseGridGen source requires target_bounds")
@@ -473,13 +486,14 @@ def target_from_posegridgen_manifest(
         "target_bounds": {
             "x_mm": 0.0,
             "y_mm": 0.0,
-            "width_mm": target_bounds.get("width_mm"),
-            "height_mm": target_bounds.get("height_mm"),
+            "width_mm": _positive_float(target_bounds.get("width_mm"), label="width_mm")
+            / scale[0],
+            "height_mm": _positive_float(
+                target_bounds.get("height_mm"), label="height_mm"
+            )
+            / scale[1],
         },
-        "print_compensation": {
-            **dict(configuration.get("print_compensation", {})),
-            "application": "already_applied",
-        },
+        "print_compensation": compensation,
         "markers": markers,
         "posegridgen": {
             "revision": None,
@@ -491,7 +505,7 @@ def target_from_posegridgen_manifest(
         target["target_id"] = target_id
     if display_name is not None:
         target["display_name"] = display_name
-    return _normalize_v2(target)
+    return _normalize_v3(target)
 
 
 def load_calibration_target_spec(path: str | Path) -> dict[str, Any]:

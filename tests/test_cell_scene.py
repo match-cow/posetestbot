@@ -305,7 +305,7 @@ def test_scene_composes_frames_sensors_and_exact_timelines(tmp_path: Path) -> No
     assert presentation["presentation_only"] is True
     assert presentation["target_frame"] == {
         "name": "aruco_grid",
-        "origin": "compensated_outer_board_top_left",
+        "origin": "physical_outer_board_top_left",
         "axes": {"x": "right", "y": "down", "z": "into_board"},
     }
     target_to_reference = np.eye(4)

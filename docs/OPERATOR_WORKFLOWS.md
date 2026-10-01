@@ -82,6 +82,15 @@ explicit fixed-zero or automatic time alignment, then inspect intrinsic
 comparison, timestamp evidence, PnP/extrinsic candidates, ranking, checks, and
 per-camera recommendations.
 
+For robot-mounted cameras, automatic alignment now measures angular timing from
+reversible rotations near the viewing axis. Review the measured delay and its
+uncertainty alongside the applied 5 ms grid offset. A small change in spatial
+translation residual does not veto a supported angular timing measurement.
+If timing remains inconclusive, retained 0 ms means the delay was not identified;
+it does not establish that the camera has no delay. Reanalyze the existing
+recording in a new attempt after a timing-policy update. See
+[automatic time alignment](reference/api/calibration.md#automatic-time-alignment).
+
 Compatible factory intrinsics remain the default. An OpenCV fit is activated
 only when factory projection is unusable and the fitted model passes all
 coverage, held-out, plausibility, and error checks. A lower RMS alone is not a

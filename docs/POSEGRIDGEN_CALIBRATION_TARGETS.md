@@ -17,7 +17,7 @@ uv run posetestbot-web
 
 The required revision is
 `9e6975901fe096bf65f7b7b599d7b82461d2e67c`. A missing, dirty, mismatched, or
-wheel-only checkout disables generation. Existing `calibration_target.v2`
+wheel-only checkout disables generation. Existing `calibration_target.v3`
 artifacts remain readable in that state. The status and
 the direct `/calibration-targets` route explain the concrete failure. Navigation,
 saved-bundle browsing, downloads, and run selection remain available even when
@@ -91,13 +91,14 @@ working_data/calibration_targets/<opaque-uuid>/
   calibration_target.pdf
 ```
 
-`calibration_target_bundle.v1` records the UUID, display name, creation time,
+`calibration_target_bundle.v2` records the UUID, display name, creation time,
 pinned generator revision, configuration/geometry hashes, and fixed file paths,
 media types, sizes, and SHA-256 values. Generation stages every file and
 promotes the complete directory atomically. Confirmed deletion is allowed only
-for an inactive library bundle. Bundles from the preceding
-`ad152e369e8d2746d0cf66cb1455f2371b0ec0f0` pin remain compatible and retain
-their original generator provenance; they are never regenerated in place.
+for an inactive library bundle. The preceding generator revision
+`ad152e369e8d2746d0cf66cb1455f2371b0ec0f0` remains compatible as provenance
+for current physical-geometry bundles. This does not make retired target or
+bundle schemas readable; existing bundles are never regenerated in place.
 
 Selection copies the unchanged bundle to
 `<run>/calibration_targets/<target_id>/`, writes the placement-aware root
@@ -122,11 +123,88 @@ timestamps are rewritten. The operator behavior and dataset handoff are
 documented in [OPERATOR_WORKFLOWS.md](OPERATOR_WORKFLOWS.md). Physical
 deployment and acceptance remain in [COMMISSIONING.md](COMMISSIONING.md).
 
-`calibration_target.v2` makes the compensated `corners_mm` for every marker
-authoritative. The target frame is `aruco_grid`, its origin is the compensated
-outer board top-left, +X points right, +Y down, and +Z into the page. Consumers
-use a generic OpenCV `Board`; they do not reconstruct a regular grid or apply
-print compensation again.
+`calibration_target.v3` makes the physical `corners_mm` for every marker
+authoritative. Its frame is `aruco_grid`, with origin
+`physical_outer_board_top_left`, +X right, +Y down, and +Z into the page.
+`print_compensation.application` is `pdf_only`. PoseGridGen's retained source
+features and PDF contain printer precompensation; target import removes that
+X/Y scaling exactly once. Consumers use the physical points in a generic
+OpenCV `Board`, without applying compensation.
+
+For example, seven columns and five rows of 45 mm markers with 10 mm gaps
+produce a physical 375 × 265 mm board. At 100.5% X print compensation the PDF
+spans 376.875 × 265 mm, while calibration still uses 375 × 265 mm and square
+45 mm markers. Measure both outer marker spans before use: compensation is a
+correction for printer shrinkage, not a change to physical marker size.
+
+The old `calibration_target.v2` and `calibration_target_bundle.v1` contracts
+encoded PDF dimensions as physical geometry and are retired. Current readers
+reject them rather than silently changing hashed evidence. Generate a new
+bundle from the retained configuration and select it in a fresh run; preserve
+old bundles, attempts, and profiles for comparison. A recorded-data reanalysis
+must retain the exact original image/robot bytes and capture UUID, record the
+source hashes and measured-size evidence, and write a new attempt and corrected
+profile collection in its separate run directory. No new capture is required.
+
+ArUco detection refines marker corners with OpenCV `SUBPIX` before intrinsic
+and PnP comparison. Detection evidence records the refinement settings; robust
+PnP support checks remain in force.
+
+## Recorded shared-grid refinement
+
+For a completed multi-camera eye-in-hand attempt with an estimated stationary
+grid, the advanced CLI can fit every camera and one shared grid pose directly
+to the retained subpixel corners. Intrinsics, distortion, and the attempt's
+timing offsets stay fixed. This avoids treating an average of independently
+estimated grid poses as a jointly optimized grid.
+
+```bash
+uv run python scripts/refine_calibration_attempt.py working_data/calibration_run \
+  --attempt-id <attempt_id>
+```
+
+Review the new retained report under
+`processed/calibration/<attempt_id>/reprojection_refinement/<refinement_id>/report.json`.
+It records the source hashes, common robust corner support, solver policy,
+bounded optimization, per-camera reprojection, reserved intrinsic views, and
+three motion-disjoint folds. Each fold refits its hand-eye seed using only the
+training motions. Settled frames and reserved intrinsic views are excluded
+from the final transform fit. Reserved views are matched by their preparation
+source-frame identity, since timing correction may renumber synchronized frames.
+At least nine shared motion groups are required.
+Every camera must improve in the motion-disjoint mean and the full-recording
+median against both the shared and individual seed grid references. Incomplete
+or failed evidence cannot be promoted.
+
+Explicitly accept a passing reviewed refinement with:
+
+```bash
+uv run python scripts/refine_calibration_attempt.py working_data/calibration_run \
+  --attempt-id <attempt_id> --refinement-id <refinement_id> \
+  --promote --operator "<reviewer>"
+```
+
+Promotion repeats the normal attempt gates, checks every input/report hash,
+and reproduces the refinement and audit before the atomic canonical-profile
+transaction. Seed rankings and candidate profiles remain unchanged; refined
+profiles have distinct identities, a shared companion pose, and explicit
+refinement provenance. Their translation/rotation quality fields retain the
+seed's leave-one-pose-out results and say so in the quality notes. The refined
+optical audit is recorded separately in profile metadata. The web promotion
+action continues to accept the ordinary seed bundle; refinement acceptance is
+currently CLI-only.
+
+To explicitly replace an already promoted refinement with a different reviewed
+passing report, add `--replace-refinement`. The operation first retains the
+previous promotion request/status and complete canonical profile/configuration
+selection under `promotion_history/<snapshot_id>/`. The new request binds every
+retained file's hash, and promotion checks those hashes before replacing the
+canonical selection. Ordinary repeated promotion remains rejected.
+
+These checks validate recorded image alignment, not independent absolute pose
+accuracy. Timing, intrinsic selection, and corner-support masks are determined
+before the motion split. A measured target and a separate physical object-pose
+check are still needed to establish absolute accuracy.
 
 ## Reselection and preflight
 

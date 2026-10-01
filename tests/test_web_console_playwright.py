@@ -3623,6 +3623,30 @@ def test_shared_dialog_keeps_actions_reachable_in_reduced_desktop_height(
     assert submit_box["y"] + submit_box["height"] <= 505
 
 
+@pytest.mark.parametrize("viewport", [(1920, 1080), (1440, 900)])
+def test_calibration_target_card_distinguishes_physical_size_and_pdf_compensation(
+    console_server, page, viewport: tuple[int, int]
+) -> None:
+    from posetestbot.calibration.posegridgen import posegridgen_capabilities
+
+    page.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+    install_common_mocks(page, generator_available=True, config_payload=eye_in_hand_calibration_config())
+    page.route("**/calibration-targets/capabilities", lambda route: fulfill_json(route, posegridgen_capabilities()))
+    page.route("**/calibration-targets/preview.png", lambda route: route.fulfill(status=200, content_type="image/png", body=b""))
+    page.route("**/calibration-targets/bundles**", lambda route: fulfill_json(route, {
+        "bundles": [{
+            "target_id": "5f09f41c-dd91-44ef-a048-1f43fc990e17",
+            "display_name": "Measured physical grid", "valid": True, "selected": False,
+            "target": {"grid_size": [7,5], "target_bounds": {"width_mm":375, "height_mm":265},
+                       "print_compensation": {"x_percent":100.5, "y_percent":100}},
+        }], "replacement_blockers": [],
+    }))
+    page.goto(f"{console_server.url}/#/calibration-targets", wait_until="networkidle")
+    expect(page.get_by_text("X/Y print compensation changes the PDF only.", exact=False)).to_be_visible()
+    expect(page.get_by_text("375.0 × 265.0 mm physical · PDF 100.5% × 100%", exact=False)).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+
+
 def test_calibration_target_selection_returns_workflow_to_readiness(
     console_server, page
 ) -> None:
@@ -3940,7 +3964,7 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
                     "intrinsics_policies": [],
                     "synchronization": {
                         "implementation_revision": (
-                            "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5"
+                            "constant_latency_nearest_pose_optical_spin.v6"
                         ),
                         "default_policy": "auto_offset",
                         "policies": [
@@ -4752,7 +4776,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                 },
             ],
             "synchronization": {
-                "implementation_revision": "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5",
+                "implementation_revision": "constant_latency_nearest_pose_optical_spin.v6",
                 "default_policy": "auto_offset",
                 "policies": [
                     {
@@ -5081,7 +5105,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
                 ],
             },
             "time_offset_search": {
-                "implementation_revision": "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5",
+                "implementation_revision": "constant_latency_nearest_pose_optical_spin.v6",
                 "policy": "auto_offset",
                 "status": "complete",
                 "sign_convention": {
@@ -5536,7 +5560,7 @@ def calibration_time_alignment_setup(
     latest_attempt_id: str | None,
     latest_status: str = "complete",
     implementation_revision: str | None = (
-        "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5"
+        "constant_latency_nearest_pose_optical_spin.v6"
     ),
 ) -> dict:
     latest_attempt = (
@@ -5724,7 +5748,7 @@ def test_failed_auto_sync_evidence_remains_visible_without_solver_results(
         "intrinsic_comparison": None,
         "time_offset_search": {
             "implementation_revision": (
-                "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5"
+                "constant_latency_nearest_pose_optical_spin.v6"
             ),
             "policy": "auto_offset",
             "status": "failed",
@@ -5895,7 +5919,7 @@ def test_ambiguous_auto_sync_keeps_recorded_timing_with_visible_warning(
         "intrinsic_comparison": None,
         "time_offset_search": {
             "implementation_revision": (
-                "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5"
+                "constant_latency_nearest_pose_optical_spin.v6"
             ),
             "policy": "auto_offset",
             "status": "complete",
@@ -6011,7 +6035,7 @@ def test_fixed_zero_policy_is_submitted_and_reported(
         "intrinsic_comparison": None,
         "time_offset_search": {
             "implementation_revision": (
-                "constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5"
+                "constant_latency_nearest_pose_optical_spin.v6"
             ),
             "policy": "fixed_zero",
             "status": "complete",

@@ -58,6 +58,7 @@ replacing derived output.
 | `run_calibration_target_import.py` | Import a pinned target bundle |
 | `run_calibration_target_select.py` | Snapshot a target into a run |
 | `run_calibration_attempt.py` | Execute one intent-level calibration attempt |
+| `refine_calibration_attempt.py` | Audit a completed wrist-camera bundle against one stationary grid; explicit `--refinement-id … --promote` accepts a reviewed passing report |
 | `validate_calibration_profiles.py` | Validate current calibration profiles |
 | `run_pose_template_orientation_analysis.py` | Analyze stable orientations for one canonical workpiece revision |
 | `run_pose_template_preview.py` | Produce an exact bounded template preview |
@@ -67,6 +68,10 @@ replacing derived output.
 Calibration review and promotion are explicit workflow/API operations. The
 removed observations/candidates/solver/validation stage chain has no CLI
 entry points.
+
+The advanced shared-grid refinement command consumes existing recorded attempt
+evidence and does not access hardware. Its report and explicit acceptance
+contract are described in [Calibration targets](../POSEGRIDGEN_CALIBRATION_TARGETS.md#recorded-shared-grid-refinement).
 
 ## Optional annotations and Inspect evaluation
 
