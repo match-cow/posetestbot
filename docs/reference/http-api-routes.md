@@ -2,9 +2,9 @@
 
 # Complete HTTP route index
 
-This index contains all **128** non-static Flask rules registered by
+This index contains all **131** non-static Flask rules registered by
 `posetestbot.web.app.create_app`, rendered as
-**132** method-specific operations. It is generated from the
+**135** method-specific operations. It is generated from the
 running route map, so aliases remain explicit and every application-declared
 method has its own row. Flask's implicit `HEAD` and `OPTIONS` methods are
 excluded.
@@ -36,6 +36,9 @@ uv run python scripts/generate_http_api_reference.py --check
 | `GET` | `/bop/evaluation/setup` | JSON | Bop evaluation setup | `bop_evaluation.bop_evaluation_setup` |
 | `POST` | `/bop/evaluations` | JSON | Queue bop evaluation | `bop_evaluation.queue_bop_evaluation` |
 | `GET` | `/bop/evaluations/<evaluation_id>/report` | File | Download bop evaluation report | `bop_evaluation.download_bop_evaluation_report` |
+| `POST` | `/bop/inspection/exports` | JSON | Queue bop inspection export | `bop_inspection.queue_bop_inspection_export` |
+| `GET` | `/bop/inspection/exports/<export_id>` | JSON | Bop inspection export status | `bop_inspection.bop_inspection_export_status` |
+| `GET` | `/bop/inspection/exports/<export_id>/download` | File | Bop inspection export download | `bop_inspection.bop_inspection_export_download` |
 | `GET` | `/bop/inspection/frame` | JSON | Bop inspection frame | `bop_inspection.bop_inspection_frame` |
 | `GET` | `/bop/inspection/frames` | JSON | Bop inspection frames | `bop_inspection.bop_inspection_frames` |
 | `GET` | `/bop/inspection/masks/<result_id>/<int:scene_id>/<int:im_id>/<int:gt_id>/<kind>` | PNG | Bop inspection mask | `bop_inspection.bop_inspection_mask` |

@@ -1192,6 +1192,7 @@ export interface BopInspectionSetup {
   scenes: BopInspectionScene[]
   blockers: BopEvaluationIssue[]
   limits: { max_page_size: number; max_hypotheses: number }
+  exports?: { zip: { available: boolean }; mp4: { available: boolean; reason: string | null } }
   visualization_contract?: {
     projection: string
     renderer_coordinates: string
@@ -1315,6 +1316,39 @@ export interface BopEvaluationMetric {
   value: number
   display: string
   unit?: string | null
+  source?: "ipd"
+  direction?: "lower"
+}
+
+export interface BopRobotConsistency {
+  status: "available" | "partial" | "unavailable"
+  reason: string | null
+  source_url: string
+  implementation_revision: string
+  matching_threshold_mm: number
+  eligible_frames: number
+  matched_frames: number
+  coverage: number | null
+  prediction_count: number
+  unmatched_predictions: number
+  track_count: number
+  evaluated_track_count: number
+  tracks_truncated: boolean
+  excluded_scenes: { scene_id: number; status: string; reason: string }[]
+  warnings: string[]
+  tracks: {
+    scene_id: number
+    sensor_name: string
+    instance_uuid: string
+    obj_id: number
+    status: "available" | "unavailable"
+    reason?: string
+    eligible_frames: number
+    matched_frames: number
+    coverage: number
+    mvd_mm?: number
+    add_mm?: number
+  }[]
 }
 
 export interface BopEvaluationSummary {
@@ -1328,6 +1362,7 @@ export interface BopEvaluationSummary {
   protocol: string
   status: string
   metrics: BopEvaluationMetric[]
+  robot_consistency?: BopRobotConsistency | null
   sensor_scope?: BopResultSensorScope | null
   sensor_scoped: boolean
   comparability: string

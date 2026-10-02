@@ -14,7 +14,7 @@ PoseTestBot owns:
 - calibration, timestamp alignment, and synchronization-quality evidence;
 - reusable workpiece and pose-template libraries with immutable run snapshots;
 - optional GT/mask generation and BOP dataset export; and
-- run-scoped, read-only frame inspection and official evaluation of an existing
+- run-scoped frame inspection, requested visualization downloads, and official evaluation of an existing
   BOP dataset and immutable standard BOP19 result CSV.
 
 Pose estimators, estimator-specific conversion, SSH credentials, and SLURM

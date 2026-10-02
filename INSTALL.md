@@ -1,5 +1,9 @@
 # PoseTestBot Installation
 
+For the standard installation, console launch, and MP4 setup, start with
+[Installation and first launch](docs/getting-started/installation.md).
+This guide covers the detailed lab SDK and optional runtime setup.
+
 PoseTestBot is acquisition-first: the repository captures, calibrates,
 synchronizes, optionally prepares ground-truth/masks, and exports BOP datasets.
 Its only evaluation runtime is the optional Inspect-only official BOP19
@@ -68,6 +72,12 @@ Omit `--with-bop-toolkit` only when neither **Inspect → BOP Evaluation** nor t
 evaluation-compatible **Pose + masks** ground-truth product is needed.
 Annotation-free export and plain pose GT remain usable; the console reports the
 missing optional runtime at the affected controls.
+
+Inspect evaluations also calculate IPD robot-consistency MVD/ADD from retained
+robot/calibration evidence. The calculation uses the existing NumPy, SciPy,
+pytransform3d, and trimesh dependencies; no IPD package or new runtime is
+required. Check-only installation validates the metric module's imports.
+The BOP evaluation job still requires the pinned toolkit runtime.
 
 Use check-only mode to inspect an already configured environment without
 installing or syncing:
@@ -448,9 +458,24 @@ progress, adapter/provenance, toolkit outputs, and final metric report below
 `processed/bop_evaluation/evaluations/<evaluation_id>/`. These are derived
 inspection artifacts; the exported `bop/` dataset and raw capture evidence are
 not modified. **Inspect → Pose Results** serves validated existing RGB/depth,
-mask, model, GT, and estimate evidence read-only. Its browser-local x-ray
-overlays and frame controls create no run artifacts; when WebGL is unavailable,
-the image/mask and numeric inspection path remains usable.
+mask, model, GT, and estimate evidence. Its browser-local x-ray controls create
+no run artifacts until **Download images (.zip)** or **Create & download MP4**
+is requested. These CPU/disk jobs retain settings, source hashes, progress,
+and outputs under `processed/bop_evaluation/visualizations/<export_id>/`.
+They require no graphics context; browser image/mask and numeric inspection
+also remain usable without WebGL.
+
+MP4 export requires FFmpeg with the `libx264` encoder. ZIP export uses the
+existing Python dependencies and remains available without FFmpeg. Follow the
+[MP4 setup instructions](docs/getting-started/installation.md#pose-results-mp4-exports)
+to install and check the encoder.
+
+FFmpeg's package also supplies `ffprobe` for the real-video regression test.
+Video uses H.264 CRF 18, preset `medium`, `yuv420p`, no audio, and MP4 fast-start
+metadata. Odd dimensions are padded on the right/bottom to even dimensions;
+the source image is never resized. FPS is an integer from 1–120 (default 30).
+The corresponding documentation is [libx264 encoding](https://ffmpeg.org/ffmpeg-codecs.html#libx264_002c-libx264rgb)
+and [MP4 muxing](https://ffmpeg.org/ffmpeg-formats.html#mov_002c-mp4_002c-ismv).
 
 New annotation-bearing exports use the official BOP19 visibility target rule
 (`visib_fract >= 0.1`). Inspect warns when an older export's target list does

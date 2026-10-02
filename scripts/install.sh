@@ -183,6 +183,7 @@ install_system_packages() {
     build-essential
     ca-certificates
     curl
+    ffmpeg
     git
     libgl1
     libglib2.0-0
@@ -430,6 +431,7 @@ modules = [
     "pytransform3d",
     "trimesh",
     "posetestbot.web.app",
+    "posetestbot.bop.robot_consistency",
     "posetestbot.cluster.client",
     "posetestbot.cluster.controller_service",
 ]
@@ -469,6 +471,13 @@ run_readiness_checks() {
 
   log "Checking required Python imports."
   run_import_smoke
+
+  log "Checking optional Pose Results MP4 export (FFmpeg/libx264)."
+  uv_python -c '
+from posetestbot.bop.inspection_exports import mp4_status
+status = mp4_status()
+print("FFmpeg/libx264 OK" if status["available"] else status["reason"])
+'
 
   if [[ "${WITH_POSEGRIDGEN}" == true ]]; then
     log "Checking the pinned PoseGridGen backend and renderer capabilities."

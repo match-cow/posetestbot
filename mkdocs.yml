@@ -75,6 +75,7 @@ nav:
   - System design:
       - Architecture and boundaries: concepts/architecture.md
       - Runs and artifact lineage: concepts/runs-and-artifacts.md
+      - Robot consistency metric: concepts/robot-consistency.md
       - Safety and authorization: concepts/safety.md
   - HTTP API:
       - API conventions: reference/http-api.md

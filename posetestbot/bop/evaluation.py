@@ -950,7 +950,10 @@ def _normalize_selected_scene_ids(
     eligible = sorted(set(eligible_scene_ids))
     if not isinstance(values, list) or not values:
         raise ValueError(f"{label} must be a nonempty JSON array")
-    if any(isinstance(item, bool) or not isinstance(item, int) or item < 1 for item in values):
+    if any(
+        isinstance(item, bool) or not isinstance(item, int) or item < 1
+        for item in values
+    ):
         raise ValueError(f"{label} must contain positive integer BOP scene IDs")
     if len(set(values)) != len(values):
         raise ValueError(f"{label} must not contain duplicate BOP scene IDs")
@@ -990,9 +993,7 @@ def _validated_sensor_scope(
         not in {"continuous_tracking", "independent_registration"}
     ):
         raise ValueError("Stored result sensor scope is unsupported")
-    eligible = sorted(
-        {int(target["scene_id"]) for target in inventory["targets"]}
-    )
+    eligible = sorted({int(target["scene_id"]) for target in inventory["targets"]})
     if value.get("eligible_scene_ids") != eligible:
         raise ValueError("Stored result sensor scope no longer matches the dataset")
     selected = _normalize_selected_scene_ids(
@@ -1047,8 +1048,7 @@ def _foundationpose_execution_evidence(
     )
     if (
         value.get("oracle_mask_contract") != "bop_mask_visib_gt_instance.v1"
-        or value.get("score_contract")
-        != "constant_1.0_no_detection_confidence"
+        or value.get("score_contract") != "constant_1.0_no_detection_confidence"
         or value.get("execution_contract") != expected_execution_contract
     ):
         raise ValueError("FoundationPose v2 execution contracts are invalid")
@@ -1114,9 +1114,7 @@ def _foundationpose_execution_evidence(
     }
     for index, raw in enumerate(raw_segments):
         if not isinstance(raw, Mapping) or set(raw) != segment_fields:
-            raise ValueError(
-                f"FoundationPose v2 track segment {index + 1} is invalid"
-            )
+            raise ValueError(f"FoundationPose v2 track segment {index + 1} is invalid")
         scene_id = raw.get("scene_id")
         obj_id = raw.get("obj_id")
         start_im_id = raw.get("start_im_id")
@@ -1139,7 +1137,10 @@ def _foundationpose_execution_evidence(
             reinitialization_count,
         )
         if (
-            any(isinstance(item, bool) or not isinstance(item, int) for item in integer_values)
+            any(
+                isinstance(item, bool) or not isinstance(item, int)
+                for item in integer_values
+            )
             or scene_id not in scene_sensors
             or obj_id not in object_ids
             or start_im_id < 0
@@ -1160,9 +1161,8 @@ def _foundationpose_execution_evidence(
                         (scene_id, obj_id), []
                     )
                 )
-                or (
-                    target_index := bisect_left(target_image_ids, start_im_id)
-                ) >= len(target_image_ids)
+                or (target_index := bisect_left(target_image_ids, start_im_id))
+                >= len(target_image_ids)
                 or target_image_ids[target_index] > end_im_id
             )
         ):
@@ -1172,7 +1172,10 @@ def _foundationpose_execution_evidence(
         segments.append({field: raw[field] for field in sorted(segment_fields)})
 
     raw_failures = value.get("failures")
-    if not isinstance(raw_failures, list) or len(raw_failures) != counts["failure_count"]:
+    if (
+        not isinstance(raw_failures, list)
+        or len(raw_failures) != counts["failure_count"]
+    ):
         raise ValueError("FoundationPose v2 failure evidence is invalid")
     failure_identities: list[dict[str, Any]] = []
     for index, raw in enumerate(raw_failures):
@@ -1233,7 +1236,10 @@ def _foundationpose_execution_evidence(
         raise ValueError("FoundationPose v2 image timing evidence is invalid")
     normalized_timings: list[tuple[int, int, float]] = []
     for raw_key, raw_timing in raw_timings.items():
-        if not isinstance(raw_key, str) or re.fullmatch(r"[0-9]+/[0-9]+", raw_key) is None:
+        if (
+            not isinstance(raw_key, str)
+            or re.fullmatch(r"[0-9]+/[0-9]+", raw_key) is None
+        ):
             raise ValueError("FoundationPose v2 image timing key is invalid")
         scene_text, image_text = raw_key.split("/", 1)
         scene_id = int(scene_text)
@@ -1250,8 +1256,7 @@ def _foundationpose_execution_evidence(
     normalized_timings.sort(key=lambda item: item[:2])
     retained_timings = normalized_timings[:IMAGE_TIMING_RECORD_LIMIT]
     image_timings = {
-        f"{scene_id}/{im_id}": timing
-        for scene_id, im_id, timing in retained_timings
+        f"{scene_id}/{im_id}": timing for scene_id, im_id, timing in retained_timings
     }
 
     return {
@@ -1300,15 +1305,14 @@ def _foundationpose_v2_scope(
     }:
         raise ValueError("FoundationPose v2 provenance has invalid estimator settings")
     execution_mode = settings.get("execution_mode")
-    if (
-        settings.get("schema_version") != CLUSTER_JOB_SETTINGS_SCHEMA
-        or execution_mode
-        not in {"continuous_tracking", "independent_registration"}
-    ):
+    if settings.get(
+        "schema_version"
+    ) != CLUSTER_JOB_SETTINGS_SCHEMA or execution_mode not in {
+        "continuous_tracking",
+        "independent_registration",
+    }:
         raise ValueError("FoundationPose v2 estimator settings are unsupported")
-    eligible = sorted(
-        {int(target["scene_id"]) for target in inventory["targets"]}
-    )
+    eligible = sorted({int(target["scene_id"]) for target in inventory["targets"]})
     selected = _normalize_selected_scene_ids(
         settings.get("selected_scene_ids"),
         eligible_scene_ids=eligible,
@@ -1352,14 +1356,13 @@ def _foundationpose_v2_scope(
         or value.get("selected_target_inventory_sha256")
         != _target_inventory_sha256(selected_rows)
         or counts["selected_target_count"] != selected_count
-        or counts["selected_scope_excluded_target_count"]
-        != full_count - selected_count
-        or counts["processed_target_count"]
-        + counts["profile_excluded_target_count"]
+        or counts["selected_scope_excluded_target_count"] != full_count - selected_count
+        or counts["processed_target_count"] + counts["profile_excluded_target_count"]
         != selected_count
         or counts["estimate_count"] + counts["failure_count"]
         != counts["processed_target_count"]
-        or counts["registration_count"] + counts["tracking_count"]
+        or counts["registration_count"]
+        + counts["tracking_count"]
         - counts["reinitialization_count"]
         != counts["processed_target_count"]
         or counts["reinitialization_count"] > counts["registration_count"]
@@ -1368,8 +1371,7 @@ def _foundationpose_v2_scope(
             and (
                 counts["tracking_count"] != 0
                 or counts["reinitialization_count"] != 0
-                or counts["registration_count"]
-                != counts["processed_target_count"]
+                or counts["registration_count"] != counts["processed_target_count"]
             )
         )
     ):
@@ -2161,9 +2163,7 @@ def import_external_bop_result(
             source,
             dataset=dataset,
             selected_scene_ids=(
-                sensor_scope["selected_scene_ids"]
-                if sensor_scope is not None
-                else None
+                sensor_scope["selected_scene_ids"] if sensor_scope is not None else None
             ),
         )
         provenance = _external_result_provenance(
@@ -2590,7 +2590,10 @@ def result_provenance_path(run_root: str | Path, result_id: str) -> Path:
     if not isinstance(expected_hash, str) or _sha256_file(path) != expected_hash:
         raise RuntimeError("Retained controller provenance integrity check failed")
     expected_size = result.get("controller_provenance_size_bytes")
-    if expected_size is not None and path.stat(follow_symlinks=False).st_size != expected_size:
+    if (
+        expected_size is not None
+        and path.stat(follow_symlinks=False).st_size != expected_size
+    ):
         raise RuntimeError("Retained controller provenance size changed")
     return path
 
@@ -2638,9 +2641,7 @@ def _public_sensor_scope(value: Any) -> dict[str, Any] | None:
         "execution_mode": value["execution_mode"],
         "selected_scene_ids": sorted(selected),
         "eligible_scene_ids": sorted(eligible),
-        "selected_target_inventory_sha256": value[
-            "selected_target_inventory_sha256"
-        ],
+        "selected_target_inventory_sha256": value["selected_target_inventory_sha256"],
         "selected_target_count": selected_count,
         "full_dataset_target_count": full_count,
         "excluded_target_count": excluded_count,
@@ -2811,8 +2812,7 @@ def result_package_bytes(
         "provenance": provenance_descriptor,
     }
     manifest_bytes = (
-        json.dumps(manifest, indent=2, sort_keys=True, separators=(",", ": "))
-        + "\n"
+        json.dumps(manifest, indent=2, sort_keys=True, separators=(",", ": ")) + "\n"
     ).encode("utf-8")
     output = io.BytesIO()
     with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_STORED) as archive:
@@ -2876,9 +2876,7 @@ def create_evaluation_request(
             result_path,
             dataset=dataset,
             selected_scene_ids=(
-                sensor_scope["selected_scene_ids"]
-                if sensor_scope is not None
-                else None
+                sensor_scope["selected_scene_ids"] if sensor_scope is not None else None
             ),
         )
         if validation["sha256"] != result["sha256"]:
@@ -2886,6 +2884,18 @@ def create_evaluation_request(
                 "Registered BOP result CSV no longer matches its immutable hash"
             )
 
+    from posetestbot.bop import robot_consistency
+
+    inventory = _dataset_inventory(run_root)
+    selected_targets = _canonical_target_inventory(
+        inventory,
+        selected_scene_ids=(
+            sensor_scope["selected_scene_ids"] if sensor_scope else None
+        ),
+    )
+    robot_inputs = robot_consistency.freeze_inputs(
+        Path(run_root), inventory["manifest"], selected_targets
+    )
     evaluation_id = f"evaluation-{uuid.uuid4().hex[:12]}"
     request_value = {
         "schema_version": "bop_evaluation_request.v1",
@@ -2911,6 +2921,13 @@ def create_evaluation_request(
     folder = _evaluation_dir(run_root, evaluation_id)
     folder.mkdir(parents=True, exist_ok=False)
     try:
+        robot_inputs_path = folder / robot_consistency.INPUTS_FILENAME
+        atomic_write_json(robot_inputs_path, robot_inputs)
+        robot_inputs_path.chmod(0o444)
+        request_value["robot_consistency"] = {
+            "implementation_revision": robot_consistency.REVISION,
+            "inputs_sha256": _sha256_file(robot_inputs_path),
+        }
         atomic_write_json(folder / EVALUATION_REQUEST, request_value)
         atomic_write_json(
             folder / EVALUATION_PROGRESS,
@@ -3013,6 +3030,7 @@ def list_evaluations(
                 else progress.get("status", "queued")
             ),
             "metrics": report.get("metrics", []) if report else [],
+            "robot_consistency": report.get("robot_consistency") if report else None,
             "sensor_scope": (
                 report.get("sensor_scope")
                 if report is not None
@@ -3170,7 +3188,7 @@ def run_evaluation_request(
     *,
     app_root: str | Path,
 ) -> dict[str, Any]:
-    """Resolve one queued request and run official BOP19 metric scripts."""
+    """Run official BOP19 scripts and IPD consistency for one frozen request."""
 
     path = Path(request_path).absolute()
     if not path.is_file() or path.is_symlink():
@@ -3199,6 +3217,29 @@ def run_evaluation_request(
         message="Validating immutable dataset and result inputs.",
     )
     try:
+        from posetestbot.bop import robot_consistency
+
+        robot_inputs_path = path.parent / robot_consistency.INPUTS_FILENAME
+        robot_request = request_value.get("robot_consistency")
+        if (
+            not isinstance(robot_request, Mapping)
+            or robot_request.get("implementation_revision")
+            != robot_consistency.REVISION
+            or not _plain_file(robot_inputs_path, root=run_root)
+            or _sha256_file(robot_inputs_path) != robot_request.get("inputs_sha256")
+        ):
+            raise ValueError(
+                "Robot consistency frozen inputs failed integrity validation"
+            )
+        robot_inputs = _load_json(robot_inputs_path)
+        if (
+            robot_inputs.get("schema_version") != "bop_robot_consistency_inputs.v1"
+            or robot_inputs.get("implementation_revision") != robot_consistency.REVISION
+        ):
+            raise ValueError(
+                "Unsupported robot consistency input schema or implementation"
+            )
+        robot_consistency.verify_sources(run_root, robot_inputs)
         dataset = inspect_dataset(run_root, include_depth_content=True)
         if not dataset["evaluation_ready"]:
             raise ValueError(
@@ -3292,9 +3333,7 @@ def run_evaluation_request(
         selected_scene_ids = (
             list(result_scope["selected_scene_ids"])
             if result_scope is not None
-            else sorted(
-                {int(target["scene_id"]) for target in inventory["targets"]}
-            )
+            else sorted({int(target["scene_id"]) for target in inventory["targets"]})
         )
         result_path = result_file_path(
             run_root,
@@ -3438,6 +3477,25 @@ def run_evaluation_request(
             check=True,
         )
 
+        _write_progress(
+            path,
+            evaluation_id=evaluation_id,
+            status="running",
+            message="Computing IPD robot consistency and matching coverage.",
+        )
+        robot_report = robot_consistency.evaluate(
+            run_root, result_path, inventory["manifest"], selected_targets, robot_inputs
+        )
+        robot_report["inputs_sha256"] = robot_request["inputs_sha256"]
+        robot_report["result_sha256"] = result["sha256"]
+        robot_report["dataset_sha256"] = dataset["dataset_sha256"]
+        robot_report_path = path.parent / robot_consistency.REPORT_FILENAME
+        if robot_report_path.exists() and not _plain_file(
+            robot_report_path, root=run_root
+        ):
+            raise ValueError("Robot consistency output is not a regular run-owned file")
+        atomic_write_json(robot_report_path, robot_report)
+
         if _sha256_file(result_path) != result["sha256"]:
             raise ValueError(
                 "Resolved BOP result changed while the metrics were running"
@@ -3455,6 +3513,11 @@ def run_evaluation_request(
             raise ValueError(
                 "BOP evaluation dataset changed while the metrics were running"
             )
+        if _sha256_file(robot_inputs_path) != robot_request["inputs_sha256"]:
+            raise ValueError(
+                "Robot consistency frozen inputs changed during evaluation"
+            )
+        robot_consistency.verify_sources(run_root, robot_inputs)
 
         result_name = result_path.name.split(".", 1)[0]
         official_scores_path = toolkit_eval / result_name / "scores_bop19.json"
@@ -3485,11 +3548,18 @@ def run_evaluation_request(
                 if result_scope is not None and result_scope["is_sensor_scoped"]
                 else "full_dataset_target_inventory"
             ),
-            "metrics": _metric_values(scores),
+            "metrics": [*_metric_values(scores), *robot_report["metrics"]],
+            "robot_consistency": robot_consistency.public_summary(robot_report),
             "official_scores": dict(scores),
             "provenance": {
                 "toolkit_revision": TOOLKIT_REVISION,
                 "adapter_revision": DATASET_ADAPTER_REVISION,
+                "robot_consistency_revision": robot_consistency.REVISION,
+                "robot_consistency_inputs_sha256": robot_request["inputs_sha256"],
+                "robot_consistency_report_path": _relative_to_run(
+                    robot_report_path, run_root
+                ),
+                "robot_consistency_report_sha256": _sha256_file(robot_report_path),
                 "renderer_type": request_value["renderer_type"],
                 "vsd_delta_mm": request_value["vsd_delta_mm"],
                 "num_workers": request_value["num_workers"],
@@ -3515,7 +3585,7 @@ def run_evaluation_request(
             path,
             evaluation_id=evaluation_id,
             status="succeeded",
-            message="Official BOP19 metrics and provenance are available.",
+            message="Official BOP19 metrics, robot consistency evidence, and provenance are available.",
         )
         return report
     except Exception as exc:

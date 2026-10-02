@@ -21,6 +21,9 @@
   <sub>Architecture, operator workflows, HTTP APIs, schemas, artifacts, and command reference.</sub>
 </p>
 
+**Install and start here:** [Installation and first launch](docs/getting-started/installation.md),
+including [FFmpeg setup for MP4 downloads](docs/getting-started/installation.md#pose-results-mp4-exports).
+
 PoseTestBot is an acquisition-first system for building 6D object-pose
 datasets from robot-mounted and static RGB-D cameras. It brings camera
 calibration, robot-aware capture, synchronization, optional ground-truth
@@ -88,7 +91,8 @@ not contain or execute pose-estimator code and does not convert proprietary
 estimator output.
 
 The **Inspect → BOP Evaluation** page is intentionally limited to dataset
-validation. It can apply the pinned official BOP19 metrics to an already
+validation. It can apply the pinned official BOP19 metrics and
+[IPD robot consistency](docs/concepts/robot-consistency.md) to an already
 compatible result CSV, or to a clearly labelled deterministic test result
 derived from ground truth. Evaluation evidence remains run-scoped and is never
 an acquisition stage.
@@ -117,7 +121,10 @@ per-estimator history, while **Jobs** exposes collection and result handoffs
 only for entries proven to belong to the active run. Every collected job keeps
 a distinct immutable result ID. **Inspect → Pose Results** then provides a
 read-only, URL-addressable RGB/depth, mask, geometry, and numeric comparison
-against GT; it writes no visualization artifacts.
+against GT. Explicit image ZIP and MP4 downloads save the selected scene's
+matching frames and frozen viewer settings below
+`processed/bop_evaluation/visualizations/`, using cancelable CPU/disk jobs.
+MP4 requires FFmpeg/libx264; PNG ZIP export remains available without it.
 Retained results also expose hash-checked CSV/provenance downloads and a
 deterministic path-free package.
 It never becomes an acquisition stage. The browser never receives a controller
@@ -148,7 +155,7 @@ calibration captures.
 ## Run the Console
 
 PoseTestBot uses Python 3.12 and `uv`. Follow the
-[installation guide](INSTALL.md) for SDK and optional-tool setup, then start
+[installation and first launch guide](docs/getting-started/installation.md), then start
 the operator console with:
 
 ```bash
@@ -163,7 +170,8 @@ it only on the trusted lab network, or bind it to localhost for local use.
 - [Technical documentation](https://match-cow.github.io/posetestbot/)
 - [GitHub Pages maintenance](docs/GITHUB_PAGES.md)
 - [Operator workflows](docs/OPERATOR_WORKFLOWS.md)
-- [Installation and runtime requirements](INSTALL.md)
+- [Installation and first launch](docs/getting-started/installation.md)
+- [Detailed lab SDK and runtime setup](INSTALL.md)
 - [Workpiece Catalogue](docs/WORKPIECE_CATALOGUE.md)
 - [Pose templates and object ground truth](docs/POSETEMPLATECREATOR_OBJECT_GT.md)
 - [Physical commissioning](docs/COMMISSIONING.md)

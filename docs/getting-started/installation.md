@@ -1,8 +1,15 @@
 # Installation and first launch
 
-The authoritative full host setup is [`INSTALL.md`](https://github.com/match-cow/PoseTestBot/blob/main/INSTALL.md).
-This page contains the minimum software-only path and the documentation build.
-Neither path commands the robot or starts physical capture.
+Inspect's [IPD robot-consistency metric](../concepts/robot-consistency.md) uses
+the existing NumPy, SciPy, pytransform3d, and trimesh dependencies; no additional
+IPD runtime is installed. The installer smoke-checks its module, and the shared
+BOP evaluation job requires the pinned official toolkit.
+
+Start here to install PoseTestBot, launch the console, and enable MP4 downloads.
+Run the commands below from the repository root. These setup commands do not
+command the robot or start physical capture. Optional camera SDKs, BlenderProc,
+and BOP Toolkit have detailed instructions in the
+[lab SDK and runtime setup guide](https://github.com/match-cow/PoseTestBot/blob/main/INSTALL.md).
 
 ## Project environment
 
@@ -52,6 +59,25 @@ POSETESTBOT_WEB_HOST=127.0.0.1 uv run posetestbot-web
 ```
 
 Open <http://127.0.0.1:5000/>. The default port is `5000`.
+
+## Pose Results MP4 exports
+
+**Inspect → Pose Results → Create & download MP4** requires FFmpeg with the
+`libx264` encoder. On Ubuntu/Debian, install the system packages and check the
+environment:
+
+```bash
+bash scripts/install.sh --with-system-packages
+bash scripts/install.sh --check-only
+```
+
+The system-package step uses `sudo` and installs the project's lab prerequisites,
+including `ffmpeg` and `ffprobe`. The check reports whether `libx264` is available.
+Return to Pose Results after installation to enable MP4 exports.
+
+Missing FFmpeg disables MP4 with a visible explanation. **Download images (.zip)**
+works with the project's Python environment. This optional renderer does not
+affect acquisition runtime readiness.
 
 ## Build this documentation
 

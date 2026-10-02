@@ -8,7 +8,8 @@ separate consumer repo. The sole evaluation exception is the **Inspect** page's
 run-scoped dataset-validation path: it consumes an already exported,
 annotation-bearing BOP dataset plus an immutable standard BOP19 result CSV (or
 a deterministic test-only GT perturbation), invokes the pinned official BOP
-Toolkit, and writes derived evidence only below `processed/bop_evaluation/`.
+Toolkit, adds IPD robot consistency from hash-bound recorded robot/calibration
+evidence, and writes derived evidence only below `processed/bop_evaluation/`.
 It is not an estimator, converter, or acquisition stage.
 The separate `match-cow/posetestbot-cluster` companion may own SSH transfer,
 durable SLURM orchestration, an estimator-driver registry with pinned runtimes
@@ -192,7 +193,10 @@ Keep or extend these areas:
   run-selection, and object-instance preparation contracts.
 - `scripts/run_bop_export_stage.py` and `posetestbot.bop.writer`.
 - The narrow Inspect-only `posetestbot.bop.evaluation` adapter, its official
-  BOP Toolkit runtime bridge, and its run-scoped result/report APIs. It may
+  BOP Toolkit runtime bridge, `posetestbot.bop.robot_consistency`, and its
+  run-scoped result/report APIs. Robot consistency uses IPD's arithmetic pose
+  mean and MVD/ADD in millimetres, with explicit instance-matching coverage.
+  It must retain frozen source hashes and never read hardware. The adapter may
   import already compatible BOP19 CSVs or create deterministic test-only
   slight-offset results from GT, but must write only below
   `processed/bop_evaluation/` and must never become an acquisition stage.
@@ -213,7 +217,7 @@ Do not expand the Inspect-only exception into downstream behavior:
   the only estimator-orchestration boundary.
 - No BOP19 result CSV conversion stage.
 - No general evaluator bridge or evaluation stage beyond the
-  run-scoped official BOP19 metrics described above.
+  run-scoped official BOP19 and IPD robot-consistency metrics described above.
 - No accuracy or metric-report export stage outside the Inspect adapter.
 
 ## Important Artifacts
@@ -283,6 +287,23 @@ Do not expand the Inspect-only exception into downstream behavior:
   `progress.json`, resolved-source and dataset-adapter evidence, official
   toolkit output, and `report.json` below
   `processed/bop_evaluation/evaluations/<evaluation_id>/`.
+- Explicit offline saved-GT comparisons reuse completed Inspect evaluations and
+  retain frozen source hashes, per-frame GT/consistency data, interactive HTML,
+  scientific figures, and a publication manifest below an evaluated input run's
+  `processed/bop_evaluation/comparisons/<comparison_id>/`. They never run an
+  estimator or change a source dataset.
+- IPD robot consistency retains immutable `robot_consistency_inputs.json`
+  and derived `robot_consistency.json` in that same evaluation directory.
+  The inputs bind the original exported calibration, frame/instance maps,
+  GT provenance, prepared camera poses, and matched robot poses. Missing
+  evidence or fewer than two matched robot-driven viewpoints is explicitly
+  unavailable, never a zero score; corrupt/contradictory evidence fails closed.
+- Explicit Pose Results visualization exports retain frozen requests, source
+  identities/content hashes, job progress, manifests, and atomically published
+  PNG ZIP or H.264 MP4 outputs below
+  `processed/bop_evaluation/visualizations/<export_id>/`. Use cancelable
+  `LocalJobRunner` CPU/disk jobs; this is an Inspect-only derived view, never
+  an acquisition/estimator stage. MP4 requires FFmpeg/libx264; ZIP does not.
 
 ## Workpiece Catalogue Contracts
 

@@ -27,7 +27,7 @@ delete work. Switching context does not modify either run.
 | Pose Templates | Global immutable template authoring and run selection | Confirm placement in dataset step 2 |
 | Run Folders | Contained run inventory, move/delete, and cluster archive copy/restore/delete | Choose a root before creating configuration |
 | Pose Estimation | Browser-safe handoff with closed, driver-advertised settings | Requires an appropriate completed BOP export; results return to Inspect |
-| Pose Results | Read-only frame-level estimate/GT comparison | Consumes one retained compatible result; links to evaluation or back to the external handoff |
+| Pose Results | Frame-level estimate/GT comparison and image/video downloads | Consumes one retained compatible result; retains requested visualizations and links to evaluation or the dataset workflow |
 | BOP Evaluation | Inspect-only standard-result validation | Requires annotations and an immutable BOP19 CSV |
 
 ## Outcome 1: calibrate cameras
@@ -81,6 +81,15 @@ Create one intent-level attempt for the selected cameras and target. Choose
 explicit fixed-zero or automatic time alignment, then inspect intrinsic
 comparison, timestamp evidence, PnP/extrinsic candidates, ranking, checks, and
 per-camera recommendations.
+
+For robot-mounted cameras, automatic alignment now measures angular timing from
+reversible rotations near the viewing axis. Review the measured delay and its
+uncertainty alongside the applied 5 ms grid offset. A small change in spatial
+translation residual does not veto a supported angular timing measurement.
+If timing remains inconclusive, retained 0 ms means the delay was not identified;
+it does not establish that the camera has no delay. Reanalyze the existing
+recording in a new attempt after a timing-policy update. See
+[automatic time alignment](reference/api/calibration.md#automatic-time-alignment).
 
 Compatible factory intrinsics remain the default. An OpenCV fit is activated
 only when factory projection is unusable and the fitted model passes all
@@ -192,12 +201,33 @@ Results**, and **BOP Evaluation**. Each successfully collected job receives a
 separate immutable result ID, and the result selectors switch among all results
 that remain compatible with the unchanged BOP dataset.
 
-**Pose Results** is a read-only x-ray diagnostic. Select the retained result,
+**Pose Results** is an x-ray diagnostic. Select the retained result,
 operator-labelled sensor scene, and frame; then compare the exact-aspect RGB or
 colorized depth image with projected evaluation-model geometry. The default is
 a translucent cyan estimated surface and magenta GT wireframe. Estimated and GT
 surfaces, wireframes, axes, boxes, full masks, and visible masks are independent
 browser-local controls. The overlay does not claim observed-depth occlusion.
+Below **Overlay layers**, **Download images (.zip)** and **Create & download
+MP4** export every matching frame in the selected sensor scene, across all
+pages. The selected RGB/depth background, layers, opacities, filters, and FPS
+are saved when clicked; later viewer changes do not affect the job. Object
+filters select frames using the same browser semantics; they do not hide other
+objects within a selected frame. Exports use original resolution without
+controls or scene/frame labels. The ZIP includes lossless PNGs named by
+scene/frame ID in numeric order and a manifest with source hashes/settings.
+MP4 uses the same frames, no audio, and right/bottom padding for odd dimensions.
+
+**Video FPS** defaults to 30 and accepts integers from 1–120. **Video duration**
+updates immediately as matching frames divided by FPS (811 frames at 30 FPS is
+27.03 seconds). Missing FFmpeg/libx264 disables MP4 with a visible reason; ZIP
+remains available. See [MP4 setup](getting-started/installation.md#pose-results-mp4-exports).
+The export card shows rendering progress/errors and a **Jobs** link. Work
+continues after navigation and can be canceled from Jobs. An export started on
+the open page downloads automatically when complete; a manual link remains.
+The URL retains `export_id`, and the Jobs entry's **Open export** action recovers
+the saved settings/progress/download after navigation or reload. Reload does
+not repeat an automatic download. Only requested derived visualization files
+are added to the run, under `processed/bop_evaluation/visualizations/`.
 Direct result links include the run root, so they keep inspecting the correct
 export even if another run is active in the browser. Older links containing
 only a result ID are resolved against directly indexed, approved run folders;
@@ -234,6 +264,13 @@ official-toolkit submission, and finally shows only that result's evaluation
 history and aggregate report. Manual standard-CSV import is a secondary
 expandable action. Deterministic GT perturbation remains isolated under the
 advanced, test-only section and is never estimator-performance evidence.
+
+The same job adds [IPD robot consistency](concepts/robot-consistency.md) from
+the export's recorded robot/calibration evidence. Read MVD and ADD in
+millimetres (lower is better), together with matching coverage and per-instance
+scores. Missing evidence or insufficient matched viewpoints is visibly
+unavailable. A consistent bias can score zero; use BOP recall to assess
+absolute accuracy. Work continues after navigation and remains visible in Jobs.
 
 ## Physical controls
 
