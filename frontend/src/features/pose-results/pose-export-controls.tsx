@@ -66,8 +66,12 @@ export function PoseExportControls({ runRoot, selection, sceneName, frameCount, 
     refetchInterval: (current) => current.state.error || current.state.data && !ACTIVE.has(current.state.data.job_state) ? false : 1000,
   })
   const submit = useMutation({
+    onMutate: () => ({ originUrl: window.location.href }),
     mutationFn: (snapshot: ExportSelection & { format: "zip" | "mp4"; fps: number; run_root: string }) => api<{ export_id: string; job_id: string }>("/bop/inspection/exports", { method: "POST", body: JSON.stringify(snapshot) }),
-    onSuccess: (response, snapshot) => {
+    onSuccess: (response, snapshot, context) => {
+      // The job survives navigation, including a pending lazy route transition.
+      // Attach its download only while the submitted view is still current.
+      if (window.location.href !== context?.originUrl) return
       autoDownloadRef.current = response.export_id
       setSearchParams((current) => {
         const next = new URLSearchParams(current)

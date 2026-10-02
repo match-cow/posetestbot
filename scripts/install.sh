@@ -409,6 +409,7 @@ uv_python() {
 run_import_smoke() {
   local smoke_code='
 import importlib
+import importlib.metadata
 import sys
 
 modules = [
@@ -451,6 +452,16 @@ try:
         failures.append("cv2: required cv2.aruco.Board/ArucoDetector APIs are missing")
 except Exception:
     pass
+
+try:
+    import posetestbot
+    distribution = importlib.metadata.distribution("posetestbot")
+    if distribution.version != posetestbot.__version__:
+        failures.append("posetestbot: installed version differs from the checkout; rerun the installer")
+    if set((distribution.read_text("top_level.txt") or "").split()) != {"posetestbot"}:
+        failures.append("posetestbot: package discovery includes non-application directories; rerun the installer")
+except Exception as exc:
+    failures.append(f"posetestbot package metadata: {type(exc).__name__}: {exc}")
 
 if failures:
     print("Required Python import smoke failed:", file=sys.stderr)

@@ -135,8 +135,13 @@ Outputs live under the selected input run's
 `comparison.json`, `frames.csv`, `index.html`, scientific PNG/SVG figures and
 `manifest.json`. The desktop HTML embeds its data and selected RGB/pose-overlay
 examples and works offline without external scripts. Downloadable scientific
-figures remain beside it. `--reference-frame` chooses the shared image example;
-otherwise each scene uses a view one quarter through its selected sequence.
+figures remain beside it. `--reference-frame` chooses the shared BOP image ID
+and must exist in every condition for each compared scene. Otherwise each scene
+uses an ID one quarter through the intersection of its conditions' selected
+frames. A missing estimate keeps that frame visible with GT alone; it never
+substitutes a different image. These are separate captures of a repeated
+trajectory, so a common image ID does not prove identical physical viewpoints;
+review the retained paired-geometry differences when comparing them.
 
 GT MVD/ADD uses the same corresponding evaluation-model vertices and IPD
 symmetry convention as RC, but compares the estimate directly with retained

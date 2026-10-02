@@ -161,6 +161,43 @@ def test_rejected_and_missing_estimates_never_become_zero_consistency():
     }
 
 
+@pytest.mark.parametrize("reference_frame", [None, 0])
+def test_shared_examples_keep_the_same_frame_when_an_estimate_is_missing(
+    tmp_path, monkeypatch, reference_frame
+):
+    sources = comparison_sources(tmp_path, monkeypatch)
+    loaded = [
+        compare._load_source(*source, index) for index, source in enumerate(sources)
+    ]
+    conditions, internals = map(list, zip(*loaded, strict=True))
+    missing = conditions[1]["rows"][0]
+    missing.update(
+        status="missing",
+        gt_mvd_mm=None,
+        gt_add_mm=None,
+        rc_mvd_mm=None,
+        rc_add_mm=None,
+        translation_error_mm=None,
+        rotation_error_deg=None,
+    )
+    reference, truth, _ = internals[1]["poses"][(1, 0)]
+    internals[1]["poses"][(1, 0)] = (reference, truth, None)
+
+    examples = compare._examples(conditions, internals, reference_frame)
+    shared = [row for row in examples if "Shared trajectory view" in row["titles"]]
+    assert [row["row"]["im_id"] for row in shared] == [0, 0]
+    assert shared[1]["row"]["status"] == "missing"
+    assert shared[1]["row"]["rc_mvd_mm"] is None
+    assert all(row["overlay"].startswith("data:image/jpeg;base64,") for row in shared)
+
+
+def test_explicit_shared_example_must_exist_in_every_condition(tmp_path, monkeypatch):
+    sources = comparison_sources(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="Reference frame.*every condition"):
+        compare.create_comparison(sources, output_run=sources[0][1], reference_frame=99)
+    assert not (sources[0][1] / "processed/bop_evaluation/comparisons").exists()
+
+
 @pytest.mark.parametrize(
     "changed", ["robot_report", "robot_source", "csv", "depth", "official_mssd"]
 )

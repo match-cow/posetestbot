@@ -201,6 +201,9 @@ copied geometry and transforms; correction never rewrites them.
   strictly validates every published bundle's declared tree and hashes and
   fails closed on an unreadable, partial, modified, symlinked, or undeclared
   entry, because that library cannot safely be proven reference-free.
+  A refused action keeps its confirmation open with an error notification;
+  the retry and Cancel controls remain reachable while that notification is
+  displayed.
 - A successful delete removes the managed UUID asset directory but retains a
   tombstone with the UUID, BOP `obj_id`, source identity, and deletion time.
   Tombstoned UUIDs and BOP IDs are never reused; `next_obj_id` remains

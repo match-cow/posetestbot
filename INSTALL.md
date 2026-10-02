@@ -55,6 +55,10 @@ If `UV_CACHE_DIR` is unset, the installer uses `/tmp/uv-cache`.
 Browser binaries for Playwright UI tests are not installed by default.
 Bun is not required for normal Python installation or runtime because the
 locked production build is committed and packaged in the wheel.
+Package discovery is restricted to `posetestbot`; run data, generated sites,
+build directories, and companion runtimes are excluded. The installer checks
+the installed package roots and version against the checkout. Keep using the
+repository checkout for its scripts and pinned optional runtimes.
 
 Omit `--with-posegridgen` when this checkout only needs to consume existing
 `calibration_target.v2` files. The Calibration Targets generator is then

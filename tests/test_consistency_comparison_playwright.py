@@ -119,3 +119,36 @@ def test_offline_desktop_filters_thresholds_examples_and_downloads(
             )
         context.close()
         browser.close()
+
+
+def test_long_comparison_renders_all_frames_without_argument_limit_errors(
+    comparison_page,
+):
+    path, _ = comparison_page
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1920, "height": 1080})
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(path.as_uri(), wait_until="load")
+        # Long multi-camera recordings can exceed the JavaScript engine's
+        # function-argument limit even though their rows fit comfortably in RAM.
+        page.evaluate("""() => {
+            const seed = all[0];
+            all.length = 0;
+            for (let i = 0; i < 200000; i++) {
+                all.push({...seed, im_id: i,
+                    gt_mvd_mm: 1 + i % 100, rc_mvd_mm: 1 + i % 75});
+            }
+            $('condition').value = 'all';
+            $('range').value = 'full';
+            update();
+        }""")
+        expect(page.locator("#scatter-note")).to_contain_text(
+            "200,000 / 200,000 matched points in view"
+        )
+        page.locator("#scatter").focus()
+        page.locator("#scatter").press("Enter")
+        expect(page.locator("#selection")).to_contain_text("BOP image")
+        assert not errors
+        browser.close()

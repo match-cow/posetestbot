@@ -3256,6 +3256,30 @@ def test_pose_results_exports_snapshot_download_and_recovery(
     expect(page.get_by_role("link", name="Download completed MP4")).to_have_count(0)
 
 
+def test_export_submission_response_does_not_navigate_away_from_jobs(console_server, page):
+    install_common_mocks(page)
+    results = install_pose_inspection_mocks(page)
+    pending = []
+    page.route("**/bop/inspection/exports", lambda route: pending.append(route))
+    page.goto(
+        f"{console_server.url}/#/pose-results?result_id={results[0]['result_id']}",
+        wait_until="networkidle",
+    )
+    card = page.get_by_test_id("pose-export-controls")
+    with page.expect_request("**/bop/inspection/exports"):
+        card.get_by_role("button", name="Download images (.zip)").click()
+    card.get_by_role("link", name="Open Jobs").click()
+    expect(page).to_have_url(re.compile(r"/#/jobs$"))
+    fulfill_json(
+        pending[0],
+        {"export_id": "visualization-bbbbbbbbbbbb", "job_id": "export-job"},
+        status=202,
+    )
+    page.wait_for_load_state("networkidle")
+    expect(page).to_have_url(re.compile(r"/#/jobs$"))
+    expect(page.get_by_test_id("pose-export-controls")).to_have_count(0)
+
+
 def test_pose_results_cpu_export_matches_browser_projection_and_colors(
     console_server, page, tmp_path
 ):
@@ -3826,6 +3850,13 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
     expect(page.get_by_text("Catalogue action failed")).to_be_visible()
     expect(page.get_by_text("pose-template bundles")).to_be_visible()
     expect(confirmation).to_be_visible()
+    # Error notifications must stay anchored to the viewport even while their
+    # portal is inside the modal's focus scope, leaving retry controls reachable.
+    error_toast = page.locator('[data-sonner-toast][data-type="error"]').last
+    expect(error_toast).to_be_visible()
+    assert error_toast.bounding_box()["y"] > (
+        confirmation.bounding_box()["y"] + confirmation.bounding_box()["height"]
+    )
     confirmation.get_by_role("button", name="Confirm delete").click()
     expect(page.get_by_text("Workpiece deleted")).to_be_visible()
     expect(page.get_by_role("button", name="Select New clamp")).to_have_count(0)

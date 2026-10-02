@@ -126,7 +126,9 @@ filesystem media/model path from the caller. Result IDs, scene/frame/object/GT
 IDs, containment, regular-file status, symlinks, hashes, PNG dimensions, row
 counts, hypotheses, page size, and media size are validated before response.
 
-Export requests use a closed JSON object. They require `run_root`, `result_id`,
+Export requests use a closed JSON object limited to 16 KiB. Oversized bodies,
+including streamed requests without a declared length, return HTTP 413 before
+JSON parsing or input snapshot creation. They require `run_root`, `result_id`,
 integer `scene_id`, and `format` (`zip` or `mp4`). Optional fields are `filter`
 (the same values as browsing, default `all`), `object_id` (positive integer or
 null), `background` (`rgb`/`depth`, default `rgb`), `max_hypotheses` (1–50,
@@ -153,6 +155,8 @@ rendering fail the job. Completed files are atomically published and bound to
 request/manifest/output SHA-256. Failed or canceled jobs never expose partials.
 Downloads remain recoverable after source drift. The page retains `export_id`
 alongside `run_root`; Jobs links also include result and scene IDs.
+If the operator leaves the submitted view before its response arrives, the
+response does not redirect them. The export remains accessible from Jobs.
 
 ## External cluster controller proxy
 

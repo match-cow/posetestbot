@@ -24,6 +24,11 @@ bash scripts/install.sh
 The default installer runs `uv sync --all-groups --locked`, verifies the bundled web
 console, imports required Python modules, and performs acquisition-runtime and
 adapter checks without opening hardware for capture.
+It also checks that the installed package version matches the checkout and
+that package discovery contains only `posetestbot`. Wheels include the bundled
+console; managed run data, generated sites, and companion runtimes stay outside
+the application package. Operator scripts and pinned optional runtimes still
+require the repository checkout.
 
 The committed lockfile includes the patched application dependencies; an
 out-of-date lockfile fails installation instead of silently resolving different

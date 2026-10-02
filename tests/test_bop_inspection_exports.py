@@ -450,6 +450,40 @@ def test_real_mp4_count_fps_padding_duration_and_no_audio(tmp_path):
     assert manifest["image_size"] == [9, 7] and manifest["output_size"] == [10, 8]
 
 
+@pytest.mark.parametrize(
+    "environ_overrides",
+    [{}, {"CONTENT_LENGTH": "", "wsgi.input_terminated": True}],
+    ids=["declared-content-length", "streamed-body"],
+)
+def test_export_request_limit_applies_before_input_snapshot(
+    tmp_path, monkeypatch, environ_overrides
+):
+    from posetestbot.web.routes import bop_inspection as routes
+
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", str(tmp_path))
+    snapshots = []
+
+    def unexpected_snapshot(*args):
+        snapshots.append(args)
+        raise AssertionError("Oversized request reached snapshot creation")
+
+    monkeypatch.setattr(routes, "create_export_request", unexpected_snapshot)
+    payload = json.dumps({"run_root": str(tmp_path / "run")}) + " " * (16 * 1024)
+    response = (
+        create_app()
+        .test_client()
+        .post(
+            "/bop/inspection/exports",
+            data=payload,
+            content_type="application/json",
+            environ_overrides=environ_overrides,
+        )
+    )
+    assert response.status_code == 413
+    assert "16 KiB" in response.json["output"]
+    assert snapshots == []
+
+
 def test_http_queued_export_status_download_and_job_identity(tmp_path, monkeypatch):
     from posetestbot.web.routes import bop_inspection as routes
 

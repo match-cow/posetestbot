@@ -596,14 +596,39 @@ def _examples(
         render_geometry,
     )
 
+    shared_frames = {}
+    for track in conditions[0]["tracks"]:
+        scene_id = track["scene_id"]
+        common = set.intersection(
+            *(
+                {
+                    row["im_id"]
+                    for row in condition["rows"]
+                    if row["scene_id"] == scene_id
+                }
+                for condition in conditions
+            )
+        )
+        if reference_frame is not None:
+            if reference_frame not in common:
+                raise ValueError(
+                    f"Reference frame {reference_frame} must exist in every condition "
+                    f"for scene {scene_id}"
+                )
+            shared_frames[scene_id] = reference_frame
+        elif common:
+            ordered = sorted(common)
+            shared_frames[scene_id] = ordered[len(ordered) // 4]
+        else:
+            raise ValueError(
+                f"Scene {scene_id} has no shared example frame across every condition"
+            )
+
     examples = []
     for condition, data in zip(conditions, internals, strict=True):
         for track in condition["tracks"]:
-            rows = [
-                r
-                for r in condition["rows"]
-                if r["scene_id"] == track["scene_id"] and r["gt_mvd_mm"] is not None
-            ]
+            rows = [r for r in condition["rows"] if r["scene_id"] == track["scene_id"]]
+            predicted = [r for r in rows if r["gt_mvd_mm"] is not None]
             matched = [r for r in rows if r["status"] == "matched"]
             chosen: dict[int, list[str]] = {}
 
@@ -611,10 +636,11 @@ def _examples(
                 chosen.setdefault(row["im_id"], []).append(title)
 
             reference = next(
-                (r for r in rows if r["im_id"] == reference_frame), rows[len(rows) // 4]
+                r for r in rows if r["im_id"] == shared_frames[track["scene_id"]]
             )
             choose(reference, "Shared trajectory view")
-            choose(max(rows, key=lambda r: r["gt_mvd_mm"]), "Largest GT error")
+            if predicted:
+                choose(max(predicted, key=lambda r: r["gt_mvd_mm"]), "Largest GT error")
             low = [r for r in matched if r["rc_mvd_mm"] < 10 and r["gt_mvd_mm"] >= 10]
             if low:
                 choose(
@@ -657,7 +683,9 @@ def _examples(
                             "rotation": prediction[:3, :3].reshape(-1).tolist(),
                             "translation_mm": prediction[:3, 3].tolist(),
                         }
-                    ],
+                    ]
+                    if prediction is not None
+                    else [],
                 }
                 overlay = render_geometry(
                     rgb.copy(),

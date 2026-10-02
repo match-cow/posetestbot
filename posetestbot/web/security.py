@@ -57,6 +57,7 @@ INPUT_PATH_FIELDS = {
 }
 CALIBRATION_TARGET_MAX_REQUEST_BYTES = 256 * 1024
 CATALOG_AND_TEMPLATE_MAX_JSON_BYTES = 2 * 1024 * 1024
+INSPECTION_EXPORT_MAX_REQUEST_BYTES = 16 * 1024
 
 
 def parse_strict_bool(value: Any, *, name: str, default: bool | None = None) -> bool:
@@ -222,6 +223,9 @@ def install_request_security(app: Flask) -> None:
         if request.path.startswith("/calibration-targets/"):
             request_limit = CALIBRATION_TARGET_MAX_REQUEST_BYTES
             limit_message = "Calibration-target request exceeds 256 KiB"
+        elif request.path == "/bop/inspection/exports":
+            request_limit = INSPECTION_EXPORT_MAX_REQUEST_BYTES
+            limit_message = "Visualization export request exceeds 16 KiB"
         elif request.is_json and request.path.startswith(
             ("/workpieces/", "/pose-templates/")
         ):
