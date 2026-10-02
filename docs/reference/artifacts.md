@@ -52,7 +52,7 @@ failed in-motion matches.
 
 | Path | Contract |
 | --- | --- |
-| `calibration_target.json` | Run-owned selected target bundle and hashes |
+| `calibration_target.json` | Run-owned physical `calibration_target.v3` geometry and selected bundle hashes |
 | `calibration_profile_selection.json` | Current v2 per-sensor reusable selection |
 | `processed/calibration_inputs/<bundle_sha256>/calibration_profiles.json` | Exact selected extrinsic-profile snapshot |
 | `processed/calibration_inputs/<bundle_sha256>/intrinsic_calibration_profiles.json` | Exact selected intrinsic-profile snapshot |
@@ -65,6 +65,8 @@ failed in-motion matches.
 | `processed/calibration/<attempt_id>/ranking.json` | Immutable calculation-time candidate ranking/recommendation; current promotion eligibility is derived without rewriting it |
 | `processed/calibration/<attempt_id>/checks.json` | Blocking checks and retained warnings |
 | `processed/calibration/<attempt_id>/candidate_profiles.json` | Profiles eligible for review/promotion |
+| `processed/calibration/<attempt_id>/reprojection_refinement/<refinement_id>/report.json` | Optional current shared-grid fixed-intrinsic refinement, source hashes, motion-disjoint audit, and explicit promotion binding |
+| `processed/calibration/<attempt_id>/promotion_history/<snapshot_id>/` | Hash-bound retained prior promotion and canonical selection when a different reviewed refinement explicitly replaces it |
 | `calibration_profiles.json` | Explicitly promoted `calibration.v2` profiles, including retained multi-camera consistency warnings |
 | `intrinsic_calibration_profiles.json` | Explicitly promoted intrinsic profiles and projection evidence |
 | `processed/calibration/camera_ee_transform_from_calibration_profiles.json` | Derived BlenderProc camera transform bound to selected profiles |

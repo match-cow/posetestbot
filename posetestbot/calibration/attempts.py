@@ -6168,6 +6168,28 @@ def create_promotion_request(
     *,
     selections: Mapping[str, Any] | None = None,
     operator: str | None = None,
+    reprojection_refinement_id: str | None = None,
+    replace_promoted_refinement: bool = False,
+) -> dict[str, Any]:
+    with run_config_lock(run_root) as locked_root:
+        return _create_promotion_request_locked(
+            locked_root,
+            attempt_id,
+            selections=selections,
+            operator=operator,
+            reprojection_refinement_id=reprojection_refinement_id,
+            replace_promoted_refinement=replace_promoted_refinement,
+        )
+
+
+def _create_promotion_request_locked(
+    run_root: str | Path,
+    attempt_id: str,
+    *,
+    selections: Mapping[str, Any] | None,
+    operator: str | None,
+    reprojection_refinement_id: str | None,
+    replace_promoted_refinement: bool,
 ) -> dict[str, Any]:
     root = Path(run_root)
     attempt = load_calibration_attempt(root, attempt_id)
@@ -6175,9 +6197,23 @@ def create_promotion_request(
     if attempt["progress"].get("status") != "complete":
         raise ValueError("Calibration attempt is not complete")
     prior_promotion = attempt.get("promotion")
+    replacing = (
+        replace_promoted_refinement
+        and reprojection_refinement_id is not None
+        and isinstance(prior_promotion, Mapping)
+        and prior_promotion.get("status") == "promoted"
+        and isinstance(prior_promotion.get("reprojection_refinement"), Mapping)
+        and prior_promotion["reprojection_refinement"].get("refinement_id")
+        != reprojection_refinement_id
+    )
+    if replace_promoted_refinement and not replacing:
+        raise ValueError(
+            "Refinement replacement requires a different report and an already promoted refinement"
+        )
     if (
         isinstance(prior_promotion, Mapping)
         and prior_promotion.get("status") != "failed"
+        and not replacing
     ):
         raise ValueError("Calibration attempt already has promotion evidence")
     _promotion_time_offset_evidence(attempt)
@@ -6202,10 +6238,56 @@ def create_promotion_request(
             joint_bundle["quality_warnings"] if joint_bundle is not None else []
         ),
         "previous_failure": (
-            dict(prior_promotion) if isinstance(prior_promotion, Mapping) else None
+            dict(prior_promotion)
+            if isinstance(prior_promotion, Mapping)
+            and prior_promotion.get("status") == "failed"
+            else None
         ),
     }
+    if reprojection_refinement_id is not None:
+        from posetestbot.calibration.reprojection_refinement import (
+            validate_reprojection_refinement,
+        )
+
+        value["reprojection_refinement"] = {
+            "refinement_id": reprojection_refinement_id,
+            "report": validate_reprojection_refinement(
+                root, attempt, reprojection_refinement_id, selected
+            ),
+        }
     attempt_root = calibration_attempt_root(root, attempt_id)
+    if replacing:
+        from posetestbot.calibration.reprojection_refinement import _binding
+
+        # Retain the entire prior canonical selection before any new request or
+        # status replaces the mutable promotion pointer. Raw/solver evidence is
+        # already immutable and remains in its original locations.
+        snapshot = attempt_root / "promotion_history" / uuid.uuid4().hex
+        if not snapshot.resolve().is_relative_to(
+            attempt_root.resolve() / "promotion_history"
+        ):
+            raise ValueError("Prior promotion snapshot escapes its attempt")
+        snapshot.mkdir(parents=True, exist_ok=False)
+        files = [
+            (attempt_root / PROMOTION_REQUEST_FILE, "promotion_request.json"),
+            (attempt_root / PROMOTION_FILE, "promotion.json"),
+            *(
+                (root / name, name)
+                for name in (
+                    CALIBRATION_PROFILES,
+                    INTRINSIC_CALIBRATION_PROFILES,
+                    CALIBRATION_TARGET,
+                    RUN_CONFIG,
+                    DATASET_MANIFEST,
+                )
+            ),
+        ]
+        history = []
+        for source, name in files:
+            destination = snapshot / name
+            shutil.copy2(source, destination)
+            history.append(_binding(root, destination))
+        value["previous_promotion"] = history
     atomic_write_json(attempt_root / PROMOTION_REQUEST_FILE, value)
     atomic_write_json(
         attempt_root / PROMOTION_FILE,
@@ -6223,6 +6305,14 @@ def create_promotion_request(
                 "joint_consistency_quality_warnings"
             ],
             "operator": value["operator"],
+            **(
+                {"reprojection_refinement": value["reprojection_refinement"]}
+                if "reprojection_refinement" in value
+                else {}
+            ),
+            **(
+                {"previous_promotion": value["previous_promotion"]} if replacing else {}
+            ),
         },
     )
     return value
@@ -6269,12 +6359,31 @@ def _validate_promotion_request_identity(
     for key in (
         "joint_consistency_policy_revision",
         "joint_consistency_quality_warnings",
+        "reprojection_refinement",
+        "previous_promotion",
     ):
         if promotion_request.get(key) != promotion_status.get(key):
             raise ValueError(
                 "Calibration promotion request/status consistency evidence is "
                 "inconsistent"
             )
+    history = promotion_request.get("previous_promotion")
+    if history is not None:
+        from posetestbot.calibration.reprojection_refinement import _binding
+
+        if not isinstance(history, list) or not history:
+            raise ValueError("Invalid retained prior promotion evidence")
+        expected_parent = (
+            calibration_attempt_root(run_root, attempt_id) / "promotion_history"
+        )
+        for binding in history:
+            if not isinstance(binding, Mapping):
+                raise ValueError("Invalid retained prior promotion binding")
+            path = run_root / str(binding.get("path", ""))
+            if not path.resolve().is_relative_to(expected_parent) or _binding(
+                run_root, path
+            ) != dict(binding):
+                raise ValueError("Retained prior promotion evidence changed")
 
 
 def _promotion_count(value: Any, *, label: str, candidate_id: str) -> int:
@@ -6745,6 +6854,21 @@ def _selected_profiles(
                 metadata=metadata,
             )
         )
+    refinement = promotion_request.get("reprojection_refinement")
+    if refinement is not None:
+        if not isinstance(refinement, Mapping):
+            raise ValueError("Invalid reprojection refinement promotion evidence")
+        from posetestbot.calibration.reprojection_refinement import (
+            apply_reprojection_refinement,
+        )
+
+        selected = apply_reprojection_refinement(
+            attempt_root.parents[2],
+            attempt,
+            selected,
+            refinement,
+            promotion_request["selections"],
+        )
     return selected
 
 
@@ -6978,6 +7102,20 @@ def _promote_calibration_attempt_locked(
             "operator": promotion_request.get("operator"),
             "selections": dict(promotion_request["selections"]),
             "joint_bundle_id": promotion_request.get("joint_bundle_id"),
+            **(
+                {
+                    "reprojection_refinement": promotion_request[
+                        "reprojection_refinement"
+                    ]
+                }
+                if "reprojection_refinement" in promotion_request
+                else {}
+            ),
+            **(
+                {"previous_promotion": promotion_request["previous_promotion"]}
+                if "previous_promotion" in promotion_request
+                else {}
+            ),
             "promoted_profile_ids": [
                 profile.profile_id for profile in selected_profiles
             ],

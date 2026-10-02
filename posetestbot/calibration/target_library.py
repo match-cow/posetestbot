@@ -56,7 +56,7 @@ from posetestbot.pipeline.run_config import (
 )
 
 
-BUNDLE_SCHEMA_VERSION = "calibration_target_bundle.v1"
+BUNDLE_SCHEMA_VERSION = "calibration_target_bundle.v2"
 LIBRARY_DIRECTORY = "calibration_targets"
 BUNDLE_MANIFEST = "calibration_target_bundle.json"
 POSEGRIDGEN_SOURCE = "posegridgen_source.json"
@@ -297,7 +297,7 @@ def validate_target_bundle(
         raise ValueError("Bundle configuration hash does not match source")
     target = load_calibration_target_spec(paths["target"])
     if target.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError("Immutable bundle target must use calibration_target.v2")
+        raise ValueError(f"Immutable bundle target must use {SCHEMA_VERSION}")
     if target.get("target_id") != target_id:
         raise ValueError("Bundle target_id does not match target spec")
     if target.get("geometry_sha256") != bundle.get("geometry_sha256"):

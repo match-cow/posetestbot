@@ -64,6 +64,14 @@ The exact accepted fields and candidate modes are returned by
 `/calibration/setup`; clients should use that setup payload rather than assume
 a mode is available.
 
+Optional shared-grid reprojection refinement is an advanced recorded-data CLI
+operation, described in [Calibration targets](../../POSEGRIDGEN_CALIBRATION_TARGETS.md#recorded-shared-grid-refinement).
+It retains the attempt's ranking and seed profiles. Explicit CLI acceptance
+adds a hash-bound `reprojection_refinement` to promotion request/status evidence
+and reproduces its inputs, optimization, and motion-disjoint audit inside the
+ordinary promotion transaction. Browser promotion submits the ordinary seed
+selection; no refinement creation or acceptance HTTP route is exposed.
+
 ## Automatic time alignment
 
 The current implementation is `constant_latency_nearest_pose_optical_spin.v6`.
