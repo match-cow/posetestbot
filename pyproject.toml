@@ -1,6 +1,6 @@
 [project]
 name = "posetestbot"
-version = "0.1.0"
+version = "0.6.0"
 description = "Acquisition, calibration, synchronization, and BOP export for multi-camera robot datasets"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -45,15 +45,7 @@ include-package-data = true
 ]
 
 [tool.setuptools.packages.find]
-exclude = [
-    "build*",
-    "frontend*",
-    "iiwa*",
-    "output*",
-    "scripts*",
-    "tests*",
-    "third_party*",
-]
+include = ["posetestbot*"]
 
 [dependency-groups]
 dev = [

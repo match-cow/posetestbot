@@ -20,7 +20,16 @@ real-time interface such as Sunrise.FRI; it is outside this repository.
 | Maximum host gap | at most 40 ms | Commissioning target |
 
 Calibration uses the separate
-`constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5` timing policy.
+`constant_latency_nearest_pose_optical_spin.v6` timing policy. For robot-mounted
+cameras, reversible rotations near the optical axis identify latency from
+angular motion, independently of translation-residual materiality. The retained
+uncertainty combines frame-block resampling, omission of each motion, angular
+mapping sensitivity, and half a median robot sample period. A supported interval
+must exclude zero, remain inside the search bounds, and fit within the stability
+limit (at least 20 ms). The applied offset is rounded to the 5 ms grid and still
+pairs frames with real recorded poses; interpolation is used only to estimate
+latency and never bridges a pose gap above 40 ms. See
+[calibration timing evidence](reference/api/calibration.md#automatic-time-alignment).
 Nearest matches beyond 20 ms are warnings and 150 ms is the hard boundary.
 Weak, ambiguous, boundary, or inconsistent automatic-offset evidence retains
 recorded 0 ms timing with a visible warning. Missing/corrupt pose evidence and

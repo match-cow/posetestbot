@@ -40,6 +40,7 @@ import { cn, formatDate, titleCase } from "@/lib/utils"
 import { useOperator } from "@/providers/operator-provider"
 
 import { OverlayErrorBoundary, PoseOverlay, type PoseOverlayLayers } from "./pose-overlay"
+import { PoseExportControls, type MaskLayers } from "./pose-export-controls"
 
 const PAGE_SIZE = 80
 const FILTERS: Array<{ value: BopInspectionFrameFilter; label: string }> = [
@@ -51,13 +52,6 @@ const FILTERS: Array<{ value: BopInspectionFrameFilter; label: string }> = [
   { value: "tracking", label: "Tracking" },
   { value: "reinitialization", label: "Reinitialization" },
 ]
-
-interface MaskLayers {
-  full: boolean
-  visible: boolean
-  fullOpacity: number
-  visibleOpacity: number
-}
 
 const DEFAULT_GEOMETRY: PoseOverlayLayers = {
   estimateSurface: true,
@@ -196,7 +190,7 @@ function LayerControls({
   const geometryToggle = (key: keyof PoseOverlayLayers, value: boolean) => setGeometry((current) => ({ ...current, [key]: value }))
   const maskToggle = (key: "full" | "visible", value: boolean) => setMasks((current) => ({ ...current, [key]: value }))
   return <Card data-testid="pose-layer-controls">
-    <CardHeader className="pb-3"><CardTitle className="flex items-center gap-2 text-base"><Layers3 className="size-4" />Overlay layers</CardTitle><CardDescription>Independent browser-local diagnostic layers; no visualization is written to the run.</CardDescription></CardHeader>
+    <CardHeader className="pb-3"><CardTitle className="flex items-center gap-2 text-base"><Layers3 className="size-4" />Overlay layers</CardTitle><CardDescription>Browser-local diagnostic layers. Export below to save the selected view settings.</CardDescription></CardHeader>
     <CardContent className="space-y-4">
       {!webgl && <div role="alert" data-testid="pose-webgl-fallback" className="rounded-lg border border-warning/40 bg-warning/5 p-3 text-xs"><div className="font-semibold text-warning-foreground">WebGL geometry unavailable</div><p className="mt-1 text-muted-foreground">RGB, depth, masks, navigation, and numeric evidence remain usable. Geometry controls are disabled.</p></div>}
       <div className="space-y-2"><div className="text-xs font-semibold text-cyan-500">Estimated pose · cyan</div><div className="grid grid-cols-2 gap-2"><LayerToggle label="Estimated surface" checked={geometry.estimateSurface} disabled={!webgl} onChange={(value) => geometryToggle("estimateSurface", value)} /><LayerToggle label="Estimated wireframe" checked={geometry.estimateWireframe} disabled={!webgl} onChange={(value) => geometryToggle("estimateWireframe", value)} /><LayerToggle label="Estimated axes" checked={geometry.estimateAxes} disabled={!webgl} onChange={(value) => geometryToggle("estimateAxes", value)} /><LayerToggle label="Estimated bounding box" checked={geometry.estimateBox} disabled={!webgl} onChange={(value) => geometryToggle("estimateBox", value)} /></div><Opacity label="Estimated opacity" value={geometry.estimateOpacity} disabled={!webgl} onChange={(value) => setGeometry((current) => ({ ...current, estimateOpacity: value }))} /></div>
@@ -224,8 +218,8 @@ function Viewer({
   const [width, height] = frame.camera.image_size
   return <div className="relative w-full overflow-hidden rounded-lg border bg-black" style={{ aspectRatio: `${width} / ${height}` }} data-testid="pose-result-viewer">
     <img src={baseLayer === "rgb" ? frame.media.rgb_url : frame.media.depth_url} alt={`${baseLayer === "rgb" ? "RGB" : "Colorized depth"} frame ${frame.frame.im_id}`} className="absolute inset-0 size-full object-contain" data-testid="pose-base-layer" />
-    {masks.full && frame.ground_truth.map((item) => item.mask_urls.full && <div key={`full-${item.gt_id}`} data-testid="pose-full-mask" className="pointer-events-none absolute inset-0 bg-amber-300" style={{ opacity: masks.fullOpacity, maskImage: `url(${item.mask_urls.full})`, WebkitMaskImage: `url(${item.mask_urls.full})`, maskSize: "100% 100%", WebkitMaskSize: "100% 100%" }} />)}
-    {masks.visible && frame.ground_truth.map((item) => item.mask_urls.visible && <div key={`visible-${item.gt_id}`} data-testid="pose-visible-mask" className="pointer-events-none absolute inset-0 bg-lime-300" style={{ opacity: masks.visibleOpacity, maskImage: `url(${item.mask_urls.visible})`, WebkitMaskImage: `url(${item.mask_urls.visible})`, maskSize: "100% 100%", WebkitMaskSize: "100% 100%" }} />)}
+    {masks.full && frame.ground_truth.map((item) => item.mask_urls.full && <div key={`full-${item.gt_id}`} data-testid="pose-full-mask" className="pointer-events-none absolute inset-0 bg-amber-300" style={{ opacity: masks.fullOpacity, maskImage: `url(${item.mask_urls.full})`, WebkitMaskImage: `url(${item.mask_urls.full})`, maskMode: "luminance", maskSize: "100% 100%", WebkitMaskSize: "100% 100%" }} />)}
+    {masks.visible && frame.ground_truth.map((item) => item.mask_urls.visible && <div key={`visible-${item.gt_id}`} data-testid="pose-visible-mask" className="pointer-events-none absolute inset-0 bg-lime-300" style={{ opacity: masks.visibleOpacity, maskImage: `url(${item.mask_urls.visible})`, WebkitMaskImage: `url(${item.mask_urls.visible})`, maskMode: "luminance", maskSize: "100% 100%", WebkitMaskSize: "100% 100%" }} />)}
     {webgl && <OverlayErrorBoundary key={`${frame.result.result_id}:${frame.frame.scene_id}:${frame.frame.im_id}`} onError={onOverlayError}><PoseOverlay frame={frame} layers={geometry} /></OverlayErrorBoundary>}
     <div className="pointer-events-none absolute bottom-2 left-2 rounded bg-black/70 px-2 py-1 font-mono text-[9px] text-white">scene {frame.frame.scene_id} · frame {frame.frame.im_id} · {width} × {height}</div>
   </div>
@@ -246,6 +240,7 @@ export function PoseResultsPage() {
   const [objectId, setObjectId] = useState<number | null>(null)
   const [page, setPage] = useState(1)
   const pendingOrdinal = useRef<number | null>(null)
+  const autoDownloadExportRef = useRef<string | null>(null)
   const [playing, setPlaying] = useState(false)
   const [baseLayer, setBaseLayer] = useState<"rgb" | "depth">("rgb")
   const [geometry, setGeometry] = useState<PoseOverlayLayers>(DEFAULT_GEOMETRY)
@@ -377,7 +372,9 @@ export function PoseResultsPage() {
 
   return <div className="space-y-5" data-testid="pose-results-page">
     <PageHeader eyebrow="Inspect · retained estimator result" title="Pose Results" description="Compare one immutable standard BOP19 result with its run's ground truth, frame by frame." actions={<div className="flex gap-2">{runRoot !== selectedRun && <Button variant="outline" onClick={() => selectRun(runRoot)}>Make linked run active</Button>}<Button asChild variant="outline"><Link to="/pose-estimation" onClick={() => selectRun(runRoot)}>Pose Estimation</Link></Button><Button variant="outline" onClick={refresh} disabled={setup.isFetching || frames.isFetching || detail.isFetching}><RefreshCw className={setup.isFetching || frames.isFetching || detail.isFetching ? "animate-spin" : undefined} />Refresh</Button></div>} />
-    <ProcessHandoff title="Read-only result inspection" description={`Inspecting run ${runRoot}${runRoot !== selectedRun ? " from this direct link; the active operator run is different. Make this run active before returning to Workflow" : ""}. Overlay preferences are browser-local; raw capture, BOP export, results, and evaluation evidence remain unchanged.`} to="/workflow/dataset?step=export" action="Review dataset workflow" />
+    <ProcessHandoff title="Result inspection & visualization exports" description={`Inspecting run ${runRoot}${runRoot !== selectedRun ? " from this direct link; the active operator run is different. Make this run active before returning to Workflow" : ""}. Overlay preferences are browser-local until you export images or video. Saved visualizations feed dataset review in Workflow.`} to="/workflow/dataset?step=export" action="Review dataset workflow" />
+
+    {searchParams.has("export_id") && (setup.isError || setup.data?.ready === false) && <PoseExportControls runRoot={runRoot} selection={null} availability={setup.data?.exports} autoDownloadRef={autoDownloadExportRef} />}
 
     {setup.isPending || locateLegacyResult && !resultLocation.isError ? <div className="space-y-4"><Skeleton className="h-32" /><div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px]"><Skeleton className="aspect-video" /><Skeleton className="h-[640px]" /></div></div>
       : setup.isError || !setup.data ? <Card className="border-destructive/40"><CardHeader><CardTitle>Pose inspection unavailable</CardTitle><CardDescription>{errorMessage(resultLocation.isError ? resultLocation.error : setup.error)}</CardDescription></CardHeader><CardContent><Button variant="outline" onClick={refresh}><RefreshCw />Try again</Button></CardContent></Card>
@@ -407,6 +404,7 @@ export function PoseResultsPage() {
               </div>
               <div className="space-y-4 xl:sticky xl:top-20">
                 <LayerControls webgl={geometryReady} geometry={geometry} setGeometry={setGeometry} masks={masks} setMasks={setMasks} maskCapabilities={maskCapabilities} />
+                <PoseExportControls runRoot={runRoot} selection={sceneId == null ? null : { result_id: resultId, scene_id: sceneId, filter, object_id: objectId, background: baseLayer, geometry, masks, max_hypotheses: 20 }} sceneName={scene?.display_name} frameCount={frames.data?.total_count} availability={setup.data.exports} autoDownloadRef={autoDownloadExportRef} />
                 <Card><CardHeader className="pb-3"><CardTitle className="text-base">Inspection identity</CardTitle></CardHeader><CardContent className="space-y-2 text-[10px]"><div><span className="text-muted-foreground">Run</span><div className="mt-1 break-all font-mono">{runRoot}</div></div><div><span className="text-muted-foreground">Result</span><div className="mt-1 break-all font-mono">{resultId}</div></div><div><span className="text-muted-foreground">Scene / frame</span><div className="mt-1 font-mono">{sceneId ?? "—"} / {frameId ?? "—"}</div></div><div><span className="text-muted-foreground">Projection</span><div className="mt-1 font-mono">{setup.data.visualization_contract?.projection ?? "—"}</div></div><div><span className="text-muted-foreground">Object filter</span><Select value={objectId == null ? "all" : String(objectId)} onValueChange={changeObject}><SelectTrigger className="mt-1"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All objects</SelectItem>{setup.data.objects.map((item) => <SelectItem key={item.obj_id} value={String(item.obj_id)}>{item.name} · ID {item.obj_id}</SelectItem>)}</SelectContent></Select></div></CardContent></Card>
               </div>
             </div>

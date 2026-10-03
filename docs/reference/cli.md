@@ -80,12 +80,19 @@ contract are described in [Calibration targets](../POSEGRIDGEN_CALIBRATION_TARGE
 | `run_blenderproc_prepare_stage.py` | Prepare the explicit optional render inputs |
 | `run_blenderproc_render_stage.py` | Render requested GT/masks through BlenderProc |
 | `run_bop_annotations.py` | Generate the run-configured optional annotation product |
-| `run_bop_evaluation.py` | Run the narrow official BOP19 evaluation adapter |
+| `run_bop_evaluation.py` | Run the narrow official BOP19 adapter plus IPD robot-consistency MVD/ADD using the request's frozen robot evidence |
+| `compare_bop_consistency_gt.py --evaluation LABEL RUN EVALUATION_ID … --output-run RUN` | Compare completed Inspect evaluations with saved GT in an offline HTML/JSON/CSV/figure report; the first condition is the baseline |
 
 The base export is produced by `process_dataset.py`. Optional annotation is a
 separate, deliberate step. Evaluation consumes an existing annotation-bearing
 BOP dataset and immutable standard BOP19 CSV; it is not acquisition or
 estimation.
+
+The [offline consistency comparison](../concepts/robot-consistency.md#offline-comparison-with-saved-ground-truth)
+supports one fixed instance per scene and one estimate per target. Its output
+run must be one of the evaluated input runs; it writes only below that run's
+`processed/bop_evaluation/comparisons/`. It reuses completed official BOP19
+evaluations rather than invoking another evaluator or estimator.
 
 ## Documentation and validation
 

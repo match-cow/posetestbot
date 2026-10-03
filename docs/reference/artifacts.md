@@ -113,8 +113,23 @@ artifacts from the removed staged calibration implementation.
 | `processed/bop_evaluation/results/<result_id>/controller-provenance.json` | Optional sanitized, hash-bound controller/runtime and bounded execution evidence; manual imports do not fabricate it |
 | `processed/bop_evaluation/evaluations/<evaluation_id>/` | Request, progress, dataset adapter, official toolkit output, and report |
 | `processed/bop_evaluation/evaluations/<evaluation_id>/selected_test_targets_bop19.json` | Immutable locally recomputed target list used for that evaluation; filtered to verified selected sensor scenes when applicable |
+| `processed/bop_evaluation/evaluations/<evaluation_id>/robot_consistency_inputs.json` | Immutable robot-consistency snapshot: original export evidence hashes, resolved camera-to-template-base transforms, and stable instance identities |
+| `processed/bop_evaluation/evaluations/<evaluation_id>/robot_consistency.json` | IPD MVD/ADD in mm, matching coverage, unavailable reasons, all sensor/instance scores and per-view errors; bound to dataset/result/input hashes |
+| `processed/bop_evaluation/comparisons/<comparison_id>/request.json` | Immutable offline Inspect comparison sources and exact run-local hashes; output belongs to one evaluated input run |
+| `processed/bop_evaluation/comparisons/<comparison_id>/comparison.json`, `frames.csv` | GT/RC errors, rejected/missing coverage, correlations, threshold diagnostics, repeated-trajectory differences and embedded selected image evidence |
+| `processed/bop_evaluation/comparisons/<comparison_id>/index.html`, `consistency_vs_gt.png`, `consistency_vs_gt.svg`, `manifest.json` | Offline interactive desktop comparison, standalone scientific figures and publication hashes; no source dataset changes |
+| `processed/bop_evaluation/visualizations/<export_id>/request.json` | `bop_inspection_export.v1`: frozen layer/background/filter/FPS settings, ordered frame IDs, dataset/result identities, and source file identities |
+| `processed/bop_evaluation/visualizations/<export_id>/job.json`, `progress.json` | Local job identity and rendering counts/state/errors; Jobs recovers the export URL |
+| `processed/bop_evaluation/visualizations/<export_id>/manifest.json`, `output.json` | Content hashes for sources and completed output, source/output dimensions, frame count, encoding and duration; download integrity binding |
+| `processed/bop_evaluation/visualizations/<export_id>/<export_id>.zip` or `.mp4` | Atomically published PNG archive or H.264 video; failed/canceled partials cannot be downloaded |
 
 Evaluation never mutates raw capture or the exported dataset and is not an
 acquisition stage. Result ZIP packages are generated deterministically on
 demand after rechecking retained hashes; they are downloads, not additional
-stored run artifacts. Pose Results likewise writes no visualization files.
+stored run artifacts. Pose Results writes visualizations only on explicit
+export. ZIP entries are numerically ordered `<scene_id:06d>/<im_id:06d>.png`
+plus `manifest.json`. Video carries the same rendered frames, without labels
+or controls, and retains its manifest beside the MP4. Completed exports remain
+downloadable after later source changes, using their retained integrity hashes.
+Each request runs once (`.started` records worker ownership); partial files from
+a force-killed worker may remain hidden on disk but are never downloadable.

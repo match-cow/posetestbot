@@ -1,4 +1,4 @@
-"""Browser-safe, ID-addressed APIs for read-only BOP pose inspection."""
+"""Browser-safe, ID-addressed inspection and queued visualization APIs."""
 
 from __future__ import annotations
 
@@ -20,6 +20,18 @@ from posetestbot.bop.inspection import (
     list_inspection_frames,
 )
 from posetestbot.bop.evaluation import RESULT_ID_RE
+from posetestbot.bop.inspection_exports import (
+    create_export_request,
+    export_download_path,
+    export_folder,
+    mp4_status,
+    read_export_artifact,
+    read_export_request,
+)
+from posetestbot.io.atomic import atomic_write_json
+from posetestbot.jobs.runner import ResourceBusyError
+from posetestbot.web.paths import APP_ROOT
+from posetestbot.web.runtime import job_runner
 from posetestbot.web.routes.ui import discover_web_runs
 from posetestbot.web.security import resolve_web_run_root
 
@@ -29,6 +41,8 @@ MAX_RESULT_METADATA_BYTES = 1024 * 1024
 
 
 def _error(exc: Exception):
+    if isinstance(exc, ResourceBusyError):
+        return jsonify({"output": str(exc)}), 409
     if isinstance(exc, KeyError | FileNotFoundError):
         return jsonify({"output": str(exc)}), 404
     return jsonify({"output": str(exc)}), 400
@@ -125,6 +139,7 @@ def bop_inspection_setup():
         run_root = resolve_web_run_root(request.args.get("run_root"))
         result_id = request.args.get("result_id") or None
         response = inspection_setup(run_root, result_id=result_id)
+        response["exports"] = {"zip": {"available": True}, "mp4": mp4_status()}
         selected = response.get("selected_result_id")
         if isinstance(selected, str):
             for model in response.get("objects", []):
@@ -175,8 +190,7 @@ def bop_inspection_frame():
             scene_id=scene_id,
             im_id=im_id,
             max_hypotheses=(
-                _optional_int("max_hypotheses", minimum=1)
-                or DEFAULT_HYPOTHESES
+                _optional_int("max_hypotheses", minimum=1) or DEFAULT_HYPOTHESES
             ),
         )
         run_value = run_root.as_posix()
@@ -286,14 +300,127 @@ def bop_inspection_mask(
 def bop_inspection_model(result_id: str, obj_id: int):
     try:
         run_root = resolve_web_run_root(request.args.get("run_root"))
-        path = inspection_model_path(
-            run_root, result_id=result_id, obj_id=obj_id
-        )
+        path = inspection_model_path(run_root, result_id=result_id, obj_id=obj_id)
         return send_file(
             path,
             mimetype="application/octet-stream",
             max_age=0,
             conditional=True,
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
+@bop_inspection_bp.post("/bop/inspection/exports")
+def queue_bop_inspection_export():
+    try:
+        value = request.get_json(silent=True)
+        if not isinstance(value, dict):
+            raise ValueError("A JSON object is required")
+        run_root = resolve_web_run_root(value.get("run_root"))
+        export = create_export_request(run_root, value)
+        export_id = export["export_id"]
+        folder = export_folder(run_root, export_id)
+        try:
+            job = job_runner.submit(
+                name="bop_inspection_export",
+                command=[
+                    "uv",
+                    "run",
+                    "python",
+                    "scripts/run_bop_inspection_export.py",
+                    "--request",
+                    (folder / "request.json").as_posix(),
+                ],
+                cwd=APP_ROOT,
+                resources=["cpu", "disk_io"],
+                scope_kind="run",
+                run_root=run_root,
+                parameters={
+                    "export_id": export_id,
+                    "result_id": export["settings"]["result_id"],
+                    "scene_id": export["settings"]["scene_id"],
+                    "format": export["settings"]["format"],
+                },
+            )
+        except Exception as exc:
+            atomic_write_json(
+                folder / "progress.json",
+                {
+                    "state": "failed",
+                    "error": str(exc),
+                    "completed_frames": 0,
+                    "total_frames": len(export["frame_ids"]),
+                },
+            )
+            raise
+        atomic_write_json(folder / "job.json", {"job_id": job.id})
+        return jsonify({"export_id": export_id, "job_id": job.id}), 202
+    except Exception as exc:
+        return _error(exc)
+
+
+def _export_job(run_root, export_id):
+    saved = read_export_artifact(run_root, export_id, "job.json")
+    job = job_runner.get(saved["job_id"])
+    if (
+        job.run_root != run_root.as_posix()
+        or job.name != "bop_inspection_export"
+        or job.parameters.get("export_id") != export_id
+    ):
+        raise ValueError("Export job identity does not match the run")
+    return job
+
+
+@bop_inspection_bp.get("/bop/inspection/exports/<export_id>")
+def bop_inspection_export_status(export_id: str):
+    try:
+        run_root = resolve_web_run_root(request.args.get("run_root"))
+        saved = read_export_request(run_root, export_id)
+        progress = read_export_artifact(run_root, export_id, "progress.json")
+        job = _export_job(run_root, export_id)
+        available = job.status == "succeeded" and progress.get("state") == "completed"
+        return jsonify(
+            {
+                "export_id": export_id,
+                "settings": saved["settings"],
+                "scene_name": saved["scene_name"],
+                "frame_count": len(saved["frame_ids"]),
+                "source_identity": saved["source_identity"],
+                "job_id": job.id,
+                "job_state": job.status,
+                "progress": progress,
+                "error": progress.get("error")
+                or (job.message if job.status in {"failed", "canceled"} else None),
+                "download_available": available,
+                "download_url": url_for(
+                    "bop_inspection.bop_inspection_export_download",
+                    export_id=export_id,
+                    run_root=run_root.as_posix(),
+                )
+                if available
+                else None,
+            }
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
+@bop_inspection_bp.get("/bop/inspection/exports/<export_id>/download")
+def bop_inspection_export_download(export_id: str):
+    try:
+        run_root = resolve_web_run_root(request.args.get("run_root"))
+        job = _export_job(run_root, export_id)
+        progress = read_export_artifact(run_root, export_id, "progress.json")
+        if job.status != "succeeded" or progress.get("state") != "completed":
+            return jsonify({"output": "Export is not completed"}), 409
+        path = export_download_path(run_root, export_id)
+        return send_file(
+            path,
+            as_attachment=True,
+            download_name=path.name,
+            max_age=0,
+            mimetype="application/zip" if path.suffix == ".zip" else "video/mp4",
         )
     except Exception as exc:
         return _error(exc)

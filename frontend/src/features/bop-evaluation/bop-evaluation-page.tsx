@@ -36,6 +36,7 @@ import type {
   BopEvaluationIssue,
   BopEvaluationSetup,
   BopEvaluationSummary,
+  BopRobotConsistency,
   BopResultSubmission,
   Job,
 } from "@/lib/contracts"
@@ -171,6 +172,37 @@ function EvaluationJobStatus({ job, evaluationId, reportAvailable }: { job: Job;
   </div>
 }
 
+function RobotConsistencyEvidence({ evidence }: { evidence: BopRobotConsistency }) {
+  const [expanded, setExpanded] = useState(false)
+  const tracks = expanded ? evidence.tracks : evidence.tracks.slice(0, 10)
+  return <div data-testid="robot-consistency-evidence" className="space-y-3 rounded-lg border p-4">
+    <div className="flex items-center justify-between gap-3">
+      <div className="text-sm font-semibold">Robot consistency (IPD) <span className="ml-2 text-xs font-normal text-muted-foreground">Lower is better · mm</span></div>
+      <StatusBadge status={evidence.status} tone={evidence.status === "available" ? "success" : "warning"} />
+    </div>
+    <p className="text-xs leading-relaxed text-muted-foreground">MVD is the maximum vertex displacement per view; ADD is the mean vertex displacement. Each is averaged across matched views, then equally across sensor/instance tracks. Estimates are compared with their own mean in the fixed template base frame.</p>
+    {evidence.reason && <p className="text-xs font-semibold text-warning-foreground">{evidence.reason}</p>}
+    {evidence.warnings.map((warning) => <p key={warning} className="text-xs leading-relaxed text-muted-foreground">{warning}</p>)}
+    <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+      <Detail label="Matched / eligible instance views" value={`${evidence.matched_frames.toLocaleString()} / ${evidence.eligible_frames.toLocaleString()}`} />
+      <Detail label="Matching coverage" value={evidence.coverage == null ? "Unavailable" : targetCoverage(evidence.coverage)} />
+      <Detail label="Evaluated / total tracks" value={`${evidence.evaluated_track_count} / ${evidence.track_count}`} />
+      <Detail label="Unmatched predictions" value={evidence.unmatched_predictions.toLocaleString()} />
+    </div>
+    {evidence.excluded_scenes.map((scene) => <p key={scene.scene_id} className="text-xs text-warning-foreground">Scene {scene.scene_id}: {scene.reason}</p>)}
+    {tracks.length > 0 && <div className="overflow-x-auto rounded border">
+      <table className="w-full min-w-[620px] text-left text-xs">
+        <caption className="sr-only">Robot consistency per sensor and workpiece instance</caption>
+        <thead className="bg-muted/60 text-muted-foreground"><tr><th scope="col" className="px-3 py-2">Sensor / scene</th><th scope="col" className="px-3 py-2">Object / instance</th><th scope="col" className="px-3 py-2">Matched views</th><th scope="col" className="px-3 py-2">MVD / ADD (mm)</th></tr></thead>
+        <tbody>{tracks.map((track) => <tr key={`${track.scene_id}:${track.instance_uuid}`} className="border-t"><td className="px-3 py-2">{track.sensor_name} / {track.scene_id}</td><td className="px-3 py-2 font-mono text-[10px]">{track.obj_id} / {track.instance_uuid}</td><td className="px-3 py-2 tabular-nums">{track.matched_frames} / {track.eligible_frames}</td><td className="px-3 py-2">{track.status === "available" ? `${track.mvd_mm?.toFixed(4)} / ${track.add_mm?.toFixed(4)}` : track.reason ?? "Unavailable"}</td></tr>)}</tbody>
+      </table>
+    </div>}
+    {evidence.tracks.length > 10 && <Button variant="outline" size="sm" onClick={() => setExpanded((value) => !value)}>{expanded ? "Show fewer tracks" : `Show ${evidence.tracks.length} retained tracks`}</Button>}
+    {evidence.tracks_truncated && <p className="text-xs text-muted-foreground">Showing at most 200 tracks here. The retained robot_consistency.json contains every track and per-view error.</p>}
+    <a className="text-xs text-primary underline" href={evidence.source_url} target="_blank" rel="noreferrer">IPD metric definition and reference implementation</a>
+  </div>
+}
+
 function MetricsReport({ evaluation }: { evaluation: BopEvaluationSummary }) {
   const result = evaluation.result
   const simulation = evaluation.simulation ?? result?.simulation
@@ -178,7 +210,7 @@ function MetricsReport({ evaluation }: { evaluation: BopEvaluationSummary }) {
     <CardHeader className="border-b border-border bg-muted/20">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <CardTitle className="flex flex-wrap items-center gap-2 text-base">Official BOP metrics <StatusBadge status={evaluation.status} tone={jobStatusTone(evaluation.status)} /></CardTitle>
+          <CardTitle className="flex flex-wrap items-center gap-2 text-base">BOP metrics and robot consistency <StatusBadge status={evaluation.status} tone={jobStatusTone(evaluation.status)} /></CardTitle>
           <CardDescription className="mt-1">{evaluation.protocol} · evaluation {evaluation.evaluation_id}</CardDescription>
         </div>
         <div className="text-left text-[10px] text-muted-foreground sm:text-right"><div className="font-semibold uppercase tracking-wide">Completed</div><div className="mt-1">{formatDate(evaluation.completed_at)}</div></div>
@@ -202,7 +234,8 @@ function MetricsReport({ evaluation }: { evaluation: BopEvaluationSummary }) {
         ? <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
           {evaluation.metrics.map((metric) => <div key={metric.id} className="rounded-lg border bg-background p-4">
             <div className="text-[9px] font-bold uppercase tracking-[0.12em] text-muted-foreground">{metric.label}</div>
-            <div className="metric-number mt-2 tabular-nums">{metric.display || metric.value.toPrecision(5)}</div>
+            <div className="metric-number mt-2 tabular-nums">{metric.display || metric.value.toPrecision(5)}{metric.unit === "mm" && <span className="ml-1 text-sm">mm</span>}</div>
+            {metric.source === "ipd" && <div className="mt-1 text-[10px] text-muted-foreground">IPD · lower is better</div>}
             <div className="mt-2 font-mono text-[9px] text-muted-foreground">{metric.id}{metric.unit ? ` · ${metric.unit}` : ""}</div>
           </div>)}
         </div>
@@ -210,8 +243,8 @@ function MetricsReport({ evaluation }: { evaluation: BopEvaluationSummary }) {
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
         <div className="overflow-x-auto rounded-lg border">
           <table className="w-full min-w-[560px] text-left text-xs">
-            <caption className="sr-only">Official BOP evaluation metric values</caption>
-            <thead className="bg-muted/60 text-muted-foreground"><tr><th scope="col" className="px-3 py-2">Metric</th><th scope="col" className="px-3 py-2">Official ID</th><th scope="col" className="px-3 py-2 text-right">Value</th></tr></thead>
+            <caption className="sr-only">BOP and IPD evaluation metric values</caption>
+            <thead className="bg-muted/60 text-muted-foreground"><tr><th scope="col" className="px-3 py-2">Metric</th><th scope="col" className="px-3 py-2">Metric ID</th><th scope="col" className="px-3 py-2 text-right">Value</th></tr></thead>
             <tbody>{evaluation.metrics.map((metric) => <tr key={metric.id} className="border-t"><td className="px-3 py-2.5 font-semibold">{metric.label}</td><td className="px-3 py-2.5 font-mono text-[10px] text-muted-foreground">{metric.id}</td><td className="px-3 py-2.5 text-right font-mono tabular-nums">{metric.display || metric.value}{metric.unit ? ` ${metric.unit}` : ""}</td></tr>)}</tbody>
           </table>
         </div>
@@ -229,6 +262,8 @@ function MetricsReport({ evaluation }: { evaluation: BopEvaluationSummary }) {
           </details>
         </div>
       </div>
+      {evaluation.robot_consistency && <RobotConsistencyEvidence key={evaluation.evaluation_id} evidence={evaluation.robot_consistency} />}
+      {evaluation.report_available && !evaluation.robot_consistency && <p className="text-xs text-muted-foreground">This retained report does not include robot consistency. Queue a new evaluation of this source to calculate it.</p>}
     </CardContent>
   </Card>
 }
@@ -425,7 +460,7 @@ export function BopEvaluationPage() {
     <PageHeader
       eyebrow="Dataset inspection"
       title="BOP evaluation"
-      description="Validate an exported dataset with official BOP metrics, using a compatible estimator result or a clearly marked GT-derived test fixture."
+      description="Validate an exported dataset with official BOP metrics and IPD robot consistency, using a compatible estimator result or a clearly marked GT-derived test fixture."
       actions={<Button variant="outline" onClick={refresh} disabled={setup.isFetching || jobs.isFetching}><RefreshCw className={setup.isFetching || jobs.isFetching ? "animate-spin" : undefined} />Refresh</Button>}
     />
     {selectedRun !== activeRun && <div role="status" className="flex items-center justify-between gap-3 rounded-lg border p-3 text-xs"><span>Evaluating linked run <span className="font-mono">{selectedRun}</span>. The active operator run is different.</span><Button variant="outline" size="sm" onClick={() => selectRun(selectedRun)}>Make linked run active</Button></div>}
@@ -530,7 +565,7 @@ export function BopEvaluationPage() {
               </Card>
 
               <Card className="border-primary/30" data-testid="bop-evaluation-submit">
-                <CardHeader><CardTitle className="flex items-center gap-2 text-base"><Play aria-hidden="true" className="size-4" />2 · Run official evaluation</CardTitle><CardDescription>Explicitly queue the pinned official BOP Toolkit for the source selected at left. The CPU/disk job continues after navigation.</CardDescription></CardHeader>
+                <CardHeader><CardTitle className="flex items-center gap-2 text-base"><Play aria-hidden="true" className="size-4" />2 · Run evaluation</CardTitle><CardDescription>Queue official BOP scores and IPD robot consistency for the selected source. Robot consistency uses retained robot evidence when available. The CPU/disk job continues after navigation.</CardDescription></CardHeader>
                 <CardContent className="space-y-4">
                   {queueBlockers.length > 0 ? <div role="alert" data-testid="bop-evaluation-disabled-reasons" className="rounded-lg border border-warning/40 bg-warning/5 p-3"><div className="text-xs font-semibold text-warning-foreground">Evaluation cannot be queued yet</div><ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-relaxed text-muted-foreground">{queueBlockers.map((reason) => <li key={reason}>{reason}</li>)}</ul></div> : <div className="flex items-start gap-2 rounded-lg border border-success/30 bg-success/5 p-3 text-xs"><CheckCircle2 aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-success" /><span>The dataset, toolkit, and selected result source are compatible.</span></div>}
                   <Button className="w-full" onClick={() => queueEvaluation.mutate()} disabled={queueBlockers.length > 0 || queueEvaluation.isPending}>{queueEvaluation.isPending || activeJob ? <LoaderCircle className="animate-spin" /> : <ChartNoAxesCombined />}{queueEvaluation.isPending ? "Queueing…" : activeJob ? "Evaluation running…" : "Queue BOP evaluation"}</Button>

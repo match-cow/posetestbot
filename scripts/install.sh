@@ -183,6 +183,7 @@ install_system_packages() {
     build-essential
     ca-certificates
     curl
+    ffmpeg
     git
     libgl1
     libglib2.0-0
@@ -408,6 +409,7 @@ uv_python() {
 run_import_smoke() {
   local smoke_code='
 import importlib
+import importlib.metadata
 import sys
 
 modules = [
@@ -430,6 +432,7 @@ modules = [
     "pytransform3d",
     "trimesh",
     "posetestbot.web.app",
+    "posetestbot.bop.robot_consistency",
     "posetestbot.cluster.client",
     "posetestbot.cluster.controller_service",
 ]
@@ -450,6 +453,16 @@ try:
 except Exception:
     pass
 
+try:
+    import posetestbot
+    distribution = importlib.metadata.distribution("posetestbot")
+    if distribution.version != posetestbot.__version__:
+        failures.append("posetestbot: installed version differs from the checkout; rerun the installer")
+    if set((distribution.read_text("top_level.txt") or "").split()) != {"posetestbot"}:
+        failures.append("posetestbot: package discovery includes non-application directories; rerun the installer")
+except Exception as exc:
+    failures.append(f"posetestbot package metadata: {type(exc).__name__}: {exc}")
+
 if failures:
     print("Required Python import smoke failed:", file=sys.stderr)
     for failure in failures:
@@ -469,6 +482,13 @@ run_readiness_checks() {
 
   log "Checking required Python imports."
   run_import_smoke
+
+  log "Checking optional Pose Results MP4 export (FFmpeg/libx264)."
+  uv_python -c '
+from posetestbot.bop.inspection_exports import mp4_status
+status = mp4_status()
+print("FFmpeg/libx264 OK" if status["available"] else status["reason"])
+'
 
   if [[ "${WITH_POSEGRIDGEN}" == true ]]; then
     log "Checking the pinned PoseGridGen backend and renderer capabilities."

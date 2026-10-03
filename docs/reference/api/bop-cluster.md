@@ -41,7 +41,7 @@ and `im_id` with the standard result CSV. The endpoint rejects a missing or
 symlinked scene artifact, a duplicate scene ID, or any file that differs from
 its exported GT hash; it does not modify the original BOP scene files.
 
-## Inspect-only official evaluation
+## Inspect-only BOP and robot-consistency evaluation
 
 | Method and path | Contract |
 | --- | --- |
@@ -90,25 +90,73 @@ absolute path to the pinned toolkit, restricts the adapter scene IDs, and
 labels a proper sensor subset as not directly comparable to a full-dataset
 result.
 
-## Read-only pose-result inspection
+Every new evaluation also attempts
+[IPD robot consistency](../../concepts/robot-consistency.md) from recorded
+robot/calibration evidence. The request freezes those inputs and SHA-256;
+the queued worker adds `robot_consistency_mvd` and `robot_consistency_add`
+to `metrics` when available. These values have `unit: "mm"`, `source: "ipd"`,
+and `direction: "lower"`. Official BOP score output remains separate.
+`robot_consistency` in the report and setup/history summary includes
+`status` (`available`, `partial`, or `unavailable`), reasons, coverage,
+matched/eligible instance views, unmatched predictions, and bounded
+sensor/instance scores. Missing robot evidence does not block the official
+scores; corrupt or changed evidence fails closed. The existing submission
+contract, CPU/disk resources, and run-scoped artifact boundary are unchanged.
+
+## Pose-result inspection and visualization exports
 
 | Method and path | Contract |
 | --- | --- |
 | `GET /bop/inspection/result-location?result_id=…` | Resolve one retained result ID to a directly indexed, approved run folder for legacy direct links; reject missing or ambiguous IDs |
-| `GET /bop/inspection/setup?run_root=…&result_id=…` | Return compatible retained results, validated objects/scenes, sensor labels, capabilities, limits, and visualization contract |
+| `GET /bop/inspection/setup?run_root=…&result_id=…` | Return compatible retained results, validated objects/scenes, sensor labels, capabilities, limits, visualization contract, and `exports.mp4.available/reason` |
 | `GET /bop/inspection/frames?run_root=…&result_id=…&scene_id=…&filter=…&object_id=…&page=…&page_size=…` | Return a bounded paginated frame inventory and provenance-backed operation filters |
 | `GET /bop/inspection/frame?run_root=…&result_id=…&scene_id=…&im_id=…&max_hypotheses=…` | Return camera intrinsics, GT, ranked estimates, score/timing, visibility, optional operation evidence, and safe media URLs |
 | `GET /bop/inspection/media/<result_id>/<scene_id>/<im_id>/<kind>?run_root=…` | Serve ID-resolved RGB, or a bounded colorized depth PNG |
 | `GET /bop/inspection/masks/<result_id>/<scene_id>/<im_id>/<gt_id>/<kind>?run_root=…` | Serve an ID-resolved full or visible GT mask when present |
 | `GET /bop/inspection/models/<result_id>/<obj_id>?run_root=…` | Serve the hash-checked evaluation-model PLY |
+| `POST /bop/inspection/exports` | Save settings/frame selection and queue a CPU/disk visualization job; HTTP 202 with `export_id` and `job_id` |
+| `GET /bop/inspection/exports/<export_id>?run_root=…` | Return saved settings/source identity, frame count, job state, rendering progress/error, and completed download availability/URL |
+| `GET /bop/inspection/exports/<export_id>/download?run_root=…` | Serve a completed ZIP/MP4 attachment after retained integrity checks; HTTP 409 until successfully completed |
 
 Supported frame filters are `all`, `estimated`, `target`,
 `missing_estimate`, `registration`, `tracking`, and `reinitialization`.
 Operation labels are `unknown` unless sanitized retained provenance proves the
-FoundationPose execution contract. These APIs write nothing and accept no
+FoundationPose execution contract. Browsing is read-only. These APIs accept no
 filesystem media/model path from the caller. Result IDs, scene/frame/object/GT
 IDs, containment, regular-file status, symlinks, hashes, PNG dimensions, row
 counts, hypotheses, page size, and media size are validated before response.
+
+Export requests use a closed JSON object limited to 16 KiB. Oversized bodies,
+including streamed requests without a declared length, return HTTP 413 before
+JSON parsing or input snapshot creation. They require `run_root`, `result_id`,
+integer `scene_id`, and `format` (`zip` or `mp4`). Optional fields are `filter`
+(the same values as browsing, default `all`), `object_id` (positive integer or
+null), `background` (`rgb`/`depth`, default `rgb`), `max_hypotheses` (1–50,
+default 20), `fps` (integer 1–120, default 30), `geometry`, and `masks`.
+Pagination/frame IDs are not accepted: all matching frames in the scene are
+exported, in numeric order. The object filter affects frame selection, as in
+the viewer. It does not hide other objects within those frames.
+
+`geometry` accepts boolean `estimateSurface`, `estimateWireframe`,
+`estimateAxes`, `estimateBox`, `gtSurface`, `gtWireframe`, `gtAxes`, `gtBox`,
+and numeric `estimateOpacity`/`gtOpacity` (0–1). Defaults enable estimated
+surface and GT wireframe, with opacity 0.38/0.32. `masks` accepts boolean
+`full`/`visible` (default false) and numeric `fullOpacity`/`visibleOpacity`
+(0–1, defaults 0.28/0.42). Wireframe opacity is at least 0.75; boxes use 0.95
+and RGB axes are opaque, matching the viewer. All geometry is an x-ray overlay.
+
+Empty selections, invalid settings, unavailable requested masks/encoder, and
+unsafe paths fail closed (HTTP 400; unknown IDs return 404); busy job resources
+return 409. Rendering, hashing frame content, and encoding run through
+`LocalJobRunner` with `cpu` and `disk_io`, including its existing cancellation.
+Artifacts stay under `processed/bop_evaluation/visualizations/<export_id>/`.
+Requests retain source identities at submission; changes before/during
+rendering fail the job. Completed files are atomically published and bound to
+request/manifest/output SHA-256. Failed or canceled jobs never expose partials.
+Downloads remain recoverable after source drift. The page retains `export_id`
+alongside `run_root`; Jobs links also include result and scene IDs.
+If the operator leaves the submitted view before its response arrives, the
+response does not redirect them. The export remains accessible from Jobs.
 
 ## External cluster controller proxy
 

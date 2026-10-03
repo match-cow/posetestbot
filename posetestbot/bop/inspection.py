@@ -828,10 +828,12 @@ def _cached_index(
     return _build_index(Path(root_value), result_id)
 
 
-def _index(run_root: str | Path, result_id: str) -> dict[str, Any]:
+def _index(run_root: str | Path, result_id: str, *, refresh: bool = False) -> dict[str, Any]:
     if not isinstance(result_id, str) or RESULT_ID_RE.fullmatch(result_id) is None:
         raise KeyError("Unknown BOP result")
     root = Path(run_root).resolve()
+    if refresh:
+        return _build_index(root, result_id)
     return _cached_index(root.as_posix(), result_id, _inspection_signature(root, result_id))
 
 
@@ -966,6 +968,36 @@ def list_inspection_frames(
     if not 1 <= page_size <= MAX_PAGE_SIZE:
         raise ValueError(f"page_size must be between 1 and {MAX_PAGE_SIZE}")
     index = _index(run_root, result_id)
+    rows = matching_inspection_frames(index, scene_id, frame_filter, object_id)
+    scene = index["scenes_by_id"][scene_id]
+    total = len(rows)
+    for ordinal, row in enumerate(rows):
+        row["ordinal"] = ordinal
+        row["previous_im_id"] = rows[ordinal - 1]["im_id"] if ordinal else None
+        row["next_im_id"] = rows[ordinal + 1]["im_id"] if ordinal + 1 < total else None
+    start = (page - 1) * page_size
+    return {
+        "schema_version": INSPECTION_FRAME_LIST_SCHEMA,
+        "result_id": result_id,
+        "scene": _public_scene(scene),
+        "frame_filter": frame_filter,
+        "object_id": object_id,
+        "page": page,
+        "page_size": page_size,
+        "total_count": total,
+        "page_count": math.ceil(total / page_size) if total else 0,
+        "previous_page": page - 1 if page > 1 and start < total else None,
+        "next_page": page + 1 if start + page_size < total else None,
+        "frames": rows[start : start + page_size],
+    }
+
+
+def matching_inspection_frames(
+    index: Mapping[str, Any], scene_id: int, frame_filter: str, object_id: int | None
+) -> list[dict[str, Any]]:
+    """One selection contract for paginated browsing and whole-scene exports."""
+    if frame_filter not in FRAME_FILTERS:
+        raise ValueError("frame_filter is invalid")
     scene = index["scenes_by_id"].get(scene_id)
     if scene is None:
         raise KeyError("Unknown BOP inspection scene")
@@ -983,27 +1015,7 @@ def list_inspection_frames(
         rows = [row for row in rows if row["missing_estimate"]]
     elif frame_filter in {"registration", "tracking", "reinitialization"}:
         rows = [row for row in rows if frame_filter in row["operations"]]
-    total = len(rows)
-    for ordinal, row in enumerate(rows):
-        row["ordinal"] = ordinal
-        row["previous_im_id"] = rows[ordinal - 1]["im_id"] if ordinal else None
-        row["next_im_id"] = rows[ordinal + 1]["im_id"] if ordinal + 1 < total else None
-    start = (page - 1) * page_size
-    paginated = rows[start : start + page_size]
-    return {
-        "schema_version": INSPECTION_FRAME_LIST_SCHEMA,
-        "result_id": result_id,
-        "scene": _public_scene(scene),
-        "frame_filter": frame_filter,
-        "object_id": object_id,
-        "page": page,
-        "page_size": page_size,
-        "total_count": total,
-        "page_count": math.ceil(total / page_size) if total else 0,
-        "previous_page": page - 1 if page > 1 and start < total else None,
-        "next_page": page + 1 if start + page_size < total else None,
-        "frames": paginated,
-    }
+    return rows
 
 
 def _frame_rows(index: Mapping[str, Any], scene_id: int, im_id: int) -> tuple[Any, Any, Any]:
@@ -1029,11 +1041,21 @@ def inspection_frame(
     im_id: int,
     max_hypotheses: int = DEFAULT_HYPOTHESES,
 ) -> dict[str, Any]:
+    return inspection_frame_from_index(
+        _index(run_root, result_id), scene_id=scene_id, im_id=im_id,
+        max_hypotheses=max_hypotheses,
+    )
+
+
+def inspection_frame_from_index(
+    index: Mapping[str, Any], *, scene_id: int, im_id: int,
+    max_hypotheses: int = DEFAULT_HYPOTHESES,
+) -> dict[str, Any]:
+    """Render workers retain one validated index for incremental processing."""
     if not 1 <= max_hypotheses <= MAX_HYPOTHESES:
         raise ValueError(
             f"max_hypotheses must be between 1 and {MAX_HYPOTHESES}"
         )
-    index = _index(run_root, result_id)
     scene = index["scenes_by_id"].get(scene_id)
     if scene is None:
         raise KeyError("Unknown BOP inspection scene")
@@ -1279,6 +1301,15 @@ def inspection_depth_png(
         index["expected_size"][0],
     ):
         raise ValueError("BOP depth image changed after validation")
+    colored = colorize_depth(depth)
+    ok, encoded = cv2.imencode(".png", colored)
+    if not ok or encoded.nbytes > MAX_MEDIA_BYTES:
+        raise ValueError("Colorized BOP depth image exceeds the response cap")
+    return encoded.tobytes()
+
+
+def colorize_depth(depth: np.ndarray) -> np.ndarray:
+    """The same per-frame depth palette for the browser and saved images (BGR)."""
     valid = depth > 0
     normalized = np.zeros(depth.shape, dtype=np.uint8)
     if np.any(valid):
@@ -1293,10 +1324,7 @@ def inspection_depth_png(
         ).astype(np.uint8)
     colored = cv2.applyColorMap(normalized, cv2.COLORMAP_TURBO)
     colored[~valid] = 0
-    ok, encoded = cv2.imencode(".png", colored)
-    if not ok or encoded.nbytes > MAX_MEDIA_BYTES:
-        raise ValueError("Colorized BOP depth image exceeds the response cap")
-    return encoded.tobytes()
+    return colored
 
 
 def inspection_mask_path(

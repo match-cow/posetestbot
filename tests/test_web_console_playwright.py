@@ -806,10 +806,18 @@ def bop_inspection_scene(scene_id: int) -> dict:
     }
 
 
-def bop_inspection_frame_summary(scene_id: int, im_id: int) -> dict:
-    frame_ids = [0, 1] if scene_id == 1 else [5]
+def bop_inspection_frame_summary(
+    scene_id: int, im_id: int, frame_count: int = 2
+) -> dict:
+    frame_ids = list(range(frame_count)) if scene_id == 1 else [5]
     ordinal = frame_ids.index(im_id)
-    operation = "registration" if im_id == 0 else "tracking" if im_id == 1 else "reinitialization"
+    operation = (
+        "registration"
+        if im_id == 0
+        else "tracking"
+        if im_id == 1
+        else "reinitialization"
+    )
     return {
         "scene_id": scene_id,
         "im_id": im_id,
@@ -960,7 +968,13 @@ end_header
 """
 
 
-def install_pose_inspection_mocks(page, *, expected_run_root: str | None = None) -> list[dict]:
+def install_pose_inspection_mocks(
+    page,
+    *,
+    expected_run_root: str | None = None,
+    frame_count: int = 2,
+    mp4_available: bool = False,
+) -> list[dict]:
     results = [bop_result_fixture("a"), bop_result_fixture("b")]
     scenes = [bop_inspection_scene(1), bop_inspection_scene(2)]
 
@@ -977,6 +991,15 @@ def install_pose_inspection_mocks(page, *, expected_run_root: str | None = None)
             route,
             {
                 "schema_version": "bop_inspection_setup.v1",
+                "exports": {
+                    "zip": {"available": True},
+                    "mp4": {
+                        "available": mp4_available,
+                        "reason": None
+                        if mp4_available
+                        else "FFmpeg is missing. Image ZIP remains available.",
+                    },
+                },
                 "ready": True,
                 "dataset": bop_evaluation_dataset_fixture(),
                 "results": results,
@@ -1012,8 +1035,11 @@ def install_pose_inspection_mocks(page, *, expected_run_root: str | None = None)
         params = parse_qs(urlparse(route.request.url).query)
         scene_id = int(params["scene_id"][0])
         frame_filter = params.get("filter", ["all"])[0]
-        frame_ids = [0, 1] if scene_id == 1 else [5]
-        rows = [bop_inspection_frame_summary(scene_id, im_id) for im_id in frame_ids]
+        frame_ids = list(range(frame_count)) if scene_id == 1 else [5]
+        rows = [
+            bop_inspection_frame_summary(scene_id, im_id, frame_count)
+            for im_id in frame_ids
+        ]
         if frame_filter in {"registration", "tracking", "reinitialization"}:
             rows = [row for row in rows if frame_filter in row["operations"]]
         page_number = int(params.get("page", ["1"])[0])
@@ -1028,10 +1054,10 @@ def install_pose_inspection_mocks(page, *, expected_run_root: str | None = None)
                 "page": page_number,
                 "page_size": 80,
                 "total_count": len(rows),
-                "page_count": 1 if rows else 0,
-                "previous_page": None,
-                "next_page": None,
-                "frames": rows,
+                "page_count": (len(rows) + 79) // 80,
+                "previous_page": page_number - 1 if page_number > 1 else None,
+                "next_page": page_number + 1 if page_number * 80 < len(rows) else None,
+                "frames": rows[(page_number - 1) * 80 : page_number * 80],
             },
         )
 
@@ -2839,15 +2865,20 @@ def test_jobs_collects_and_hands_off_each_active_run_estimator_result(
     )
 
 
+@pytest.mark.parametrize(
+    "viewport",
+    [{"width": 1920, "height": 1080}, {"width": 1440, "height": 900}],
+    ids=["1920x1080", "1440x900"],
+)
 def test_bop_evaluation_keeps_history_and_metrics_result_scoped(
-    console_server, page
+    console_server, page, viewport
 ) -> None:
     install_common_mocks(page)
     page.add_init_script(
         "localStorage.setItem('posetestbot.currentContracts.v4', 'reset');"
         "localStorage.setItem('posetestbot.selectedRun', '/tmp/posetestbot-console/old-run')"
     )
-    page.set_viewport_size({"width": 1920, "height": 1080})
+    page.set_viewport_size(viewport)
     result_a = bop_result_fixture("a")
     result_b = bop_result_fixture("b")
     setup = {
@@ -2869,6 +2900,29 @@ def test_bop_evaluation_keeps_history_and_metrics_result_scoped(
             bop_evaluation_fixture(result_a, token="a", metric=0.111),
             bop_evaluation_fixture(result_b, token="b", metric=0.999),
         ],
+    }
+    setup["evaluations"][0]["metrics"].extend([
+        {"id": "robot_consistency_mvd", "label": "Robot consistency MVD", "value": 1.25, "display": "1.2500", "unit": "mm", "source": "ipd", "direction": "lower"},
+        {"id": "robot_consistency_add", "label": "Robot consistency ADD", "value": 0.75, "display": "0.7500", "unit": "mm", "source": "ipd", "direction": "lower"},
+    ])
+    robot_evidence = {
+        "status": "available", "reason": None,
+        "source_url": "https://github.com/intrinsic-ai/ipd/blob/75dfe72e2f194f2a0e8a82bd8268fbec09205567/src/intrinsic_ipd/evaluator.py",
+        "implementation_revision": "posetestbot_ipd_robot_consistency.v1",
+        "matching_threshold_mm": 100, "eligible_frames": 40, "matched_frames": 30,
+        "coverage": 0.75, "prediction_count": 35, "unmatched_predictions": 5,
+        "track_count": 11, "evaluated_track_count": 11, "tracks_truncated": False,
+        "excluded_scenes": [],
+        "warnings": ["Consistency measures repeatability; a fixed pose bias can still produce zero error."],
+        "tracks": [{"scene_id": 1, "sensor_name": "Center RGB-D", "instance_uuid": f"{index:08d}-1111-4111-8111-111111111111", "obj_id": 1, "status": "available", "eligible_frames": 40, "matched_frames": 30, "coverage": 0.75, "mvd_mm": 1.25, "add_mm": 0.75} for index in range(11)],
+    }
+    setup["evaluations"][0]["robot_consistency"] = robot_evidence
+    setup["evaluations"][1]["robot_consistency"] = {
+        **robot_evidence, "status": "unavailable", "reason": "No matched robot-driven viewpoints are available.",
+        "track_count": 0, "evaluated_track_count": 0, "tracks": [],
+        "eligible_frames": 0, "matched_frames": 0, "coverage": None,
+        "prediction_count": 0, "unmatched_predictions": 0,
+        "excluded_scenes": [{"scene_id": 2, "status": "unavailable", "reason": "A static camera supplies no robot-driven change of viewpoint."}],
     }
     def setup_handler(route):
         assert parse_qs(urlparse(route.request.url).query)["run_root"] == [RUN_ROOT]
@@ -2900,6 +2954,19 @@ def test_bop_evaluation_keeps_history_and_metrics_result_scoped(
     report = page.get_by_test_id("bop-evaluation-report")
     expect(report).to_contain_text("0.111")
     expect(report).not_to_contain_text("0.999")
+    expect(report).to_contain_text("Robot consistency MVD")
+    expect(report).to_contain_text("1.2500")
+    robot = report.get_by_test_id("robot-consistency-evidence")
+    expect(robot).to_contain_text("75.0%")
+    expect(robot).to_contain_text("30 / 40")
+    expect(robot).to_contain_text("fixed pose bias can still produce zero")
+    expect(robot).to_contain_text("Lower is better")
+    expect(robot.get_by_role("link", name="IPD metric definition and reference implementation")).to_have_attribute("href", robot_evidence["source_url"])
+    expect(robot.get_by_role("row")).to_have_count(11)
+    robot.get_by_role("button", name="Show 11 retained tracks").click()
+    expect(robot.get_by_role("row")).to_have_count(12)
+    robot.get_by_role("button", name="Show fewer tracks").click()
+    expect(robot.get_by_role("row")).to_have_count(11)
 
     page.get_by_label("Retained pose result").click()
     page.get_by_role("option", name=re.compile("FoundationPose result B")).click()
@@ -2910,6 +2977,9 @@ def test_bop_evaluation_keeps_history_and_metrics_result_scoped(
     report = page.get_by_test_id("bop-evaluation-report")
     expect(report).to_contain_text("0.999")
     expect(report).not_to_contain_text("0.111")
+    expect(report).not_to_contain_text("1.2500")
+    expect(report.get_by_test_id("robot-consistency-evidence")).to_contain_text("No matched robot-driven viewpoints")
+    expect(report.get_by_test_id("robot-consistency-evidence")).to_contain_text("A static camera")
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
     )
@@ -3019,6 +3089,305 @@ def test_pose_results_controls_projection_pixels_and_desktop_reachability(
     result_page = page.get_by_test_id("pose-results-page")
     for label in ("Pose Estimation", "Review dataset workflow"):
         expect(result_page.get_by_role("link", name=label)).to_be_visible()
+
+
+@pytest.mark.parametrize(
+    "viewport", [{"width": 1920, "height": 1080}, {"width": 1440, "height": 900}]
+)
+def test_pose_results_exports_snapshot_download_and_recovery(
+    console_server, page, viewport
+):
+    install_common_mocks(page)
+    results = install_pose_inspection_mocks(page, frame_count=811, mp4_available=True)
+    page.set_viewport_size(viewport)
+    submitted = []
+    current = {"state": "running", "progress": "rendering", "done": 7, "error": None}
+    export_id = "visualization-aaaaaaaaaaaa"
+    url = f"/bop/inspection/exports/{export_id}"
+
+    def submit(route):
+        submitted.append(route.request.post_data_json)
+        fulfill_json(
+            route, {"export_id": export_id, "job_id": "export-job"}, status=202
+        )
+
+    def status(route):
+        fulfill_json(
+            route,
+            {
+                "export_id": export_id,
+                "settings": submitted[-1],
+                "scene_name": "Center",
+                "frame_count": 811,
+                "job_id": "export-job",
+                "job_state": current["state"],
+                "progress": {
+                    "state": current["progress"],
+                    "completed_frames": current["done"],
+                    "total_frames": 811,
+                },
+                "error": current["error"],
+                "download_available": current["state"] == "succeeded",
+                "download_url": url + "/download?run_root=" + RUN_ROOT
+                if current["state"] == "succeeded"
+                else None,
+            },
+        )
+
+    page.route("**/bop/inspection/exports", submit)
+    page.route("**" + url + "?**", status)
+    page.route(
+        "**" + url + "/download?**",
+        lambda route: route.fulfill(
+            status=200,
+            headers={"Content-Disposition": 'attachment; filename="scene.mp4"'},
+            content_type="video/mp4",
+            body=b"export fixture",
+        ),
+    )
+    page.goto(
+        f"{console_server.url}/#/pose-results?result_id={results[0]['result_id']}",
+        wait_until="networkidle",
+    )
+    card = page.get_by_test_id("pose-export-controls")
+    expect(card).to_contain_text("811 matching frames across all pages")
+    expect(page.get_by_test_id("pose-export-duration")).to_have_text("27.03 s")
+    layers = page.get_by_test_id("pose-layer-controls")
+    assert (
+        card.bounding_box()["y"]
+        >= layers.bounding_box()["y"] + layers.bounding_box()["height"]
+    )
+    page.get_by_label("Video FPS").fill("60")
+    expect(page.get_by_test_id("pose-export-duration")).to_have_text("13.52 s")
+    page.get_by_label("Video FPS").fill("121")
+    expect(card.get_by_role("button", name="Create & download MP4")).to_be_disabled()
+    expect(card).to_contain_text("FPS must be an integer from 1 to 120")
+    page.get_by_label("Video FPS").fill("30")
+    page.get_by_role("button", name="Depth", exact=True).click()
+    layers.get_by_role("checkbox", name="Estimated bounding box").check()
+    layers.get_by_role("checkbox", name="Full GT mask").check()
+    page.get_by_label("Estimated opacity").focus()
+    page.get_by_label("Estimated opacity").press("Home")
+    card.get_by_role("button", name="Create & download MP4").click()
+    expect(page).to_have_url(re.compile(f"export_id={export_id}"))
+    progress = page.get_by_test_id("pose-export-progress")
+    expect(progress).to_contain_text("7 / 811 frames")
+    expect(card.get_by_role("link", name="Open Jobs")).to_be_visible()
+    assert submitted[0]["background"] == "depth"
+    assert submitted[0]["format"] == "mp4" and submitted[0]["fps"] == 30
+    assert submitted[0]["filter"] == "all" and submitted[0]["object_id"] is None
+    assert submitted[0]["geometry"]["estimateBox"] is True
+    assert submitted[0]["geometry"]["estimateOpacity"] == 0.05
+    assert submitted[0]["masks"]["full"] is True
+    assert "page" not in submitted[0] and "im_id" not in submitted[0]
+    page.get_by_label("Video FPS").fill("60")
+    page.get_by_role("button", name="RGB", exact=True).click()
+    page.get_by_label("Retained result").click()
+    page.get_by_role("option", name=re.compile("FoundationPose result B")).click()
+    expect(progress).to_contain_text("7 / 811 frames")
+    with page.expect_download() as downloaded:
+        current.update(state="succeeded", progress="completed", done=811)
+    assert downloaded.value.suggested_filename == "scene.mp4"
+    expect(progress).to_contain_text("DEPTH · 30 FPS")
+    expect(progress.get_by_role("link", name="Download completed MP4")).to_be_visible()
+    downloads = []
+    page.on("download", lambda download: downloads.append(download))
+    page.reload(wait_until="networkidle")
+    expect(page.get_by_test_id("pose-export-progress")).to_contain_text(
+        "completed · 811 / 811"
+    )
+    assert downloads == []
+    with page.expect_download():
+        page.get_by_role("link", name="Download completed MP4").click()
+    job = {
+        "id": "export-job",
+        "name": "bop_inspection_export",
+        "status": "succeeded",
+        "created_at": "2026-09-30T12:00:00Z",
+        "ended_at": "2026-09-30T12:00:01Z",
+        "started_at": "2026-09-30T12:00:00Z",
+        "message": None,
+        "tail": [],
+        "command": ["uv"],
+        "cwd": "/repo",
+        "log_path": "/tmp/log",
+        "returncode": 0,
+        "resources": ["cpu", "disk_io"],
+        "scope_kind": "run",
+        "run_root": RUN_ROOT,
+        "parameters": {
+            "export_id": export_id,
+            "result_id": results[0]["result_id"],
+            "scene_id": 1,
+        },
+    }
+    page.route(
+        LOCAL_JOBS_URL_RE,
+        lambda route: fulfill_json(
+            route,
+            {
+                "jobs": [job],
+                "resources": {},
+                "total": 1,
+                "status_counts": {"succeeded": 1},
+                "next_cursor": None,
+                "limit": 20,
+            },
+        ),
+    )
+    page.get_by_test_id("pose-export-controls").get_by_role(
+        "link", name="Open Jobs"
+    ).click()
+    page.get_by_role("link", name="Open export", exact=True).click()
+    expect(page).to_have_url(re.compile(f"export_id={export_id}"))
+    expect(page.get_by_role("link", name="Download completed MP4")).to_be_visible()
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+    current.update(
+        state="failed",
+        progress="failed",
+        error="FFmpeg encoding failed; see the Jobs log",
+    )
+    page.reload(wait_until="networkidle")
+    expect(
+        page.get_by_test_id("pose-export-progress").get_by_role("alert")
+    ).to_contain_text("FFmpeg encoding failed")
+    expect(page.get_by_role("link", name="Download completed MP4")).to_have_count(0)
+
+
+def test_export_submission_response_does_not_navigate_away_from_jobs(console_server, page):
+    install_common_mocks(page)
+    results = install_pose_inspection_mocks(page)
+    pending = []
+    page.route("**/bop/inspection/exports", lambda route: pending.append(route))
+    page.goto(
+        f"{console_server.url}/#/pose-results?result_id={results[0]['result_id']}",
+        wait_until="networkidle",
+    )
+    card = page.get_by_test_id("pose-export-controls")
+    with page.expect_request("**/bop/inspection/exports"):
+        card.get_by_role("button", name="Download images (.zip)").click()
+    card.get_by_role("link", name="Open Jobs").click()
+    expect(page).to_have_url(re.compile(r"/#/jobs$"))
+    fulfill_json(
+        pending[0],
+        {"export_id": "visualization-bbbbbbbbbbbb", "job_id": "export-job"},
+        status=202,
+    )
+    page.wait_for_load_state("networkidle")
+    expect(page).to_have_url(re.compile(r"/#/jobs$"))
+    expect(page.get_by_test_id("pose-export-controls")).to_have_count(0)
+
+
+def test_pose_results_cpu_export_matches_browser_projection_and_colors(
+    console_server, page, tmp_path
+):
+    from posetestbot.bop.inspection_render import (
+        GEOMETRY_DEFAULTS,
+        MASK_COLORS,
+        load_geometry,
+        render_geometry,
+    )
+
+    install_common_mocks(page)
+    results = install_pose_inspection_mocks(page)
+    frame = bop_inspection_frame_fixture(results[0], 1, 0)
+    angle = 0.27
+    for pose in frame["estimates"] + frame["ground_truth"]:
+        pose["rotation"] = [
+            float(np.cos(angle)),
+            0,
+            float(np.sin(angle)),
+            0,
+            1,
+            0,
+            -float(np.sin(angle)),
+            0,
+            float(np.cos(angle)),
+        ]
+    page.route("**/bop/inspection/frame?**", lambda route: fulfill_json(route, frame))
+    page.goto(
+        f"{console_server.url}/#/pose-results?result_id={results[0]['result_id']}",
+        wait_until="networkidle",
+    )
+    viewer = page.get_by_test_id("pose-result-viewer")
+    viewer.evaluate(
+        "el => {el.style.width='640px'; el.style.height='480px'; el.style.border='none'}"
+    )
+    controls = page.get_by_test_id("pose-layer-controls")
+    controls.get_by_role("checkbox", name="Ground-truth wireframe").uncheck()
+    page.wait_for_timeout(500)
+    canvas = viewer.locator("canvas")
+    browser_pixels = canvas.evaluate("""el => {
+        const copy = document.createElement('canvas'); copy.width=640; copy.height=480;
+        const ctx = copy.getContext('2d'); ctx.fillStyle='black'; ctx.fillRect(0,0,640,480);
+        ctx.drawImage(el,0,0,640,480); return Array.from(ctx.getImageData(0,0,640,480).data);
+    }""")
+    browser = np.array(browser_pixels, dtype=np.uint8).reshape(480, 640, 4)[:, :, :3]
+    path = tmp_path / "model.ply"
+    path.write_text(INSPECTION_MODEL_PLY)
+    rendered = render_geometry(
+        np.zeros((480, 640, 3), np.uint8),
+        frame,
+        {1: load_geometry(path)},
+        {**GEOMETRY_DEFAULTS, "gtWireframe": False},
+    )
+    browser_mask = browser.max(axis=2) > 0
+    rendered_mask = rendered.max(axis=2) > 0
+    assert (
+        np.count_nonzero(browser_mask & rendered_mask)
+        / np.count_nonzero(browser_mask | rendered_mask)
+        > 0.98
+    )
+    interior = (
+        cv2.erode(
+            (browser_mask & rendered_mask).astype(np.uint8), np.ones((5, 5), np.uint8)
+        )
+        > 0
+    )
+    difference = np.abs(browser.astype(int) - rendered.astype(int)).max(axis=2)
+    assert np.quantile(difference[interior], 0.99) <= 3
+    for label, test_id, kind in [
+        ("Full GT mask", "pose-full-mask", "full"),
+        ("Visible mask", "pose-visible-mask", "visible"),
+    ]:
+        controls.get_by_role("checkbox", name=label, exact=True).check()
+        color = viewer.get_by_test_id(test_id).evaluate("""el => {
+            const canvas = document.createElement('canvas'); canvas.width=1; canvas.height=1;
+            const ctx = canvas.getContext('2d'); ctx.fillStyle=getComputedStyle(el).backgroundColor;
+            ctx.fillRect(0,0,1,1); return Array.from(ctx.getImageData(0,0,1,1).data).slice(0,3);
+        }""")
+        assert (
+            max(abs(a - b) for a, b in zip(color, MASK_COLORS[kind], strict=True)) <= 1
+        )
+        expect(viewer.get_by_test_id(test_id)).to_have_css("mask-mode", "luminance")
+
+
+def test_pose_results_zip_encoder_unavailable_and_export_errors(console_server, page):
+    install_common_mocks(page)
+    results = install_pose_inspection_mocks(page)
+    submitted = []
+
+    def submit(route):
+        submitted.append(route.request.post_data_json)
+        fulfill_json(
+            route,
+            {"output": "No frames match the selected scene and filters"},
+            status=400,
+        )
+
+    page.route("**/bop/inspection/exports", submit)
+    page.goto(
+        f"{console_server.url}/#/pose-results?result_id={results[0]['result_id']}",
+        wait_until="networkidle",
+    )
+    card = page.get_by_test_id("pose-export-controls")
+    expect(card).to_contain_text("FFmpeg is missing")
+    expect(card.get_by_role("button", name="Create & download MP4")).to_be_disabled()
+    card.get_by_role("button", name="Download images (.zip)").click()
+    expect(card.get_by_role("alert")).to_contain_text("No frames match")
+    assert submitted[0]["format"] == "zip"
 
 
 def test_pose_results_webgl_fallback_retains_images_masks_and_evidence(
@@ -3481,6 +3850,13 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
     expect(page.get_by_text("Catalogue action failed")).to_be_visible()
     expect(page.get_by_text("pose-template bundles")).to_be_visible()
     expect(confirmation).to_be_visible()
+    # Error notifications must stay anchored to the viewport even while their
+    # portal is inside the modal's focus scope, leaving retry controls reachable.
+    error_toast = page.locator('[data-sonner-toast][data-type="error"]').last
+    expect(error_toast).to_be_visible()
+    assert error_toast.bounding_box()["y"] > (
+        confirmation.bounding_box()["y"] + confirmation.bounding_box()["height"]
+    )
     confirmation.get_by_role("button", name="Confirm delete").click()
     expect(page.get_by_text("Workpiece deleted")).to_be_visible()
     expect(page.get_by_role("button", name="Select New clamp")).to_have_count(0)
@@ -5994,6 +6370,140 @@ def test_ambiguous_auto_sync_keeps_recorded_timing_with_visible_warning(
     expect(row).to_contain_text("Applied +0.0 ms")
     expect(row).to_contain_text("+30.0 ms candidate not applied")
     expect(row).to_contain_text("degraded")
+
+
+def test_stale_backend_cannot_run_new_angular_time_alignment(
+    console_server,
+    page,
+) -> None:
+    setup = calibration_time_alignment_setup(
+        latest_attempt_id=None,
+        implementation_revision="constant_latency_nearest_pose_motion_lomo_warn_keep_zero.v5",
+    )
+    install_common_mocks(page, config_payload=eye_in_hand_calibration_config())
+    page.route("**/calibration/setup?**", lambda route: fulfill_json(route, setup))
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=calculate",
+        wait_until="networkidle",
+    )
+    expect(page.get_by_test_id("calibration-backend-restart-required")).to_contain_text(
+        "constant_latency_nearest_pose_optical_spin.v6"
+    )
+    expect(page.get_by_role("button", name="Analyze recording · estimate time offset")).to_be_disabled()
+
+
+def test_angular_latency_measurement_and_applied_offset_remain_visible(
+    console_server,
+    page,
+) -> None:
+    attempt_id = "c" * 32
+    setup = calibration_time_alignment_setup(latest_attempt_id=attempt_id)
+    install_common_mocks(page, config_payload=eye_in_hand_calibration_config())
+    page.route("**/calibration/setup?**", lambda route: fulfill_json(route, setup))
+    sensor_key = "realsense_d435:wrist-1"
+    residuals = {"mean_translation_mm": 2.5, "mean_rotation_deg": 0.25}
+    attempt = {
+        "schema_version": "calibration_attempt.v1",
+        "attempt_id": attempt_id,
+        "request": {
+            "mode": "eye_in_hand",
+            "sensor_keys": [sensor_key],
+            "target_id": setup["saved_targets"][0]["target_id"],
+            "solver_policy": "auto_compare",
+            "intrinsics_policy": "compare_factory_opencv",
+            "synchronization_policy": "auto_offset",
+        },
+        "progress": calibration_attempt_progress(
+            status="complete",
+            time_alignment_status="complete",
+            message="Angular latency identified.",
+        ),
+        "results": calibration_failed_results(setup["cameras"][0]),
+        "intrinsic_comparison": None,
+        "promotion": None,
+        "time_offset_search": {
+            "implementation_revision": "constant_latency_nearest_pose_optical_spin.v6",
+            "policy": "auto_offset",
+            "status": "complete",
+            "sign_convention": {},
+            "search": {
+                "minimum_robot_pose_time_offset_ms": -300,
+                "maximum_robot_pose_time_offset_ms": 300,
+                "step_ms": 5,
+                "time_offset_failure_policy": "warn_keep_zero",
+            },
+            "sensors": [
+                {
+                    "sensor_key": sensor_key,
+                    "display_name": "Right RGB-D",
+                    "status": "applied",
+                    "decision_reason": "optical_axis_rotation_alignment_identified_latency",
+                    "selected_robot_pose_time_offset_ms": 25,
+                    "selected_sync_delta_ms": -25,
+                    "candidate_robot_pose_time_offset_ms": 25,
+                    "evidence_strength": "motion_identified",
+                    "warning_fallback_used": False,
+                    "boundary_hit": False,
+                    "cross_validation": {
+                        "zero_offset": {"residuals": residuals},
+                        "candidate": {"residuals": residuals},
+                        "improvement": {
+                            "absolute_translation_mm": -0.03,
+                            "relative_translation": -0.012,
+                            "rotation_change_deg": 0.015,
+                        },
+                    },
+                    "rotational_timing": {
+                        "status": "identified",
+                        "reason": "nonzero_latency_identified_from_reversible_optical_axis_motion",
+                        "estimated_robot_pose_time_offset_ms": 22.7,
+                        "confidence_interval_ms": [17.4, 32.1],
+                        "motion_count": 3,
+                        "view_count": 193,
+                        "held_out_motions": [
+                            {
+                                "held_out_motion": "forward_spin",
+                                "robot_pose_time_offset_ms": 27.1,
+                            }
+                        ],
+                    },
+                    "checks": [
+                        {
+                            "name": "cross_validated_translation_improvement",
+                            "status": "not_needed",
+                        },
+                        {"name": "rotational_timing_identifiability", "status": "ok"},
+                    ],
+                    "curve": [],
+                }
+            ],
+        },
+    }
+    page.route(
+        f"**/calibration/attempts/{attempt_id}?**",
+        lambda route: fulfill_json(route, attempt),
+    )
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    page.goto(
+        f"{console_server.url}/#/workflow/calibration?step=calculate",
+        wait_until="networkidle",
+    )
+
+    alignment = page.get_by_test_id("calibration-time-alignment")
+    row = alignment.locator(f'[data-time-offset-sensor="{sensor_key}"]')
+    expect(row).to_contain_text("Time offset applied")
+    expect(row).to_contain_text("Applied +25.0 ms")
+    expect(row).to_contain_text("Measured +22.7 ms")
+    expect(row).to_contain_text("uncertainty +17.4 to +32.1 ms")
+    expect(row).to_contain_text("dataset sync delta -25.0 ms")
+    expect(row).to_contain_text("3 / 193")
+    expect(row).to_contain_text("-1.2%")
+    expect(page.get_by_test_id("calibration-time-alignment-warning")).to_have_count(0)
+    alignment.get_by_text("Technical offset evidence · Right RGB-D").click()
+    evidence = page.get_by_test_id(f"timing-rotation-evidence-{sensor_key}")
+    expect(evidence).to_contain_text("half a robot sample period")
+    expect(evidence).to_contain_text("forward_spin")
+    expect(evidence).to_contain_text("+27.1 ms")
 
 
 def test_fixed_zero_policy_is_submitted_and_reported(

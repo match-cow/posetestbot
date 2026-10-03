@@ -85,7 +85,8 @@ this repository:
 - a general evaluation stage; or
 - cluster secrets and remote filesystem configuration.
 
-The narrow exception is Inspect-only official BOP19 evaluation of an already
+The narrow exception is Inspect-only official BOP19 and
+[IPD robot-consistency evaluation](robot-consistency.md) of an already
 exported annotation-bearing dataset and immutable compatible result. It writes
 derived evidence only below `processed/bop_evaluation/`. For a verified
 sensor-subset result, the adapter recomputes the selected inventory from the
@@ -93,9 +94,27 @@ unchanged local export, writes an immutable filtered BOP19 targets file inside
 the evaluation folder, and constrains the pinned toolkit to those scenes. No
 tracking or estimator logic crosses back into this repository.
 
-The sibling read-only inspection adapter resolves only validated result, scene,
+Robot consistency uses recorded robot poses and exported hand-eye calibration
+snapshots, retains hash-bound inputs and MVD/ADD evidence in the same evaluation
+directory, and never contacts hardware. Unavailable instance/viewpoint evidence
+is explicit; it never substitutes a zero score.
+
+The sibling inspection adapter resolves only validated result, scene,
 frame, GT-instance, and object identifiers. It hash-checks retained CSV,
 provenance, and model evidence; bounds JSON rows and media; rejects symlinks and
 path escapes; and serves the existing BOP RGB, colorized depth, masks, and
-evaluation PLY without writing visualization artifacts. Browser projection is
-an x-ray view of saved BOP poses, not another pipeline stage or metric engine.
+evaluation PLY. Browser projection is an x-ray view of saved BOP poses.
+Explicit image/video exports use the same frame filters and validated index,
+with a NumPy/OpenCV/Pillow/trimesh CPU renderer matching the BOP projection,
+colors, masks, opacity rules, hypothesis limits, and x-ray layer ordering.
+The renderer retains models and processes one original-resolution frame at a
+time. ZIP stores PNGs and a source/settings manifest; MP4 streams frames to
+FFmpeg/libx264 with constant FPS and even-dimension padding.
+
+`LocalJobRunner` owns these cancelable CPU/disk jobs and their encoder process
+group. Requests bind the selected frame inventory and source file identities
+at submission; the worker records content hashes and rejects source changes
+before publishing. Outputs appear atomically below
+`processed/bop_evaluation/visualizations/`; downloads require a successful job
+and recheck the request, manifest, and output hashes. This remains Inspect-only
+derived visualization, with no estimator, metric engine, or acquisition stage.
