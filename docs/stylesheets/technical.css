@@ -38,3 +38,14 @@
 .md-typeset h2 > .headerlink {
   vertical-align: 0.42em;
 }
+
+/* Console screenshots in the user guide: framed so light UI captures stay
+ * distinguishable from the page background in both colour schemes. */
+.md-typeset a > img[src*="images/console/"],
+.md-typeset img[src*="images/console/"] {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 12%);
+  display: block;
+  margin: 0.8em 0;
+}

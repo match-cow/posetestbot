@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://squidfunk.github.io/mkdocs-material/schema.json
 
-site_name: PoseTestBot Technical Documentation
-site_description: Acquisition, calibration, synchronization, and BOP export contracts for PoseTestBot
+site_name: PoseTestBot Documentation
+site_description: How to calibrate cameras, record BOP datasets, and evaluate pose estimators with the PoseTestBot operator console
 site_url: https://match-cow.github.io/posetestbot/
 repo_url: https://github.com/match-cow/PoseTestBot
 repo_name: match-cow/PoseTestBot
@@ -19,6 +19,7 @@ theme:
   language: en
   font: false
   features:
+    - navigation.tabs
     - navigation.sections
     - navigation.indexes
     - navigation.top
@@ -66,41 +67,59 @@ markdown_extensions:
       alternate_style: true
 
 nav:
-  - Technical overview: index.md
-  - Start here:
-      - System overview: getting-started/overview.md
-      - Installation and first launch: getting-started/installation.md
-      - Operator workflows: OPERATOR_WORKFLOWS.md
-      - Physical commissioning: COMMISSIONING.md
-  - System design:
-      - Architecture and boundaries: concepts/architecture.md
-      - Runs and artifact lineage: concepts/runs-and-artifacts.md
-      - Robot consistency metric: concepts/robot-consistency.md
-      - Depth quality and finishes: concepts/depth-evaluation.md
-      - Safety and authorization: concepts/safety.md
-  - HTTP API:
-      - API conventions: reference/http-api.md
-      - Complete route index: reference/http-api-routes.md
-      - System, sensors, and monitoring: reference/api/system-sensors.md
-      - Runs and jobs: reference/api/runs-jobs.md
-      - Capture and focused orchestration: reference/api/capture-pipeline.md
-      - Calibration: reference/api/calibration.md
-      - Workpieces and pose templates: reference/api/catalogs.md
-      - BOP and cluster boundary: reference/api/bop-cluster.md
-      - Inspect depth evaluation: reference/api/depth-evaluation.md
-  - File and command reference:
-      - Run configuration: reference/run-config.md
-      - Artifact index: reference/artifacts.md
-      - CLI and scripts: reference/cli.md
-  - Component guides:
-      - Calibration target generation: POSEGRIDGEN_CALIBRATION_TARGETS.md
-      - Workpiece Catalogue: WORKPIECE_CATALOGUE.md
-      - Pose templates and object GT: POSETEMPLATECREATOR_OBJECT_GT.md
-  - IIWA integration:
-      - Full-capture application: IIWA_FULL_CAPTURE_APPLICATION.md
-      - Single-frame static calibration: IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md
-      - Nine-frame teaching checklist: IIWA_CALIBRATION_TEACHING_CHECKLIST.md
-      - Pose-stream cadence: IIWA_POSE_STREAM_CADENCE.md
-  - Documentation maintenance: GITHUB_PAGES.md
+  - Home: index.md
+  - Get started:
+      - Quickstart: quickstart.md
+      - Console tour: guide/console-tour.md
+      - Lab safety: guide/lab-safety.md
+  - User guide:
+      - Calibrate cameras: guide/calibrate-cameras.md
+      - Prepare objects and pose templates: guide/objects-and-templates.md
+      - Record an object dataset: guide/record-dataset.md
+      - Run a pose estimator: guide/pose-estimation.md
+      - Evaluate pose accuracy: guide/evaluate-poses.md
+      - Evaluate depth quality: guide/evaluate-depth.md
+      - Runs, jobs, and your data: guide/runs-jobs-data.md
+      - Troubleshooting and FAQ: guide/troubleshooting.md
+      - Glossary: guide/glossary.md
+  - Technical reference:
+      - Overview:
+          - System overview: getting-started/overview.md
+          - Detailed workflow reference: OPERATOR_WORKFLOWS.md
+      - System design:
+          - Architecture and boundaries: concepts/architecture.md
+          - Runs and artifact lineage: concepts/runs-and-artifacts.md
+          - Robot consistency metric: concepts/robot-consistency.md
+          - Depth quality and finishes: concepts/depth-evaluation.md
+          - Safety and authorization: concepts/safety.md
+      - HTTP API:
+          - API conventions: reference/http-api.md
+          - Complete route index: reference/http-api-routes.md
+          - System, sensors, and monitoring: reference/api/system-sensors.md
+          - Runs and jobs: reference/api/runs-jobs.md
+          - Capture and focused orchestration: reference/api/capture-pipeline.md
+          - Calibration: reference/api/calibration.md
+          - Workpieces and pose templates: reference/api/catalogs.md
+          - BOP and cluster boundary: reference/api/bop-cluster.md
+          - Inspect depth evaluation: reference/api/depth-evaluation.md
+      - File and command reference:
+          - Run configuration: reference/run-config.md
+          - Artifact index: reference/artifacts.md
+          - CLI and scripts: reference/cli.md
+      - Component guides:
+          - Calibration target generation: POSEGRIDGEN_CALIBRATION_TARGETS.md
+          - Workpiece Catalogue: WORKPIECE_CATALOGUE.md
+          - Pose templates and object GT: POSETEMPLATECREATOR_OBJECT_GT.md
+  - Lab administration:
+      - Setup:
+          - Installation and first launch: getting-started/installation.md
+          - Physical commissioning: COMMISSIONING.md
+      - IIWA integration:
+          - Full-capture application: IIWA_FULL_CAPTURE_APPLICATION.md
+          - Single-frame static calibration: IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md
+          - Nine-frame teaching checklist: IIWA_CALIBRATION_TEACHING_CHECKLIST.md
+          - Pose-stream cadence: IIWA_POSE_STREAM_CADENCE.md
+      - Maintenance:
+          - Documentation maintenance: GITHUB_PAGES.md
 
 copyright: PoseTestBot is research software; physical execution remains operator-controlled.

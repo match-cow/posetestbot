@@ -102,15 +102,23 @@ def test_desktop_sidebar_uses_persistent_pages_and_browser_history(
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto(docs_server.url, wait_until="networkidle")
 
-    expect(page).to_have_title(re.compile("PoseTestBot Technical Documentation"))
+    expect(page).to_have_title(re.compile("PoseTestBot Documentation"))
     expect(
-        page.get_by_role("heading", name="PoseTestBot technical documentation")
+        page.get_by_role("heading", name="PoseTestBot documentation")
     ).to_be_visible()
+    tabs = page.locator(".md-tabs")
+    expect(tabs).to_be_visible()
+    for name in ("Get started", "User guide", "Technical reference", "Lab administration"):
+        expect(tabs.get_by_role("link", name=name, exact=True)).to_be_visible()
+
+    tabs.get_by_role("link", name="User guide", exact=True).click()
     sidebar = page.locator(".md-sidebar--primary")
     expect(sidebar).to_be_visible()
-    expect(sidebar.get_by_role("link", name="System overview", exact=True)).to_be_visible()
-    expect(sidebar.get_by_role("link", name="API conventions", exact=True)).to_be_visible()
+    expect(sidebar.get_by_role("link", name="Record an object dataset", exact=True)).to_be_visible()
+    expect(sidebar.get_by_role("link", name="API conventions", exact=True)).to_be_hidden()
 
+    tabs.get_by_role("link", name="Technical reference", exact=True).click()
+    expect(sidebar.get_by_role("link", name="System overview", exact=True)).to_be_visible()
     sidebar.get_by_role("link", name="API conventions", exact=True).click()
     expect(page).to_have_url(re.compile(r"/reference/http-api/$"))
     expect(page.get_by_role("heading", name="HTTP API conventions")).to_be_visible()
@@ -123,9 +131,7 @@ def test_desktop_sidebar_uses_persistent_pages_and_browser_history(
     page.go_back(wait_until="networkidle")
     expect(page.get_by_role("heading", name="HTTP API conventions")).to_be_visible()
     page.go_back(wait_until="networkidle")
-    expect(
-        page.get_by_role("heading", name="PoseTestBot technical documentation")
-    ).to_be_visible()
+    expect(page.get_by_role("heading", name="System overview")).to_be_visible()
 
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     assert errors == []
@@ -134,8 +140,8 @@ def test_desktop_sidebar_uses_persistent_pages_and_browser_history(
 @pytest.mark.parametrize(
     ("level", "name"),
     [
-        ("h1", "PoseTestBot technical documentation"),
-        ("h2", "Repository boundary"),
+        ("h1", "PoseTestBot documentation"),
+        ("h2", "The process at a glance"),
     ],
 )
 def test_heading_typography_and_permalink_share_a_stable_line_box(
@@ -196,6 +202,7 @@ def test_keyboard_skip_link_and_narrow_navigation_drawer_work(page, docs_server)
 
     drawer = page.locator(".md-sidebar--primary")
     expect(drawer).to_be_visible()
+    drawer.locator("label.md-nav__link", has_text="Technical reference").click()
     drawer.locator("label.md-nav__link", has_text="File and command reference").click()
     drawer.get_by_role("link", name="Run configuration", exact=True).click()
     expect(page).to_have_url(re.compile(r"/reference/run-config/$"))

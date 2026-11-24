@@ -17,8 +17,8 @@
 </p>
 
 <p align="center">
-  <a href="https://match-cow.github.io/posetestbot/"><strong>Technical documentation →</strong></a><br>
-  <sub>Architecture, operator workflows, HTTP APIs, schemas, artifacts, and command reference.</sub>
+  <a href="https://match-cow.github.io/posetestbot/"><strong>Documentation →</strong></a><br>
+  <sub>Quickstart and step-by-step user guide for the operator console, plus the technical reference.</sub>
 </p>
 
 **Install and start here:** [Installation and first launch](docs/getting-started/installation.md),
@@ -174,7 +174,8 @@ it only on the trusted lab network, or bind it to localhost for local use.
 
 ## Documentation
 
-- [Technical documentation](https://match-cow.github.io/posetestbot/)
+- [Documentation site: quickstart, user guide, and technical reference](https://match-cow.github.io/posetestbot/)
+- [Quickstart](docs/quickstart.md)
 - [GitHub Pages maintenance](docs/GITHUB_PAGES.md)
 - [Operator workflows](docs/OPERATOR_WORKFLOWS.md)
 - [Installation and first launch](docs/getting-started/installation.md)
