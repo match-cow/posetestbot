@@ -78,7 +78,8 @@ information, never required steps.
 
 [![Devices page](../images/console/devices.webp){ loading=lazy }](../images/console/devices.webp)
 
-**Devices** shows every connected camera with a live preview (off by
+**Devices** shows every connected camera (currently mainly Intel RealSense
+D435) with a live preview (off by
 default) and a snapshot button. The *operator alias* (for example `left`,
 `center`), mounting, and orientation set here are **defaults for new runs**.
 Which cameras are used in a recording is chosen in the workflow, not here.
