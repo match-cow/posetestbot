@@ -1,85 +1,99 @@
-# PoseTestBot technical documentation
+# PoseTestBot documentation
 
-PoseTestBot acquires synchronized robot and RGB-D evidence, calibrates the
-camera system, validates the capture, and exports a BOP dataset. This site is
-the technical reference for that repository boundary: operator workflows,
-runtime architecture, HTTP APIs, file formats, and safety contracts.
+PoseTestBot is the lab's test bench for **6D object pose estimation**. A KUKA
+iiwa robot moves RGB-D cameras around a set of objects. PoseTestBot records the
+images together with the robot poses, calibrates the cameras, and exports a
+ready-to-use [BOP](https://bop.felk.cvut.cz/) dataset. You can then run a pose
+estimator on that dataset and measure its accuracy, all from one web page,
+the **operator console**.
 
-## Repository boundary
+This documentation is written for students and researchers who *use* the
+console for a project. You do not need to read the code or the API to get
+your data.
 
-PoseTestBot owns:
+<div class="grid cards" markdown>
 
-- capture planning and supervised physical acquisition;
-- RealSense, OAK-D Pro, and ZED sensor adapters;
-- calibration, timestamp alignment, and synchronization-quality evidence;
-- reusable workpiece and pose-template libraries with immutable run snapshots;
-- optional GT/mask generation and BOP dataset export; and
-- run-scoped frame inspection, requested visualization downloads, and official evaluation of an existing
-  BOP dataset and immutable standard BOP19 result CSV.
+-   **New here?**
 
-Pose estimators, estimator-specific conversion, SSH credentials, and SLURM
-orchestration are outside this repository. The optional cluster integration is
-a loopback-only client for the separate `posetestbot-cluster` controller.
+    ---
 
-## Data flow
+    Read the 10-minute overview of the whole process, from the empty
+    workcell to an evaluated dataset.
 
-```text
-global libraries                run-owned evidence
-----------------              -----------------------------------------------
-sensor aliases      ────────▶  run_config.json
-calibration bundles ────────▶  immutable calibration snapshot
-workpiece geometry  ────────▶  immutable pose-template selection
-                                      │
-                                      ▼
-                              supervised RGB-D + robot capture
-                                      │
-                                      ▼
-                              non-destructive synchronization
-                                      │
-                                      ▼
-                              sync and calibration quality gates
-                                      │
-                                      ▼
-                              BOP export ──▶ optional GT and masks
-                                      │
-                                      ▼
-                            retained BOP19 result
-                                      │
-                         ┌────────────┴────────────┐
-                         ▼                         ▼
-                  pose/GT inspection       official evaluation
-```
+    [Quickstart →](quickstart.md)
 
-Raw capture data is retained. Synchronization, annotation, export, and
-evaluation write derived artifacts instead of replacing the only copy of the
-evidence.
+-   **Find your way around**
 
-## Primary interfaces
+    ---
 
-| Interface | Contract | Start here |
-| --- | --- | --- |
-| Operator console | Desktop-first supervised lab workflow | [Operator workflows](OPERATOR_WORKFLOWS.md) |
-| Flask HTTP API | Trusted-LAN JSON/file interface used by the console | [API conventions](reference/http-api.md) |
-| Command-line scripts | Status and fixed capture/processing recipes | [CLI and scripts](reference/cli.md) |
-| Run directory | Immutable inputs and reproducible raw/derived artifacts | [Runs and artifact lineage](concepts/runs-and-artifacts.md) |
+    What each part of the console does, and where to look when something
+    is running.
 
-## Current hardware profile
+    [Console tour →](guide/console-tour.md)
 
-- 3 Intel RealSense D435-class cameras
-- 1 Luxonis OAK-D Pro
-- 1 Stereolabs ZED 2i
-- KUKA LBR iiwa at `172.31.1.147:30300`
-- lab receiver at `172.31.1.169`
+-   **Calibrate the cameras**
 
-Hardware status is read-only. Physical capture requires explicit operator
-authorization and both fresh execution safety gates. A successful status or
-preflight response is evidence about a check; it is not permission to move the
-robot.
+    ---
 
-## Fast paths
+    Record a printed grid and publish a camera calibration you can reuse
+    for later recordings.
 
-- Set up a development or lab host: [Installation and first launch](getting-started/installation.md)
-- Understand process and trust boundaries: [Architecture and boundaries](concepts/architecture.md)
-- Find an HTTP endpoint: [Complete route index](reference/http-api-routes.md)
-- Inspect the run file contract: [Artifact index](reference/artifacts.md)
-- Review the five operator-run acceptance tasks: [Physical commissioning](COMMISSIONING.md)
+    [Calibrate cameras →](guide/calibrate-cameras.md)
+
+-   **Record a dataset**
+
+    ---
+
+    Place your objects, let the robot record them, and export a BOP
+    dataset with ground truth.
+
+    [Record a dataset →](guide/record-dataset.md)
+
+-   **Run a pose estimator**
+
+    ---
+
+    Send the dataset to the cluster (FoundationPose) and look at the
+    estimated poses frame by frame.
+
+    [Pose estimation →](guide/pose-estimation.md)
+
+-   **Evaluate results**
+
+    ---
+
+    Official BOP scores, robot-consistency, and depth-quality studies for
+    different surface finishes.
+
+    [Evaluate pose accuracy →](guide/evaluate-poses.md)
+
+</div>
+
+!!! danger "Safety first"
+
+    PoseTestBot moves a real industrial robot. Never start a recording unless
+    you have been introduced to the cell by your supervisor, the workcell is
+    clear, and you can reach the emergency stop. Read
+    [Lab safety](guide/lab-safety.md) before your first session.
+
+## The process at a glance
+
+| Step | What happens | How often | Guide |
+| --- | --- | --- | --- |
+| 1. Calibrate cameras | The robot shows a printed grid to the cameras | Once per camera setup, then reused | [Calibrate cameras](guide/calibrate-cameras.md) |
+| 2. Prepare objects | Upload CAD models, print a sheet that defines object poses | Once per object set | [Objects and templates](guide/objects-and-templates.md) |
+| 3. Record a dataset | The robot moves the cameras around your objects; PoseTestBot exports BOP | Every recording | [Record a dataset](guide/record-dataset.md) |
+| 4. Estimate poses | A pose estimator runs on the GPU cluster | Per experiment | [Pose estimation](guide/pose-estimation.md) |
+| 5. Evaluate | BOP scores, robot consistency, depth quality | Per experiment | [Pose accuracy](guide/evaluate-poses.md), [depth quality](guide/evaluate-depth.md) |
+
+Steps 1 and 2 are often already done for you: if the cameras have not been
+moved and your objects are already in the catalogue, you can start directly
+with step 3.
+
+## Where to go for details
+
+The **User guide** tab explains every task step by step. The
+**Technical reference** tab is for when you need exact details, such as the
+file formats, the HTTP API, the run-folder layout, or how a metric is
+computed. Lab staff will find installation, robot integration, and
+commissioning under **Lab administration**.

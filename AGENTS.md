@@ -66,6 +66,16 @@ arguments must never enter this repository or a browser response.
   `docs/reference/http-api-routes.md` with
   `uv run python scripts/generate_http_api_reference.py --write` and verify it
   with the corresponding `--check` command.
+- The published site leads with a student-facing user guide (`docs/index.md`,
+  `docs/quickstart.md`, `docs/guide/`). When a change alters what an operator
+  sees or does in the console (page layout, workflow steps, button or field
+  labels, prerequisites), update the matching guide page in the same change,
+  using the console's exact labels, and keep `USER_GUIDE_CONSOLE_LABELS` in
+  `tests/test_github_pages.py` current. Screenshots in `docs/images/console/`
+  come only from `scripts/capture_docs_screenshots.py`. After the rebuilt
+  console is served, recapture affected images with `--only`. The capture is
+  read-only against the live console. Review images for personal data before
+  committing. See `docs/GITHUB_PAGES.md`.
 - Prefer running or checking `scripts/install.sh` before adding ad hoc setup
   instructions.
 - The lab KUKA iiwa is the sole robot profile. Never execute physical capture

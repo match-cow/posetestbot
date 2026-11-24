@@ -1,6 +1,6 @@
 # Documentation site maintenance
 
-The technical documentation is published at
+The documentation (user guide and technical reference) is published at
 <https://match-cow.github.io/posetestbot/>. Authoritative source is Markdown
 below `docs/`, organized by `mkdocs.yml`. The generated `site/` directory is a
 disposable ignored build artifact.
@@ -25,19 +25,76 @@ published reference must not depend on a third-party font request.
 
 ## Information architecture
 
-The navigation is technical and task-oriented:
+The site is written first for students who use the operator console, with
+technical depth available on demand. `navigation.tabs` splits it into five
+top-level tabs:
 
-1. system overview, installation, and canonical operator workflows;
-2. architecture, filesystem boundaries, artifact lineage, and safety;
-3. HTTP conventions, generated complete route inventory, and domain API
-   contracts;
-4. run-config, artifact, and CLI reference;
-5. specialist calibration, workpiece, template, IIWA, and physical
-   commissioning guides; and
-6. documentation-maintenance guidance.
+1. **Home**: what PoseTestBot is and links to the main tasks. The console's
+   **Documentation** button opens this page.
+2. **Get started**: quickstart, annotated console tour, and lab safety.
+3. **User guide**: one task page per console outcome (calibrate, objects and
+   templates, record, pose estimation, pose and depth evaluation, runs and
+   data, troubleshooting, glossary). Each page uses console labels, shows
+   screenshots, and ends with a collapsed **Technical details** block that
+   links into the reference.
+4. **Technical reference**: system overview, detailed workflow contracts,
+   architecture, HTTP API, run-config/artifact/CLI reference, and component
+   guides.
+5. **Lab administration**: installation, physical commissioning, IIWA
+   integration, and this maintenance page.
+
+Keep user-guide pages short and procedural. Put contracts, schemas, and
+edge cases in the reference and link to them, rather than expanding the guide.
 
 Add every Markdown page to `nav` in `mkdocs.yml`. Strict builds fail when a
 navigation target or internal documentation link is missing.
+
+## Console screenshots
+
+User-guide screenshots in `docs/images/console/` are generated only by
+`scripts/capture_docs_screenshots.py`. Its `SCREENSHOTS` manifest lists every
+published image, the console route, the crop, and any numbered callouts. Do
+not add, crop, or edit images by hand.
+
+```bash
+uv run python scripts/capture_docs_screenshots.py --list
+uv run python scripts/capture_docs_screenshots.py \
+  --run /mnt/working_data_ssd/<completed-dataset-run> --replace <name>=example
+uv run python scripts/capture_docs_screenshots.py --only dataset-5-process jobs
+```
+
+The default source is the running lab console at `http://127.0.0.1:5000`.
+The capture is read-only: the browser aborts every non-`GET` request and the
+room-monitor stream, so it cannot queue jobs, start previews, or command
+hardware. Choose a completed dataset run so the workflow steps show real
+evidence. The script replaces the run name, its parent directory, and the
+repository path in visible text. Pass `--replace OLD=NEW` for personal names
+in run, template, or workpiece names. Review every image before committing.
+
+Screens without real data use the Playwright console fixtures
+(`source="fixture"`), currently **Pose Results**. Their page must say that the
+screenshot shows synthetic test data.
+
+`tests/test_github_pages.py` enforces three rules: the image directory matches
+the manifest exactly, every image is referenced by a page, and every console
+label in `USER_GUIDE_CONSOLE_LABELS` still exists in `frontend/src` and in
+the user guide. Renaming a button that the guide quotes fails that test
+until the guide is updated.
+
+### Keeping the user guide current
+
+When a change alters what an operator sees or does:
+
+1. Update the matching page in `docs/guide/` (and `docs/quickstart.md` if the
+   overall path changes) in the same change. Use the console's exact labels.
+2. Update `USER_GUIDE_CONSOLE_LABELS` when the guide starts or stops quoting a
+   label.
+3. Rebuild the frontend, then recapture the affected screenshots with
+   `--only` once the live console serves the new build. Add a `SCREENSHOTS`
+   entry for a new guide image, or remove the entry and the file for an
+   obsolete one.
+4. Keep contracts, schemas, and edge cases in the technical reference. The
+   guide's collapsed **Technical details** block links to them.
 
 ## HTTP route inventory
 
@@ -106,6 +163,8 @@ the Flask operator API. It publishes only MkDocs output.
 ## Update checklist
 
 1. Change authoritative Markdown and, when required, `mkdocs.yml` navigation.
+   For operator-visible changes, update the user guide and recapture affected
+   screenshots (see [Keeping the user guide current](#keeping-the-user-guide-current)).
 2. Regenerate and check the teaching SVG after a teaching-plan or plot change.
 3. Regenerate the HTTP route index after any Flask route-map change.
 4. Run the strict MkDocs build.

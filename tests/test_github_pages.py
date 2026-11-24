@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import re
 import subprocess
 import sys
@@ -21,6 +22,46 @@ TECHNICAL_STYLESHEET = DOCS_ROOT / "stylesheets" / "technical.css"
 PAGES_WORKFLOW = ROOT / ".github" / "workflows" / "pages.yml"
 ROUTE_REFERENCE = DOCS_ROOT / "reference" / "http-api-routes.md"
 PUBLIC_URL = "https://match-cow.github.io/posetestbot/"
+CONSOLE_IMAGES = DOCS_ROOT / "images" / "console"
+FRONTEND_SOURCE = ROOT / "frontend" / "src"
+USER_GUIDE_PAGES = [DOCS_ROOT / "index.md", DOCS_ROOT / "quickstart.md"] + sorted(
+    (DOCS_ROOT / "guide").glob("*.md")
+)
+# Console labels the user guide tells students to click or look for. Renaming
+# one in the frontend fails this test until the guide is updated as well.
+USER_GUIDE_CONSOLE_LABELS = (
+    "Use for this recording",
+    "BOP annotation outcome",
+    "Start with a new run folder",
+    "Choose grid",
+    "Check readiness",
+    "Review and start capture",
+    "Start recording",
+    "Estimate robot-pose time offset (recommended)",
+    "Analyze recording · estimate time offset",
+    "Publish selected camera calibrations",
+    "Measured template position in the workcell",
+    "Process and export dataset",
+    "Retry processing",
+    "Generate pose GT",
+    "Generate pose + masks",
+    "Review dataset in Cell View",
+    "Add workpiece",
+    "Correct model units",
+    "Choose orientation",
+    "Generate immutable version",
+    "Refresh discovery",
+    "Start program",
+    "Exit idle program",
+    "Collect result",
+    "Download images (.zip)",
+    "Create & download MP4",
+    "All-sensor GT JSON",
+    "Queue BOP evaluation",
+    "Manual BOP19 CSV import",
+    "Queue depth evaluation",
+    "Compare finishes",
+)
 
 
 class DocumentParser(HTMLParser):
@@ -120,7 +161,15 @@ def test_mkdocs_navigation_covers_every_markdown_source() -> None:
     ]
     features = config["theme"]["features"]
     assert "navigation.instant" not in features
+    assert "navigation.tabs" in features
     assert "navigation.sections" in features
+    assert [next(iter(item)) for item in config["nav"]] == [
+        "Home",
+        "Get started",
+        "User guide",
+        "Technical reference",
+        "Lab administration",
+    ]
     assert "search.suggest" in features
 
 
@@ -176,6 +225,8 @@ def test_strict_build_has_search_persistent_pages_and_resolved_links(
 ) -> None:
     expected_pages = {
         "index.html",
+        "quickstart/index.html",
+        "guide/record-dataset/index.html",
         "getting-started/overview/index.html",
         "concepts/architecture/index.html",
         "reference/http-api/index.html",
@@ -206,9 +257,13 @@ def test_strict_build_has_search_persistent_pages_and_resolved_links(
     home = (built_site / "index.html").read_text(encoding="utf-8")
     assert f'<link rel="canonical" href="{PUBLIC_URL}">' in home
     assert 'href="stylesheets/technical.css"' in home
-    assert "PoseTestBot technical documentation" in home
-    assert "Repository boundary" in home
-    assert "From supervised capture to a dataset you can explain" not in home
+    assert "PoseTestBot documentation" in home
+    assert 'href="quickstart/"' in home
+    assert 'href="guide/lab-safety/"' in home
+    overview = (built_site / "getting-started" / "overview" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "Repository boundary" in overview
 
     sitemap = ElementTree.parse(built_site / "sitemap.xml")
     locations = [
@@ -280,7 +335,7 @@ def test_documentation_dependency_and_generated_output_contract() -> None:
 
     assert re.search(r"(?ms)^docs = \[.*mkdocs-material>=9\.7\.7.*^\]", project)
     assert re.search(r"(?m)^site/$", ignore)
-    assert "Technical documentation" in readme
+    assert "Documentation" in readme
     assert PUBLIC_URL in readme
     assert "--md-text-font: system-ui" in typography
     assert ".md-typeset h1" in typography
@@ -292,6 +347,60 @@ def test_documentation_dependency_and_generated_output_contract() -> None:
     )
     assert "(images/iiwa_calibration_teaching_plan.svg)" in teaching_checklist
     assert (DOCS_ROOT / "images" / "iiwa_calibration_teaching_plan.svg").is_file()
+
     assert not (DOCS_ROOT / "images" / "iiwa_calibration_teaching_plan.png").exists()
     assert not (ROOT / "site" / "app.js").exists()
     assert not (ROOT / "site" / "styles.css").exists()
+
+
+def _load_screenshot_script():
+    spec = importlib.util.spec_from_file_location(
+        "capture_docs_screenshots", ROOT / "scripts" / "capture_docs_screenshots.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_console_screenshots_come_from_the_capture_manifest_and_are_used() -> None:
+    script = _load_screenshot_script()
+    manifest = [shot.name for shot in script.SCREENSHOTS]
+    assert len(manifest) == len(set(manifest))
+    assert script.DEFAULT_OUTPUT == CONSOLE_IMAGES
+
+    published = sorted(path.name for path in CONSOLE_IMAGES.iterdir())
+    assert published == sorted(f"{name}.webp" for name in manifest)
+
+    pages = "\n".join(
+        page.read_text(encoding="utf-8") for page in DOCS_ROOT.rglob("*.md")
+    )
+    unused = [name for name in published if f"images/console/{name}" not in pages]
+    assert unused == []
+
+    fixture_shots = [shot.name for shot in script.SCREENSHOTS if shot.source == "fixture"]
+    for name in fixture_shots:
+        page = next(
+            p
+            for p in USER_GUIDE_PAGES
+            if f"images/console/{name}.webp" in p.read_text(encoding="utf-8")
+        )
+        assert "synthetic test data" in page.read_text(encoding="utf-8"), name
+
+
+def test_user_guide_console_labels_exist_in_the_frontend() -> None:
+    frontend = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in FRONTEND_SOURCE.rglob("*")
+        if path.suffix in {".ts", ".tsx"}
+    )
+    guide = " ".join(
+        " ".join(page.read_text(encoding="utf-8").split()) for page in USER_GUIDE_PAGES
+    )
+    missing_from_frontend = [
+        label for label in USER_GUIDE_CONSOLE_LABELS if label not in frontend
+    ]
+    missing_from_guide = [label for label in USER_GUIDE_CONSOLE_LABELS if label not in guide]
+    assert missing_from_frontend == []
+    assert missing_from_guide == []
