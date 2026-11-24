@@ -7,7 +7,7 @@ import { HelpTip } from "@/components/help-tip"
 import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { api, errorMessage } from "@/lib/api"
+import { api, errorMessage, query } from "@/lib/api"
 import type { Job, PreflightSummary } from "@/lib/contracts"
 import { jobStatusTone } from "@/lib/jobs"
 import { readinessBlockerCopy } from "@/features/workflow/readiness-copy"
@@ -46,8 +46,8 @@ export function ReadinessCheck({ runRoot, intent, preflight, loading = false, re
   const submittedJobId = submittedJob?.runRoot === runRoot ? submittedJob.id : null
   const ready = readinessSatisfied(preflight, requirements)
   const jobs = useQuery({
-    queryKey: ["jobs"],
-    queryFn: () => api<{ jobs: Job[]; resources: Record<string, string> }>("/jobs"),
+    queryKey: ["jobs", runRoot, "preflight"],
+    queryFn: () => api<{ jobs: Job[] }>(query("/jobs", { run_root: runRoot, search: '"purpose": "preflight"' })),
     refetchInterval: (state) => {
       const history = state.state.data?.jobs ?? []
       const submittedJobMissing = Boolean(submittedJobId && !history.some((job) => job.id === submittedJobId))
@@ -125,14 +125,14 @@ export function ReadinessCheck({ runRoot, intent, preflight, loading = false, re
         ? "Readiness check was canceled"
         : "Readiness check failed"
       : succeeded
-        ? "Readiness job finished; saved evidence is authoritative"
+        ? "Readiness check finished"
         : null
   const jobStatusDescription = active
     ? `Job ${currentJobId} continues after navigation. Jobs shows its live status and output. Another readiness check remains disabled while this job is ${currentJobStatus}.`
     : failed
       ? `Job ${currentJobId} ended with status ${currentJobStatus}. Review its output in Jobs, resolve the reported cause, then retry the readiness check here.`
       : succeeded
-        ? `Job ${currentJobId} returned successfully, but job success alone does not mark this run ready. Only the refreshed durable requirements below determine readiness.`
+        ? "The list below shows whether the run is ready."
         : null
 
   return <Card data-testid={`${intent}-readiness-check`} className={ready ? "border-success/35" : "border-warning/35"}>

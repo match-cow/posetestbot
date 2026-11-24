@@ -196,24 +196,23 @@ copied geometry and transforms; correction never rewrites them.
   reversible with **Restore**. Existing immutable templates and selected runs
   are unchanged.
 - **Delete** is permanent and available directly for active or archived
-  workpieces. The request must contain explicit confirmation, and no active or
-  archived pose-template bundle may reference its catalogue UUID. Deletion also
+  workpieces. Confirming queues an operation visible in **Jobs**. The worker
+  checks that no active or archived pose-template bundle references the UUID and
   strictly validates every published bundle's declared tree and hashes and
   fails closed on an unreadable, partial, modified, symlinked, or undeclared
   entry, because that library cannot safely be proven reference-free.
-  A refused action keeps its confirmation open with an error notification;
-  the retry and Cancel controls remain reachable while that notification is
-  displayed.
+  Review a failed job in **Jobs**. If an invalid bundle blocks deletion, review
+  it in **Pose Templates** and confirm retirement of that UUID before retrying.
 - A successful delete removes the managed UUID asset directory but retains a
   tombstone with the UUID, BOP `obj_id`, source identity, and deletion time.
   Tombstoned UUIDs and BOP IDs are never reused; `next_obj_id` remains
   monotonic. The tombstone also records asset-cleanup status, managed path,
   last attempt, and any bounded error text. If filesystem cleanup fails after
-  identity retirement, the response reports `deleted_cleanup_pending`; repeat
+  identity retirement, the job reports `deleted_cleanup_pending`. Repeat
   the same confirmed delete to retry that exact managed directory safely.
 
 Every mutation is serialized by an in-process re-entrant lock and an advisory
-cross-process file lock. A numbered JSON revision is written atomically before
+cross-process file lock. A write-once numbered JSON revision is created before
 the current `object_catalog.json` manifest is replaced. This lets Flask edits
 and queued conversion workers share one catalogue without lost updates; bundle
 publication uses the same lock as deletion. Permanent deletion commits the
@@ -231,7 +230,7 @@ tombstones, relative asset references, sizes, and hashes.
 This export is **metadata-only**. CAD, canonical PLY, and PNG bytes are not
 embedded in the JSON. `POST /workpieces/catalog/import` therefore does not
 create missing workpieces or fabricate/overwrite geometry. It merges only the
-six editable metadata fields into entries whose catalogue UUID and managed
+editable metadata fields supplied into entries whose catalogue UUID and managed
 assets already exist locally. Optional imported `obj_id`, source hash, and
 canonical hash values must agree with local immutable identity. The response
 separates `updated`, `unchanged`, and `skipped_missing_assets` UUIDs.
@@ -258,7 +257,7 @@ currently provided.
 | `POST` | `/workpieces/catalog/<catalog_uuid>/unit-corrections` | Queue a confirmed, revision-checked metre/mm correction for an archived workpiece |
 | `POST` | `/workpieces/catalog/<catalog_uuid>/archive` | Reversibly archive one workpiece |
 | `POST` | `/workpieces/catalog/<catalog_uuid>/restore` | Restore one archived workpiece |
-| `DELETE` | `/workpieces/catalog/<catalog_uuid>` | Permanently delete with JSON `{"confirm": true}` after all guards pass |
+| `DELETE` | `/workpieces/catalog/<catalog_uuid>` | Queue confirmed reference validation and permanent deletion with JSON `{"confirm": true}` |
 | `GET` | `/workpieces/catalog/<catalog_uuid>/assets/<kind>` | Hash-verify and serve `source`, `canonical_ply`, or optional `texture` |
 | `GET` | `/workpieces/catalog/export` | Download metadata-only `object_catalog.json` |
 | `POST` | `/workpieces/catalog/import` | Merge a multipart `catalog` JSON file, at most 16 MiB |

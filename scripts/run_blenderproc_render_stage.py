@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from posetestbot.jobs.cancellation import raise_on_first_cancel_signal
+from posetestbot.pipeline.derived_work import derived_stage_lock
 from posetestbot.blenderproc.rendering import (
     discover_render_jobs,
     run_render_jobs,
@@ -52,9 +54,7 @@ def parse_args() -> argparse.Namespace:
             "BOP Toolkit depth-mask step. BlenderProc does not render masks."
         ),
     )
-    selection = parser.add_mutually_exclusive_group()
-    selection.add_argument("--object-name", action="append", default=None)
-    selection.add_argument(
+    parser.add_argument(
         "--objectless",
         action="store_true",
         help="Write a successful skipped plan without invoking BlenderProc.",
@@ -80,6 +80,11 @@ def synchronized_input_folder(
 
 def main() -> None:
     args = parse_args()
+    with derived_stage_lock(Path(args.run_root), "blenderproc-render"):
+        _run(args)
+
+
+def _run(args: argparse.Namespace) -> None:
     run_root = Path(args.run_root)
     input_folder = synchronized_input_folder(run_root, args.input_folder)
     sensor_names = (
@@ -125,11 +130,11 @@ def main() -> None:
             message=message,
         )
         write_run_manifest(manifest, run_root)
-    except Exception as exc:
+    except BaseException as exc:
         upsert_stage(
             manifest,
             name="blenderproc_render",
-            status="failed",
+            status="canceled" if isinstance(exc, (KeyboardInterrupt, InterruptedError)) else "failed",
             message=str(exc),
         )
         write_run_manifest(manifest, run_root)
@@ -138,4 +143,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    raise_on_first_cancel_signal(KeyboardInterrupt("Derived job canceled"))
     main()

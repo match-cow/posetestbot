@@ -77,6 +77,15 @@ def _required_plain_file(path: Path, *, root: Path, label: str) -> Path:
     return path
 
 
+def _valid_recorded_run_root(value: Any) -> bool:
+    """Validate the original path written at submission without resolving it again."""
+
+    if not isinstance(value, str) or "\0" in value:
+        return False
+    path = Path(value)
+    return path.is_absolute() and ".." not in path.parts and path.as_posix() == value
+
+
 def _finite_vector(value: Any, *, count: int, label: str) -> list[float]:
     if (
         not isinstance(value, list)

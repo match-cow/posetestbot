@@ -2,9 +2,9 @@
 
 # Complete HTTP route index
 
-This index contains all **131** non-static Flask rules registered by
+This index contains all **154** non-static Flask rules registered by
 `posetestbot.web.app.create_app`, rendered as
-**135** method-specific operations. It is generated from the
+**156** method-specific operations. It is generated from the
 running route map, so aliases remain explicit and every application-declared
 method has its own row. Flask's implicit `HEAD` and `OPTIONS` methods are
 excluded.
@@ -109,6 +109,29 @@ uv run python scripts/generate_http_api_reference.py --check
 | `GET` | `/run-config` | JSON | Load run configuration | `orchestration.run_config` |
 | `POST` | `/run-config` | JSON | Create or update run configuration | `orchestration.run_config` |
 
+## Inspect depth evaluation
+
+| Method | Path | Returns | Purpose | Flask endpoint |
+| --- | --- | --- | --- | --- |
+| `GET` | `/depth/<kind>` | JSON | Depth history | `depth_evaluation.depth_history` |
+| `GET` | `/depth/<kind>/<record_id>` | JSON | Depth status | `depth_evaluation.depth_status` |
+| `GET` | `/depth/<kind>/<record_id>/download` | ZIP | Depth download | `depth_evaluation.depth_download` |
+| `GET` | `/depth/<kind>/<record_id>/frames` | JSON | Depth frames | `depth_evaluation.depth_frames` |
+| `GET` | `/depth/<kind>/<record_id>/frames/<frame_key>` | JSON | Depth frame media | `depth_evaluation.depth_frame_media` |
+| `GET` | `/depth/<kind>/<record_id>/frames/<frame_key>/media/<media_kind>` | PNG / NPZ | Depth frame media | `depth_evaluation.depth_frame_media` |
+| `GET` | `/depth/<kind>/<record_id>/report` | JSON | Depth report | `depth_evaluation.depth_report` |
+| `GET` | `/depth/<kind>/<record_id>/status` | JSON | Depth status | `depth_evaluation.depth_status` |
+| `GET` | `/depth/<kind>/<record_id>/videos` | JSON | Depth video choices | `depth_evaluation.depth_video_choices` |
+| `POST` | `/depth/comparisons` | JSON | Queue depth comparison | `depth_evaluation.queue_depth_comparison` |
+| `GET` | `/depth/evaluation/setup` | JSON | Depth evaluation setup | `depth_evaluation.depth_evaluation_setup` |
+| `POST` | `/depth/evaluations` | JSON | Queue depth evaluation | `depth_evaluation.queue_depth_evaluation` |
+| `POST` | `/depth/videos` | JSON | Queue depth video | `depth_evaluation.queue_depth_video` |
+| `GET` | `/depth/videos/<video_id>` | JSON | Depth video status | `depth_evaluation.depth_video_status` |
+| `GET` | `/depth/videos/<video_id>/download` | MP4 | Depth video media | `depth_evaluation.depth_video_media` |
+| `GET` | `/depth/videos/<video_id>/manifest` | JSON | Depth video manifest | `depth_evaluation.depth_video_manifest` |
+| `GET` | `/depth/videos/<video_id>/media` | MP4 | Depth video media | `depth_evaluation.depth_video_media` |
+| `GET` | `/depth/videos/<video_id>/poster` | PNG | Depth video media | `depth_evaluation.depth_video_media` |
+
 ## Local jobs and commands
 
 | Method | Path | Returns | Purpose | Flask endpoint |
@@ -143,6 +166,9 @@ uv run python scripts/generate_http_api_reference.py --check
 | --- | --- | --- | --- | --- |
 | `GET` | `/ui/bootstrap` | JSON | Ui bootstrap | `ui.ui_bootstrap` |
 | `GET` | `/ui/calibrations` | JSON | Calibration library | `calibration_library.calibration_library` |
+| `GET` | `/ui/calibrations/library` | JSON | Calibration library view | `calibration_library.calibration_library_view` |
+| `DELETE` | `/ui/calibrations/library/<bundle_sha256>` | JSON | Delete library calibration | `calibration_library.delete_library_calibration` |
+| `POST` | `/ui/calibrations/library/retain` | JSON | Retain library calibration | `calibration_library.retain_library_calibration` |
 | `POST` | `/ui/calibrations/select` | JSON | Select calibration | `calibration_library.select_calibration` |
 | `GET` | `/ui/cell-calibration-target-pdf` | File | Ui cell calibration target pdf | `ui.ui_cell_calibration_target_pdf` |
 | `GET` | `/ui/cell-pose-template-assets/<instance_uuid>/<asset_kind>` | File | Ui cell pose template asset | `ui.ui_cell_pose_template_asset` |
@@ -152,6 +178,7 @@ uv run python scripts/generate_http_api_reference.py --check
 | `GET` | `/ui/overview` | JSON | Ui overview | `overview.ui_overview` |
 | `DELETE` | `/ui/run-folders` | JSON | Delete run folder | `run_folders.delete_run_folder` |
 | `GET` | `/ui/run-folders` | JSON | Run folder inventory | `run_folders.run_folder_inventory` |
+| `GET` | `/ui/run-folders/cluster-activity` | JSON | Run folder cluster activity | `run_folders.run_folder_cluster_activity` |
 | `POST` | `/ui/run-folders/move` | JSON | Move run folder | `run_folders.move_run_folder` |
 | `POST` | `/ui/run-folders/refresh` | JSON | Refresh run folder inventory | `run_folders.refresh_run_folder_inventory` |
 | `GET` | `/ui/runs` | JSON | Ui runs | `ui.ui_runs` |
@@ -185,6 +212,7 @@ uv run python scripts/generate_http_api_reference.py --check
 | --- | --- | --- | --- | --- |
 | `GET` | `/sensors/adapters` | JSON | Sensor adapters | `system_status.sensor_adapters` |
 | `GET` | `/sensors/aliases` | JSON | Get sensor aliases | `sensors.get_sensor_aliases` |
+| `PATCH` | `/sensors/aliases` | JSON | Put sensor aliases | `sensors.put_sensor_aliases` |
 | `PUT` | `/sensors/aliases` | JSON | Put sensor aliases | `sensors.put_sensor_aliases` |
 | `GET` | `/sensors/previews` | JSON | Get sensor previews | `sensors.get_sensor_previews` |
 | `POST` | `/sensors/previews` | JSON | Post sensor previews | `sensors.post_sensor_previews` |
@@ -201,8 +229,7 @@ uv run python scripts/generate_http_api_reference.py --check
 
 | Method | Path | Returns | Purpose | Flask endpoint |
 | --- | --- | --- | --- | --- |
-| `GET` | `/sync/quality` | JSON | Build synchronization quality report | `sync_quality.sync_quality_endpoint` |
-| `POST` | `/sync/quality` | JSON | Build and persist synchronization quality report | `sync_quality.sync_quality_endpoint` |
+| `GET` | `/sync/quality` | JSON | Load synchronization quality report | `sync_quality.sync_quality_endpoint` |
 
 ## System lifecycle
 
@@ -216,7 +243,6 @@ uv run python scripts/generate_http_api_reference.py --check
 | Method | Path | Returns | Purpose | Flask endpoint |
 | --- | --- | --- | --- | --- |
 | `GET` | `/hardware/status` | JSON | Load hardware status report | `system_status.hardware_status` |
-| `POST` | `/hardware/status` | JSON | Collect and persist hardware status report | `system_status.hardware_status` |
 | `GET` | `/robot/status` | JSON | Robot status | `system_status.robot_status` |
 | `GET` | `/runtime/status` | JSON | Runtime status | `system_status.runtime_status` |
 

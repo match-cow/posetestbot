@@ -81,14 +81,19 @@ def get_sensor_aliases():
 
 
 @sensors_bp.put("/sensors/aliases")
+@sensors_bp.patch("/sensors/aliases")
 def put_sensor_aliases():
-    data = _json_payload()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        # An unparsed body must not be read as "no aliases": that would
+        # replace every saved lab alias with an empty file.
+        return jsonify({"output": "A JSON object is required"}), 400
     aliases = data.get("aliases", data)
     if not isinstance(aliases, Mapping):
         return jsonify({"output": "aliases must be a JSON object"}), 400
     try:
-        path = save_sensor_aliases(aliases, DEFAULT_SENSOR_ALIASES_PATH)
-    except ValueError as exc:
+        path = save_sensor_aliases(aliases, DEFAULT_SENSOR_ALIASES_PATH, merge=request.method == "PATCH")
+    except (OSError, ValueError, TypeError) as exc:
         return jsonify({"output": str(exc)}), 400
     state = sensor_alias_file_state(path)
     response = jsonify({"output": f"Wrote {path}", **state})
@@ -165,7 +170,7 @@ def _cancel_preview_in_background(job: Any) -> None:
 def _active_preview_jobs_by_key() -> tuple[dict[str, Any], dict[str, Any]]:
     active = {}
     stale = {}
-    for job in job_runner.list():
+    for job in job_runner.active_jobs():
         if not job.parameters.get("sensor_preview"):
             continue
         if job.status not in ACTIVE_JOB_STATUSES:
@@ -564,7 +569,7 @@ def get_sensor_preview(job_id: str):
 @sensors_bp.post("/sensors/previews/stop")
 def stop_sensor_previews():
     stopped = []
-    for job in job_runner.list():
+    for job in job_runner.active_jobs():
         if not job.parameters.get("sensor_preview"):
             continue
         if job.status not in ACTIVE_JOB_STATUSES:

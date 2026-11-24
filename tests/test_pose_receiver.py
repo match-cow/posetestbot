@@ -146,7 +146,7 @@ def test_receiver_accepts_only_current_packets_and_writes_canonical_raw(
         [
             (packet(run_id, sequence=10), ("192.0.2.10", 40001)),
             (packet(run_id, sequence=12), ("192.0.2.10", 40001)),
-            (packet(run_id, sequence=13, motion="end"), ("192.0.2.10", 40001)),
+            (packet(run_id, sequence=16, motion="end"), ("192.0.2.10", 40001)),
         ]
     )
     starts: list[dict[str, Any]] = []
@@ -182,7 +182,9 @@ def test_receiver_accepts_only_current_packets_and_writes_canonical_raw(
     saved = json.loads(result.raw_pose_path.read_text())
     assert saved["0"]["source_packet"]["run_id"] == run_id
     assert saved["0"]["source_packet"]["sequence_delta"] == 0
+    assert saved["0"]["source_packet"]["estimated_packets_lost"] == 10
     assert saved["1"]["source_packet"]["estimated_packets_lost"] == 1
+    assert saved["1"]["source_packet"]["estimated_packets_lost_after_pose"] == 3
     assert stage(run_root)["status"] == "succeeded"
 
 
@@ -271,3 +273,29 @@ def test_receiver_timeout_preserves_failure_evidence(tmp_path: Path) -> None:
 
     assert stage(run_root)["status"] == "failed"
     assert not (run_root / RAW_ROBOT_EE_POSES).exists()
+
+
+def test_cancellation_fires_once_so_partial_evidence_survives_the_duplicate_signal():
+    import os
+    import signal
+    import time
+
+    from posetestbot.robot import pose_receiver
+
+    previous = {
+        handled: signal.getsignal(handled)
+        for handled in (signal.SIGINT, signal.SIGTERM)
+    }
+    try:
+        with pytest.raises(pose_receiver.PoseReceiverCanceled):
+            with pose_receiver._cancellation_signal_handlers(True):
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(1)
+        # ``uv run`` forwards the group signal, so the receiver sees it again
+        # while it writes partial evidence. That delivery must be a no-op.
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(0.05)
+        assert signal.getsignal(signal.SIGTERM) == signal.SIG_IGN
+    finally:
+        for handled, handler in previous.items():
+            signal.signal(handled, handler)

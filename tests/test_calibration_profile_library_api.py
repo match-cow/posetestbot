@@ -335,7 +335,7 @@ def test_library_selection_snapshots_both_files_and_binds_current_run_config(
     assert listed.status_code == 200
     payload = listed.get_json()
     assert payload["schema_version"] == "calibration_library.v1"
-    candidate = payload["calibrations"][0]
+    candidate = _candidate(payload, source)
     assert candidate["source_run_name"] == "Reusable camera calibration"
     assert candidate["valid"] is True
     assert candidate["compatible"] is True

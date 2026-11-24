@@ -68,11 +68,18 @@ DEFAULT_VSD_DELTA_MM = 15.0
 DEFAULT_RENDERER = "vispy"
 MAX_RESULT_BYTES = 128 * 1024 * 1024
 MAX_RESULT_ROWS = 10_000_000
+# How far an estimate's rotation may be from orthonormal. Robot consistency
+# reads the same estimates, so it has to accept exactly what import accepted.
+RESULT_ROTATION_TOLERANCE = 0.02
 CLUSTER_JOB_SETTINGS_SCHEMA = "posetestbot_cluster_job_settings.v1"
 RESULT_SENSOR_SCOPE_SCHEMA = "bop_result_sensor_scope.v1"
 FOUNDATIONPOSE_EXECUTION_EVIDENCE_SCHEMA = "foundationpose_execution_evidence.v1"
 RESULT_PACKAGE_MANIFEST_SCHEMA = "bop_result_package_manifest.v1"
 SCOPED_TARGETS_FILENAME = "selected_test_targets_bop19.json"
+
+
+class EvaluationCanceled(Exception):
+    """The operator canceled a running evaluation job."""
 TRACK_SEGMENT_RECORD_LIMIT = 200
 FAILURE_IDENTITY_RECORD_LIMIT = 200
 IMAGE_TIMING_RECORD_LIMIT = 10_000
@@ -1483,7 +1490,9 @@ def validate_bop_result_csv(
     timings_available = True
     row_count = 0
 
-    with result_path.open(newline="", encoding="utf-8-sig") as handle:
+    # Plain UTF-8 on purpose: every later reader of the retained, immutable CSV
+    # uses it, so a byte-order mark must fail here and not after the toolkit ran.
+    with result_path.open(newline="", encoding="utf-8") as handle:
         raw_header = handle.readline()
         if not raw_header:
             raise ValueError("BOP result CSV is empty")
@@ -1559,7 +1568,10 @@ def validate_bop_result_csv(
                 np.linalg.norm(rotation.T @ rotation - np.eye(3), ord="fro")
             )
             determinant = float(np.linalg.det(rotation))
-            if orthogonality_error > 0.02 or abs(determinant - 1.0) > 0.02:
+            if (
+                orthogonality_error > RESULT_ROTATION_TOLERANCE
+                or abs(determinant - 1.0) > RESULT_ROTATION_TOLERANCE
+            ):
                 raise ValueError(
                     f"Invalid R on BOP result row {row_number}: rotation is not "
                     "orthonormal with determinant +1"
@@ -2790,7 +2802,7 @@ def result_package_bytes(
             "schema_version": provenance_value.get("schema_version"),
             "filename": "provenance.json",
             "size_bytes": len(provenance_bytes),
-            "sha256": _sha256_file(provenance_path),
+            "sha256": hashlib.sha256(provenance_bytes).hexdigest(),
         }
     manifest = {
         "schema_version": RESULT_PACKAGE_MANIFEST_SCHEMA,
@@ -2807,7 +2819,7 @@ def result_package_bytes(
             "schema_version": "bop19.csv.v1",
             "filename": str(result["filename"]),
             "size_bytes": len(csv_bytes),
-            "sha256": _sha256_file(csv_path),
+            "sha256": hashlib.sha256(csv_bytes).hexdigest(),
         },
         "provenance": provenance_descriptor,
     }
@@ -3588,11 +3600,13 @@ def run_evaluation_request(
             message="Official BOP19 metrics, robot consistency evidence, and provenance are available.",
         )
         return report
-    except Exception as exc:
+    except BaseException as exc:
+        # BaseException so a canceled worker also leaves a terminal state; the
+        # history would otherwise show this evaluation as running forever.
         _write_progress(
             path,
             evaluation_id=evaluation_id,
-            status="failed",
+            status="canceled" if isinstance(exc, EvaluationCanceled) else "failed",
             message=f"{type(exc).__name__}: {exc}",
         )
         raise

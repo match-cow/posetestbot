@@ -23,7 +23,7 @@ replace the defaults. Every API path still passes the same containment checks.
 | Immutable input snapshot | calibration selection/bundle, pose-template selection, object instances | Hash-bound to the run so later library changes cannot alter it |
 | Derived evidence | sync, calibration, render, and validation reports | Reproducible output, normally below `processed/` |
 | Dataset export | `bop/` | Bound to selected frames, calibration, models, annotations, and provenance |
-| Inspect results/evaluation | `processed/bop_evaluation/` | Immutable CSV/provenance, derived official-toolkit and IPD robot-consistency evidence, explicit saved-GT comparisons and image/video visualizations |
+| Inspect results/evaluation | `processed/bop_evaluation/` | Immutable CSV/provenance, official-toolkit and IPD robot-consistency evidence, saved-GT comparisons, depth-quality studies, and image/video visualizations |
 
 ## Manifest contract
 
@@ -39,6 +39,10 @@ pointer to mutable global state.
 
 - Calibration selection produces exact combined profile snapshots below
   `processed/calibration_inputs/<bundle_sha256>/` and a selection manifest.
+- A promoted calibration lives at the root of its calibration run. The
+  retained calibration library under `working_data/calibration_library/` keeps
+  a content-addressed, hash-verified copy that stays selectable after that run
+  folder is deleted, so capture storage can be reclaimed without recalibrating.
 - Pose-template selection creates a run-owned `pose_template_selection.json`
   and `object_instances.json`.
 - Existing run snapshots remain valid when a global workpiece or template is

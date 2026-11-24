@@ -5,6 +5,28 @@ import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
 
 const root = path.dirname(fileURLToPath(import.meta.url))
+const apiTarget = "http://127.0.0.1:5000"
+const apiPrefixes = [
+  "/ui",
+  "/assets",
+  "/calibration",
+  "/workpieces",
+  "/pose-templates",
+  "/bop",
+  "/depth",
+  "/jobs",
+  "/capture",
+  "/preflight",
+  "/dataset-processing",
+  "/sensors",
+  "/monitoring",
+  "/run-config",
+  "/robot",
+  "/cluster",
+  "/runtime",
+  "/hardware",
+  "/system",
+]
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -15,25 +37,6 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    proxy: {
-      "/ui": "http://127.0.0.1:5000",
-      "/assets": "http://127.0.0.1:5000",
-      "/calibration-targets": "http://127.0.0.1:5000",
-      "/workpieces": "http://127.0.0.1:5000",
-      "/pose-templates": "http://127.0.0.1:5000",
-      "/bop": "http://127.0.0.1:5000",
-      "/jobs": "http://127.0.0.1:5000",
-      "/capture": "http://127.0.0.1:5000",
-      "/preflight": "http://127.0.0.1:5000",
-      "/dataset-processing": "http://127.0.0.1:5000",
-      "/sensors": "http://127.0.0.1:5000",
-      "/monitoring": "http://127.0.0.1:5000",
-      "/run-config": "http://127.0.0.1:5000",
-      "/robot": "http://127.0.0.1:5000",
-      "/cluster": "http://127.0.0.1:5000",
-      "/runtime": "http://127.0.0.1:5000",
-      "/hardware": "http://127.0.0.1:5000",
-      "/system": "http://127.0.0.1:5000"
-    }
-  }
+    proxy: Object.fromEntries(apiPrefixes.map((prefix) => [prefix, apiTarget])),
+  },
 })

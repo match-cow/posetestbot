@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from posetestbot.jobs.cancellation import raise_on_first_cancel_signal
+from posetestbot.pipeline.derived_work import derived_stage_lock
 from posetestbot.bop.annotations import (
     ANNOTATION_REPORT,
     inspect_annotation_setup,
@@ -113,7 +115,7 @@ def _write_report(
         "commands": commands,
         "message": message,
     }
-    if status in {"succeeded", "failed"}:
+    if status in {"succeeded", "failed", "canceled"}:
         value["completed_at"] = value["updated_at"]
     if failed_command is not None:
         value["failed_command"] = failed_command
@@ -122,6 +124,11 @@ def _write_report(
 
 def main() -> None:
     args = parse_args()
+    with derived_stage_lock(Path(args.run_root), "bop-annotations"):
+        _run(args)
+
+
+def _run(args: argparse.Namespace) -> None:
     run_root = Path(args.run_root).resolve()
     mode = validate_annotation_mode(args.mode)
     calibration_profiles = selected_calibration_profiles(run_root)
@@ -139,31 +146,31 @@ def main() -> None:
     )
     report_path = run_root / ANNOTATION_REPORT
     started_at = _utc_now_iso()
-    _write_report(
-        report_path,
-        run_root=run_root,
-        mode=mode,
-        status="running",
-        commands=commands,
-        started_at=started_at,
-        message="Ground-truth generation is running.",
-    )
-
-    for command in commands:
-        try:
+    command = None
+    try:
+        _write_report(
+            report_path,
+            run_root=run_root,
+            mode=mode,
+            status="running",
+            commands=commands,
+            started_at=started_at,
+            message="Ground-truth generation is running.",
+        )
+        for command in commands:
             subprocess.run(command, cwd=APP_ROOT, check=True)
-        except (OSError, subprocess.CalledProcessError) as exc:
-            _write_report(
-                report_path,
-                run_root=run_root,
-                mode=mode,
-                status="failed",
-                commands=commands,
-                started_at=started_at,
-                message=str(exc),
-                failed_command=command,
-            )
-            raise
+    except BaseException as exc:
+        _write_report(
+            report_path,
+            run_root=run_root,
+            mode=mode,
+            status="canceled" if isinstance(exc, (KeyboardInterrupt, InterruptedError)) else "failed",
+            commands=commands,
+            started_at=started_at,
+            message=str(exc),
+            failed_command=command,
+        )
+        raise
 
     _write_report(
         report_path,
@@ -182,4 +189,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    raise_on_first_cancel_signal(KeyboardInterrupt("Derived job canceled"))
     main()

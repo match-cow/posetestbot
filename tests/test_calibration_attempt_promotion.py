@@ -21,6 +21,7 @@ from posetestbot.calibration.intrinsics import (
     write_intrinsic_profile_collection,
 )
 from posetestbot.calibration.posegridgen import posegridgen_capabilities
+from posetestbot.calibration.promotion_transaction import JOURNAL, recover_promotion_transaction
 from posetestbot.calibration.profiles import (
     SCHEMA_VERSION,
     CalibrationProfile,
@@ -710,6 +711,32 @@ def test_report_backed_applied_auto_offset_evidence_is_promotable(
     assert evidence[sensor_key]["selected_sync_delta_ms"] == -75.0
 
 
+def test_degraded_zero_candidate_with_disagreeing_folds_stays_promotable() -> None:
+    # Fold optima such as [-5, 0, +5] ms give an aggregate optimum of 0 ms and
+    # a fold-materiality error that the estimator converts to a warning.
+    arguments = {
+        "sensor_key": "realsense_d435:1",
+        "candidate_offset": 0.0,
+        "recorded_search": {},
+        "search_grid": [0.0],
+        "check_by_name": {
+            "cross_validation_fold_materiality": {
+                "status": "warning",
+                "original_status": "error",
+            },
+            "leave_one_motion_out_timing_consistency": {"status": "not_needed"},
+        },
+    }
+    item = {"status": "kept_zero", "motion_consistency": None}
+
+    with pytest.raises(ValueError, match="Zero-offset motion-consistency"):
+        attempt_module._validate_promotion_motion_consistency(item, **arguments)
+
+    attempt_module._validate_promotion_motion_consistency(
+        item, **arguments, require_passing=False
+    )
+
+
 def _report_backed_ambiguous_auto_offset_attempt(
     tmp_path: Path,
 ) -> tuple[dict, Path]:
@@ -1040,8 +1067,9 @@ def _exercise_promotion_transaction(
         "threshold": 6,
     }
     candidate_evidence["checks"].append(quality_warning)
-    write_profile_collection([candidate], attempt_root / "candidate_profiles.json")
     intrinsic = factory_intrinsic_profile(run_root / "realsense_1")
+    candidate = replace(candidate, metadata={**candidate.metadata, "intrinsic_profile_id": intrinsic["profile_id"]})
+    write_profile_collection([candidate], attempt_root / "candidate_profiles.json")
     write_intrinsic_profile_collection(
         [intrinsic], attempt_root / "intrinsic_calibration_profiles.json"
     )
@@ -1164,6 +1192,7 @@ def _exercise_promotion_transaction(
             profile.profile_id
             for profile in load_profile_collection(run_root / CALIBRATION_PROFILES)
         } == {"keep_oak_profile"}
+        assert json.loads((attempt_root / "promotion.json").read_text())["status"] == "failed"
         return
     if tamper_mode == "request_robot_pose_reference":
         request_path = attempt_root / "request.json"
@@ -1295,11 +1324,17 @@ def test_promotion_interruption_restores_or_retains_originals(
         if rollback_fails and Path(source).parent.name.startswith(".calibration-promotion-backup-"):
             raise OSError("simulated restore failure")
         result = original_replace(source, destination)
-        if interrupt_after_backup and source == old:
-            raise KeyboardInterrupt("interrupted after backup rename")
         return result
 
     monkeypatch.setattr(attempt_module.os, "replace", interrupted_replace)
+    original_link = attempt_module.os.link
+
+    def interrupted_link(source, destination):
+        original_link(source, destination)
+        if interrupt_after_backup and source == old:
+            raise KeyboardInterrupt("interrupted after backing up original")
+
+    monkeypatch.setattr(attempt_module.os, "link", interrupted_link)
     expected_error = RuntimeError if rollback_fails else KeyboardInterrupt
     with pytest.raises(expected_error):
         attempt_module._transactional_replace(root, [(staged, old)])
@@ -1309,9 +1344,12 @@ def test_promotion_interruption_restores_or_retains_originals(
     if rollback_fails:
         assert len(backups) == 1
         assert (backups[0] / "0").read_text() == "original calibration"
-    else:
-        assert old.read_text() == "original calibration"
-        assert backups == []
+        assert (root / JOURNAL).exists()
+        monkeypatch.setattr(attempt_module.os, "replace", original_replace)
+        recover_promotion_transaction(root)
+    assert old.read_text() == "original calibration"
+    assert not (root / JOURNAL).exists()
+    assert not list(root.glob(".calibration-promotion-backup-*"))
 
 
 def prepare_promoted_calibration_for_workflow(

@@ -1,7 +1,7 @@
 import { useDeferredValue, useMemo, useState } from "react"
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowRight, Ban, ChevronDown, Clock3, Copy, Cpu, Download, FileText, LoaderCircle, LockKeyhole, RefreshCw, ScanSearch, Search, Server, Square, Terminal, X } from "lucide-react"
-import { Link } from "react-router-dom"
+import { Link, useSearchParams } from "react-router-dom"
 import { toast } from "sonner"
 
 import { EmptyState } from "@/components/empty-state"
@@ -116,12 +116,16 @@ function clusterTone(status: string) {
 }
 
 function estimatorLabel(job: ClusterJob) {
+  if (job.kind === "archive-delete") return "Archive deletion"
+  if (job.kind === "archive") return "Archive copy"
+  if (job.kind === "restore") return "Archive restore"
   const estimatorId = typeof job.payload.estimator_id === "string" ? job.payload.estimator_id : "unreported_estimator"
   if (estimatorId === "foundationpose") return "FoundationPose"
   return estimatorId.split(/[-_]/).filter(Boolean).map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" ")
 }
 
 function estimatorMode(job: ClusterJob) {
+  if (["archive-delete", "archive", "restore"].includes(job.kind)) return "Cluster storage"
   return titleCase(job.payload.estimator_settings?.execution_mode ?? "legacy_independent")
 }
 
@@ -147,12 +151,14 @@ function ClusterJobActions({
   onLog?: () => void
 }) {
   const collecting = collectPending && collectingJobId === job.job_id
+  const removalBegun = job.kind === "archive-delete" && job.state === "collecting"
   const retained = activeRun && job.collection?.state === "collected" ? job.collection.result : null
   return <>
     {activeRun && job.collection?.state === "available" && CLUSTER_SUCCESS.has(job.state) && <Button variant="outline" size="sm" onClick={onCollect} disabled={collectPending}>{collecting ? <LoaderCircle className="animate-spin" /> : <Download />}{collecting ? "Collecting…" : "Collect result"}</Button>}
     {retained && <><Button asChild size="sm"><Link to={query("/pose-results", { result_id: retained.result_id, run_root: runRoot })}><ScanSearch />Inspect poses</Link></Button><Button asChild variant="outline" size="sm"><Link to={query("/bop-evaluation", { result_id: retained.result_id, run_root: runRoot })}>Evaluate<ArrowRight /></Link></Button></>}
     {onLog && <Button variant="outline" size="sm" onClick={onLog}><FileText />Log</Button>}
-    {CLUSTER_ACTIVE.has(job.state) && <Button variant="destructive" size="sm" onClick={onCancel} disabled={cancelPending || job.state === "canceling"}><Ban />{job.state === "canceling" ? "Canceling…" : "Cancel"}</Button>}
+    {CLUSTER_ACTIVE.has(job.state) && <Button variant="destructive" size="sm" onClick={onCancel} disabled={cancelPending || job.state === "canceling" || removalBegun}><Ban />{job.state === "canceling" ? "Canceling…" : "Cancel"}</Button>}
+    {removalBegun && <p className="basis-full text-[10px] text-warning-foreground">Remote removal has begun; cancellation is unavailable.</p>}
   </>
 }
 
@@ -164,13 +170,13 @@ function ClusterJobsSection() {
   const [detailId, setDetailId] = useState<string | null>(null)
   const jobs = useQuery({
     queryKey: ["cluster-jobs", "global", status],
-    queryFn: () => api<{ jobs: ClusterJob[]; next_cursor: string | null }>(query("/cluster/jobs", { limit: 50, state: status === "all" ? undefined : status })),
+    queryFn: () => api<{ jobs: ClusterJob[]; next_cursor: string | null; truncated?: boolean }>(query("/cluster/jobs", { limit: 50, state: status === "all" ? undefined : status })),
     retry: false,
     refetchInterval: (state) => state.state.data?.jobs.some((job) => CLUSTER_ACTIVE.has(job.state)) ? 2_000 : 10_000,
   })
   const activeRunJobs = useQuery({
     queryKey: ["cluster-jobs", "active-run", selectedRun, status],
-    queryFn: () => api<{ jobs: ClusterJob[]; next_cursor: null }>(query("/cluster/jobs", { run_root: selectedRun, limit: 50, state: status === "all" ? undefined : status })),
+    queryFn: () => api<{ jobs: ClusterJob[]; next_cursor: string | null; truncated?: boolean }>(query("/cluster/jobs", { run_root: selectedRun, limit: 50, state: status === "all" ? undefined : status })),
     enabled: Boolean(selectedRun),
     retry: false,
     refetchInterval: (state) => state.state.data?.jobs.some((job) => CLUSTER_ACTIVE.has(job.state)) ? 2_000 : 10_000,
@@ -262,6 +268,7 @@ function ClusterJobsSection() {
               </div>}
         </>}
     </CardContent>
+    {(jobs.data?.truncated || activeRunJobs.data?.truncated) && <p role="status" className="text-xs text-muted-foreground">Older cluster jobs may be missing from the controller’s limited history.</p>}
     <Sheet open={Boolean(detailId)} onOpenChange={(open) => !open && setDetailId(null)}>
       <SheetContent>
         <SheetHeader><SheetTitle>Cluster job log</SheetTitle><SheetDescription>{current?.job_id} · SLURM {current?.slurm_job_id ?? "not assigned"}</SheetDescription></SheetHeader>
@@ -284,10 +291,11 @@ function jobContext(job: Job) {
 }
 
 export function JobsPage() {
+  const [searchParams] = useSearchParams()
   const queryClient = useQueryClient()
   const { currentWorkflow, selectedRun } = useOperator()
   const [detail, setDetail] = useState<Job | null>(null)
-  const [search, setSearch] = useState("")
+  const [search, setSearch] = useState(() => searchParams.get("search") ?? "")
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all")
   const [scopeFilter, setScopeFilter] = useState<ScopeFilter>("all")
   const deferredSearch = useDeferredValue(search.trim())
@@ -303,6 +311,8 @@ export function JobsPage() {
     })),
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    // Keep the previous page mounted while a new filter loads, so the search box keeps focus.
+    placeholderData: keepPreviousData,
     refetchInterval: (queryState) => (queryState.state.data?.pages.some((page) => page.jobs.some((job) => ACTIVE.has(job.status))) ? 1_000 : 5_000),
   })
   const ordered = useMemo(
@@ -318,7 +328,7 @@ export function JobsPage() {
   const firstPage = jobs.data?.pages[0]
   const currentDetail = detail ? ordered.find((job) => job.id === detail.id) ?? detail : null
   const log = useQuery({
-    queryKey: ["job-log", currentDetail?.id],
+    queryKey: ["job-log", currentDetail?.id, currentDetail && ACTIVE.has(currentDetail.status) ? "live" : "terminal"],
     queryFn: () => api<string>(`/jobs/${currentDetail!.id}/log`),
     enabled: Boolean(currentDetail),
     refetchInterval: currentDetail && ACTIVE.has(currentDetail.status) ? 1_000 : false,
@@ -360,11 +370,10 @@ export function JobsPage() {
       action="Open workflow"
     />
 
-    <ClusterJobsSection />
 
     {firstPage && Object.keys(firstPage.resources).length > 0 && <Card><CardContent className="flex flex-wrap items-center gap-3 py-4"><span className="flex items-center gap-1 text-xs font-semibold"><LockKeyhole className="size-4 text-warning-foreground" />Held resources <HelpTip label="resource locks">A lock prevents two local jobs from opening the same camera, commanding the robot, or mutating the same managed catalogue at once. It is released when the owning job exits.</HelpTip></span>{Object.entries(firstPage.resources).map(([resource, id]) => <StatusBadge key={resource} status="warning" tone="warning">{resource} · {id}</StatusBadge>)}</CardContent></Card>}
 
-    {!jobs.isPending && !jobs.isError && ordered.length > 0 && <Card>
+    {!jobs.isPending && !jobs.isError && (ordered.length > 0 || filtersActive) && <Card>
       <CardContent className="grid items-end gap-3 py-4 xl:grid-cols-[minmax(260px,1fr)_190px_190px_auto]">
         <div className="space-y-1.5"><Label htmlFor="job-search">Search jobs</Label><div className="relative"><Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input id="job-search" className="pl-9" value={search} onChange={(event) => setSearchValue(event.target.value)} placeholder="Name, ID, resource, run…" /></div></div>
         <div className="space-y-1.5"><Label htmlFor="job-status-filter">Status</Label><Select value={statusFilter} onValueChange={(value: StatusFilter) => setFilter(value)}><SelectTrigger id="job-status-filter" aria-label="Filter jobs by status"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All jobs</SelectItem><SelectItem value="active">Active ({activeCount})</SelectItem><SelectItem value="failed">Failed ({failedCount})</SelectItem><SelectItem value="finished">Finished</SelectItem></SelectContent></Select></div>
@@ -403,6 +412,7 @@ export function JobsPage() {
               {jobs.hasNextPage && <div className="flex justify-center pt-3"><Button variant="outline" onClick={() => void jobs.fetchNextPage()} disabled={jobs.isFetchingNextPage}><ChevronDown />{jobs.isFetchingNextPage ? "Loading older jobs…" : "Load older jobs"}</Button></div>}
             </div>}
 
+    <ClusterJobsSection />
     <Sheet open={Boolean(detail)} onOpenChange={(open) => !open && setDetail(null)}>
       <SheetContent>
         <SheetHeader><SheetTitle>{currentDetail?.name}</SheetTitle><SheetDescription>{currentDetail?.id} · {ACTIVE.has(currentDetail?.status ?? "") ? "live process log" : "completed process log"} · {currentDetail ? jobScopeLabel(currentDetail, selectedRun) : "Unknown scope"}{currentDetail && jobRunRoot(currentDetail) ? ` · ${jobRunRoot(currentDetail)}` : ""}</SheetDescription></SheetHeader>

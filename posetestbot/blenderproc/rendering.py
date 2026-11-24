@@ -20,6 +20,7 @@ from posetestbot.blenderproc.preparation import (
     validate_subdir,
 )
 from posetestbot.io.atomic import atomic_write_json, replace_directories
+from posetestbot.pipeline.derived_work import sweep_staging
 from posetestbot.io.artifacts import (
     BLENDERPROC_RENDER_PLAN,
     DEPTH_DIR,
@@ -496,6 +497,9 @@ def run_render_jobs(
         for job in jobs:
             sensor_folder = Path(job.sensor_folder)
             prepared = Path(job.blenderproc_folder)
+            sweep_staging(sensor_folder, "blenderproc-render", "work")
+            sweep_staging(sensor_folder, MASKS_DIR, "staging")
+            sweep_staging(prepared, "output", "staging")
             workspace = sensor_folder / f".blenderproc-render.{uuid.uuid4().hex}.work"
             workspaces.append(workspace)
             shutil.copytree(prepared, workspace)
@@ -531,9 +535,7 @@ def run_render_jobs(
             )
 
             output_staging = prepared / f".output.{uuid.uuid4().hex}.staging"
-            shutil.move(scene.as_posix(), output_staging.as_posix())
             mask_staging = sensor_folder / f".{MASKS_DIR}.{uuid.uuid4().hex}.staging"
-            mask_staging.mkdir()
             mask_destination = sensor_folder / MASKS_DIR
             output_destination = prepared / "output"
             promotions.extend(
@@ -542,6 +544,8 @@ def run_render_jobs(
                     (output_staging, output_destination),
                 ]
             )
+            shutil.move(scene.as_posix(), output_staging.as_posix())
+            mask_staging.mkdir()
             artifacts[f"{job.sensor_name}:blenderproc_output"] = output_destination
         replace_directories(promotions)
         for job in jobs:
@@ -553,11 +557,9 @@ def run_render_jobs(
                 # mask. If another worker populated the new directory, never
                 # delete its files or report a false render rollback.
                 pass
-    except Exception:
+    finally:
         for staging, _destination in promotions:
             shutil.rmtree(staging, ignore_errors=True)
-        raise
-    finally:
         for workspace in workspaces:
             shutil.rmtree(workspace, ignore_errors=True)
     return artifacts

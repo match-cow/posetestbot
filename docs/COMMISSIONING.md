@@ -49,6 +49,10 @@ static calibration](IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md), and
 - Repeat clean shutdown, forced termination, service restart, and stale-worker
   recovery checks. Retain timestamped logs and status evidence without sending
   a robot command.
+- With the robot idle and under the lab safety process, check how ZED
+  `grab()` behaves on a supervised disconnect. Record whether the call returns
+  failures or blocks, and check the five-second stalled-frame path and worker
+  shutdown against that result.
 
 ## 3. Five-sensor capture
 
@@ -61,6 +65,12 @@ static calibration](IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md), and
 - Require balanced nonempty RGB/depth/current-metadata tuples for every enabled
   sensor, a nonempty current robot-pose stream, successful child processes,
   and clean resource release. Preserve all raw evidence and capture reports.
+- In a supervised trial with OAK-D Pro and ZED 2i enabled, verify stop between
+  frames and successful completion validation. Check for unfinished temporary
+  PNG files in both camera folders and retain the child logs.
+- Check OAK RGB grid geometry and aligned depth against the recorded undistorted
+  projection. Use the same resolution and device settings as the intended run.
+  Record the capture sidecars and grid measurements with the conclusion.
 
 ## 4. RealSense metric depth-scale recheck
 
@@ -84,3 +94,7 @@ static calibration](IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md), and
   enlarged PDF dimensions correct the printer and are not measured geometry.
 - Retain the selected bundle, object-instance snapshot, print, photographs,
   measurements, and reviewer sign-off as run provenance.
+- Before keeping a calibration that survives only as a dataset snapshot,
+  verify that each camera identity, mount and orientation still matches its
+  evidence. Use **Calibrations → Keep in library** after this check, or record
+  fresh calibration if the setup changed.

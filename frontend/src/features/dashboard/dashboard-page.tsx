@@ -1,3 +1,4 @@
+import { workflowStepStatuses } from "@/lib/workflow-progress"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useState } from "react"
 import { Link } from "react-router-dom"
@@ -15,7 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { api, errorMessage, query } from "@/lib/api"
 import type { BopAnnotationSetup, CaptureState, Job, Overview, RunStorage, SensorStatus } from "@/lib/contracts"
 import { jobStatusTone } from "@/lib/jobs"
-import { formatDate, titleCase } from "@/lib/utils"
+import { cn, formatDate, titleCase } from "@/lib/utils"
 import { workflowJourneyMetadata, type WorkflowJourneyId, type WorkflowProgressStatus } from "@/lib/workflow-session"
 import { useOperator } from "@/providers/operator-provider"
 import { RoomMonitor } from "@/features/dashboard/room-monitor"
@@ -154,16 +155,11 @@ function artifactComplete(overview: Overview, path: string, fallbackSectionId: s
   return overview.sidebar.find((section) => section.id === fallbackSectionId)?.status === "complete"
 }
 
-function workflowStatuses(completed: boolean[]): WorkflowProgressStatus[] {
-  const firstIncomplete = completed.findIndex((value) => !value)
-  return completed.map((value, index) => value ? "complete" : index === firstIncomplete ? "current" : "not_started")
-}
-
-function dashboardWorkflowEvidence(overview: Overview | undefined, annotationComplete = false): DashboardWorkflowEvidence | null {
+function dashboardWorkflowEvidence(overview: Overview | undefined, annotationSetup?: BopAnnotationSetup): DashboardWorkflowEvidence | null {
   const config = overview?.config
   if (!overview || !config) return null
 
-  const journey: WorkflowJourneyId = config.dataset_mode === "pose_template" ? "dataset" : "calibration"
+  const journey: WorkflowJourneyId = config.capture.intent
   const metadata = workflowJourneyMetadata[journey]
   const readinessComplete = artifactComplete(overview, "run_preflight_report.json", "preflight")
   const captureComplete = artifactComplete(overview, "capture_execution_report.json", "capture")
@@ -193,10 +189,9 @@ function dashboardWorkflowEvidence(overview: Overview | undefined, annotationCom
         captureComplete,
         calibrationComplete,
       ]
-  const requiredStatuses = workflowStatuses(requiredCompleted)
-  const statuses: WorkflowProgressStatus[] = journey === "dataset"
-    ? [...requiredStatuses, annotationComplete ? "complete" : bopComplete ? "ready" : "not_started"]
-    : requiredStatuses
+  const statuses = workflowStepStatuses(
+    requiredCompleted, journey === "dataset" ? { config, setup: annotationSetup, baseReady: bopComplete } : undefined,
+  )
   const evidenceSections = journey === "dataset"
     ? [["run_setup"], ["run_setup"], ["preflight"], ["capture"], ["sync", "calibration", "bop"], []]
     : [["run_setup"], ["run_setup"], ["preflight"], ["capture"], ["calibration"]]
@@ -263,11 +258,11 @@ function StorageSummaryCard({ storage }: { storage?: RunStorage }) {
       </div>
       <div className="mt-5 flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
         Run storage
-        <HelpTip label="storage thresholds">Warning below the smaller of 500 GiB or 15% capacity. Critical below the smaller of 100 GiB or 5%. Capacity is polled from the filesystem containing the selected run.</HelpTip>
+        <HelpTip label="storage thresholds">Warning below {formatBytes(storage?.thresholds?.warning_free_bytes)} free. Critical below {formatBytes(storage?.thresholds?.critical_free_bytes)} free. Capacity is measured on the selected run’s filesystem.</HelpTip>
       </div>
       <div className="mt-1 font-display text-lg font-semibold">{formatBytes(storage?.free_bytes)} free</div>
       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label="Run filesystem space used" aria-valuemin={0} aria-valuemax={100} aria-valuenow={usedPercent}>
-        <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${usedPercent}%` }} />
+        <div className={cn("h-full rounded-full transition-[width]", storage?.status === "error" ? "bg-destructive" : storage?.status === "warning" ? "bg-warning" : "bg-primary")} style={{ width: `${usedPercent}%` }} />
       </div>
       <p className="mt-2 line-clamp-2 text-xs text-muted-foreground" title={detail}>{detail}</p>
     </CardContent>
@@ -395,7 +390,7 @@ function IiwaQuickControls({ profileStatus }: { profileStatus: "checking" | "con
         <div className="mt-5 flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Manual robot control <HelpTip label="robot control status">Configured means the sole lab profile loaded. It does not contact the robot or prove that Sunrise is running.</HelpTip></div>
         <div className="mt-1 font-display text-lg font-semibold">Lab IIWA</div>
         <p className="mt-1 font-mono text-xs text-muted-foreground">{LAB_IIWA_TARGET}</p>
-        <div className="mt-4 grid grid-cols-2 gap-2"><Button size="sm" onClick={() => openCommand("start")} disabled={robotCommand.isPending}><Power />Start program</Button><Button size="sm" variant="destructive" onClick={() => openCommand("stop")} disabled={robotCommand.isPending}><Square />End program</Button></div>
+        <p className="mt-3 text-xs text-muted-foreground">Manual test. Guided capture sends its own START.</p><div className="mt-2 grid grid-cols-2 gap-2"><Button size="sm" onClick={() => openCommand("start")} disabled={robotCommand.isPending}><Power />Start program</Button><Button size="sm" variant="destructive" onClick={() => openCommand("stop")} disabled={robotCommand.isPending}>Exit idle program</Button></div>
       </CardContent>
       <Dialog open={command !== null} onOpenChange={setDialogOpen}>
         <DialogContent>
@@ -417,11 +412,11 @@ export function DashboardPage() {
   const robot = useQuery({ queryKey: ["robot", "status"], queryFn: () => api<Record<string, unknown>>("/robot/status"), staleTime: 10_000 })
   const runtime = useQuery({ queryKey: ["runtime", "status"], queryFn: () => api<Record<string, unknown>>("/runtime/status"), staleTime: 10_000 })
   const capture = useQuery({ queryKey: ["capture-jobs", selectedRun], queryFn: () => api<CaptureState>(query("/capture/jobs", { run_root: selectedRun })), refetchInterval: (state) => state.state.data?.active_count ? 1_000 : 5_000 })
-  const jobs = useQuery({ queryKey: ["jobs"], queryFn: () => api<{ jobs: Job[]; resources: Record<string, string> }>("/jobs"), refetchInterval: 1_000 })
+  const jobs = useQuery({ queryKey: ["jobs", "dashboard"], queryFn: () => api<{ jobs: Job[]; resources: Record<string, string> }>(query("/jobs", { limit: 10 })), refetchInterval: 1_000 })
   const annotationSetup = useQuery({
     queryKey: ["bop-annotations", "setup", selectedRun],
     queryFn: () => api<BopAnnotationSetup>(query("/bop/annotations/setup", { run_root: selectedRun })),
-    enabled: overview.data?.config?.dataset_mode === "pose_template",
+    enabled: overview.data?.config?.capture.intent === "dataset",
     retry: false,
   })
   const stopCapture = useMutation({
@@ -434,7 +429,7 @@ export function DashboardPage() {
   const sections = overview.data?.sidebar ?? []
   const preflight = sections.find((item) => item.id === "preflight")
   const runtimeItems = Array.isArray(runtime.data?.runtimes) ? runtime.data.runtimes as Array<{ available?: boolean }> : []
-  const workflowEvidence = dashboardWorkflowEvidence(overview.data, Boolean(annotationSetup.data?.current_output?.verified))
+  const workflowEvidence = dashboardWorkflowEvidence(overview.data, annotationSetup.data)
 
   const refresh = () => queryClient.invalidateQueries({ predicate: (item) => ["overview", "storage", "sensors", "robot", "runtime", "capture-jobs", "jobs", "bop-annotations", "cluster-controller-service", "cluster-status"].includes(String(item.queryKey[0])) })
   const statusErrors = [
@@ -451,6 +446,32 @@ export function DashboardPage() {
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Current run" title="Acquisition readiness" description="Live workcell visibility, background work, storage capacity, and artifact-backed readiness for the selected run." actions={<Button variant="outline" onClick={refresh}><RefreshCw />Refresh</Button>} />
+
+      {overview.isPending ? <Card data-testid="dashboard-workflow-overview"><CardHeader><Skeleton className="h-6 w-52" /><Skeleton className="h-4 w-full max-w-2xl" /></CardHeader><CardContent><Skeleton className="h-28 w-full" /></CardContent></Card> : workflowEvidence ? <Card data-testid="dashboard-workflow-overview" data-workflow-journey={workflowEvidence.journey}>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><Route className="size-5 text-primary-strong" />{workflowEvidence.label} workflow</CardTitle>
+          <CardDescription>{workflowEvidence.description} The journey is selected from the saved run configuration; progress comes from durable run artifacts.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className={`grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 ${workflowEvidence.journey === "dataset" ? "xl:grid-cols-6" : "xl:grid-cols-5"}`}>
+            {workflowEvidence.steps.map((step) => <Link to={`/workflow/${workflowEvidence.journey}?step=${step.id}`} aria-label={`Open ${workflowEvidence.label.toLowerCase()} step ${step.number}: ${step.title}`} data-workflow-step={step.id} key={step.id} className="group relative rounded-lg border border-border p-3 transition hover:border-primary/60 hover:bg-primary/5">
+              <div className="mb-5 flex items-center justify-between">
+                <span className="text-[10px] font-bold text-muted-foreground">{String(step.number).padStart(2, "0")}</span>
+                {step.status === "complete"
+                  ? <CheckCircle2 className="size-4 text-success" aria-label="Complete" />
+                  : step.evidenceBlocked
+                    ? <AlertTriangle className="size-4 text-destructive" aria-label="Blocked" />
+                    : <CircleDot className={step.status === "current" || step.status === "ready" ? "size-4 text-primary-strong" : "size-4 text-muted-foreground"} aria-label={step.status === "current" ? "Current step" : step.status === "ready" ? "Ready" : "Waiting"} />}
+              </div>
+              <div className="text-sm font-semibold">{step.title}</div>
+              <div className="mt-1 text-xs text-muted-foreground">{workflowStatusLabel(step)}</div>
+            </Link>)}
+          </div>
+        </CardContent>
+      </Card> : <Card data-testid="dashboard-workflow-overview" data-workflow-journey="unconfigured">
+        <CardHeader><CardTitle className="flex items-center gap-2"><Route className="size-5 text-primary-strong" />Choose a workflow</CardTitle><CardDescription>{overview.data?.config_error ?? "Choose camera calibration or object dataset acquisition, then save the run in step 1."}</CardDescription></CardHeader>
+        <CardContent><Button asChild><Link to="/workflow/setup">Choose workflow <ArrowRight /></Link></Button></CardContent>
+      </Card>}
 
       {statusErrors.length > 0 && <div role="alert" className="flex flex-col gap-3 rounded-xl border border-destructive/35 bg-destructive/5 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-start gap-3"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="text-sm font-semibold">Some dashboard status is unavailable</div><p className="mt-1 text-xs text-muted-foreground">Could not load {statusErrors.join(", ")}. Missing responses are not treated as ready; refresh before relying on this overview.</p></div></div><Button variant="outline" size="sm" onClick={refresh}><RefreshCw />Refresh status</Button></div>}
       {activeCapture && <div className="flex flex-col items-start justify-between gap-4 rounded-xl border border-primary/35 bg-primary/10 px-5 py-4 sm:flex-row sm:items-center"><div className="flex items-center gap-3"><span className="relative flex size-3"><span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-60" /><span className="relative inline-flex size-3 rounded-full bg-primary" /></span><div><div className="font-semibold">Capture is {activeCapture.status}</div><div className="text-xs text-muted-foreground">{activeCapture.name} · continues after navigation; use Jobs for live logs and stop controls</div></div></div><div className="flex flex-wrap gap-2"><Button variant="destructive" size="sm" onClick={() => stopCapture.mutate(activeCapture.id)} disabled={stopCapture.isPending || activeCapture.status === "canceling"}><Square />{stopCapture.isPending || activeCapture.status === "canceling" ? "Stopping…" : "Stop capture"}</Button><Button asChild size="sm"><Link to="/jobs">Open controls <ArrowRight /></Link></Button></div></div>}
@@ -480,31 +501,6 @@ export function DashboardPage() {
         <DashboardJobActivity jobs={jobs.data?.jobs} pending={jobs.isPending} failed={jobs.isError} selectedRun={selectedRun} />
       </div>
 
-      {overview.isPending ? <Card data-testid="dashboard-workflow-overview"><CardHeader><Skeleton className="h-6 w-52" /><Skeleton className="h-4 w-full max-w-2xl" /></CardHeader><CardContent><Skeleton className="h-28 w-full" /></CardContent></Card> : workflowEvidence ? <Card data-testid="dashboard-workflow-overview" data-workflow-journey={workflowEvidence.journey}>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2"><Route className="size-5 text-primary-strong" />{workflowEvidence.label} workflow</CardTitle>
-          <CardDescription>{workflowEvidence.description} The journey is selected from the saved run configuration; progress comes from durable run artifacts.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className={`grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 ${workflowEvidence.journey === "dataset" ? "xl:grid-cols-6" : "xl:grid-cols-5"}`}>
-            {workflowEvidence.steps.map((step) => <Link to={`/workflow/${workflowEvidence.journey}?step=${step.id}`} aria-label={`Open ${workflowEvidence.label.toLowerCase()} step ${step.number}: ${step.title}`} data-workflow-step={step.id} key={step.id} className="group relative rounded-lg border border-border p-3 transition hover:border-primary/60 hover:bg-primary/5">
-              <div className="mb-5 flex items-center justify-between">
-                <span className="text-[10px] font-bold text-muted-foreground">{String(step.number).padStart(2, "0")}</span>
-                {step.status === "complete"
-                  ? <CheckCircle2 className="size-4 text-success" aria-label="Complete" />
-                  : step.evidenceBlocked
-                    ? <AlertTriangle className="size-4 text-destructive" aria-label="Blocked" />
-                    : <CircleDot className={step.status === "current" || step.status === "ready" ? "size-4 text-primary-strong" : "size-4 text-muted-foreground"} aria-label={step.status === "current" ? "Current step" : step.status === "ready" ? "Ready" : "Waiting"} />}
-              </div>
-              <div className="text-sm font-semibold">{step.title}</div>
-              <div className="mt-1 text-xs text-muted-foreground">{workflowStatusLabel(step)}</div>
-            </Link>)}
-          </div>
-        </CardContent>
-      </Card> : <Card data-testid="dashboard-workflow-overview" data-workflow-journey="unconfigured">
-        <CardHeader><CardTitle className="flex items-center gap-2"><Route className="size-5 text-primary-strong" />Choose a workflow</CardTitle><CardDescription>No workflow intent is saved for this run yet. Choose camera calibration or object dataset acquisition; saving step 1 makes this overview follow that outcome.</CardDescription></CardHeader>
-        <CardContent><Button asChild><Link to="/workflow/setup">Choose workflow <ArrowRight /></Link></Button></CardContent>
-      </Card>}
     </div>
   )
 }

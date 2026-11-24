@@ -14,6 +14,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+import pytest
 
 from posetestbot.bop import evaluation as bop_evaluation
 from posetestbot.bop.evaluation import (
@@ -23,8 +24,10 @@ from posetestbot.bop.evaluation import (
     run_evaluation_request,
 )
 from posetestbot.cluster.client import ClusterClientError, ClusterControllerClient
+from posetestbot.run_folders import run_identity, write_run_folder_inventory
 from posetestbot.web.app import create_app
 from posetestbot.web.runtime import WebRuntime, WebSettings
+from posetestbot.web.security import web_run_roots
 from tests.test_bop_evaluation import make_tiny_evaluation_run, write_result_csv
 
 
@@ -34,6 +37,9 @@ class FakeRunner:
         self.submissions: list[dict[str, Any]] = []
 
     def list(self, *, include_services: bool = True):
+        return []
+
+    def active_jobs(self):
         return []
 
     def submit(self, **kwargs):
@@ -102,6 +108,30 @@ def test_cluster_client_delete_archive_uses_opaque_versioned_route(monkeypatch) 
         "body": payload,
         "idempotency_key": "archive-delete:fixture",
     }
+
+
+@pytest.mark.parametrize("detail", ["Not Found", "Unknown controller resource"])
+def test_cluster_client_delete_distinguishes_missing_route_from_missing_archive(
+    monkeypatch, detail: str
+) -> None:
+    controller = ClusterControllerClient("http://127.0.0.1:8765", "x" * 32)
+
+    def rejected(*args, **kwargs):
+        raise ClusterClientError(detail, status=404)
+
+    monkeypatch.setattr(controller, "_json", rejected)
+    with pytest.raises(ClusterClientError) as raised:
+        controller.delete_archive(
+            "archive-12345678-1234-4234-9234-123456789abc",
+            {"confirm": True, "operator": "Fixture Operator"},
+            idempotency_key="archive-delete:fixture",
+        )
+    if detail == "Not Found":
+        assert raised.value.status == 409
+        assert "Update and restart the companion controller" in str(raised.value)
+    else:
+        assert raised.value.status == 404
+        assert str(raised.value) == detail
 
 
 def _status() -> dict[str, Any]:
@@ -995,6 +1025,34 @@ def test_pose_setup_preserves_structured_controller_readiness_blockers(
     }
 
 
+def test_run_folder_delete_blocks_when_cluster_work_uses_the_source(tmp_path, monkeypatch):
+    controller = FakeController()
+    app, root = _app(tmp_path, controller)
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", root.as_posix())
+    run = _pose_ready_run(root)
+    write_run_folder_inventory(tmp_path / "jobs" / "run_folder_inventory.json", allowed_roots=web_run_roots())
+    client = app.test_client()
+    payload = {"run_root": run.as_posix(), "confirm": True, "expected_identity": run_identity(run)}
+
+    controller.archive_value = {"state": "transferring", "source_run_root": run.as_posix()}
+    activity = client.get("/ui/run-folders/cluster-activity").get_json()
+    assert activity == {"available": True, "active_run_roots": [run.as_posix()], "reason": None}
+    assert client.delete("/ui/run-folders", json=payload).status_code == 409
+
+    controller.archive_value = {"state": "succeeded", "source_run_root": run.as_posix()}
+    controller.job_value = {"state": "preparing", "payload": {"run_root": run.as_posix()}}
+    assert client.delete("/ui/run-folders", json=payload).status_code == 409
+
+    def incomplete_history(**_):
+        return {"jobs": [], "next_cursor": "older"}
+
+    monkeypatch.setattr(controller, "estimation_jobs", incomplete_history)
+    response = client.delete("/ui/run-folders", json=payload)
+    assert response.status_code == 409
+    assert "could not be verified" in response.get_json()["output"]
+    assert run.is_dir()
+
+
 def _successful_external_job(
     controller: FakeController, run: Path, tmp_path: Path
 ) -> str:
@@ -1315,7 +1373,10 @@ def test_external_result_import_is_idempotent_and_historical_download_survives_d
 ) -> None:
     controller = FakeController()
     app, runs_root = _app(tmp_path, controller)
-    run = _pose_ready_run(runs_root / "folder with & and #")
+    run = _pose_ready_run(runs_root)
+    renamed = runs_root / "folder with & and #"
+    run.rename(renamed)
+    run = renamed
     monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs_root.as_posix())
     job_id = _successful_external_job(controller, run, tmp_path)
     client = app.test_client()
@@ -1326,15 +1387,21 @@ def test_external_result_import_is_idempotent_and_historical_download_survives_d
     second = client.post(
         f"/cluster/jobs/{job_id}/import-result", json={"run_root": run.as_posix()}
     )
-    assert first.status_code == 201
+    assert first.status_code == 201, first.get_json()
     assert second.status_code == 200
     assert (
         first.get_json()["result"]["result_id"]
         == second.get_json()["result"]["result_id"]
     )
     assert second.get_json()["created"] is False
-    for field in ("evaluation_url", "inspection_url"):
-        assert parse_qs(urlsplit(first.get_json()[field]).query) == {
+    for field, page in (
+        ("evaluation_url", "/bop-evaluation"),
+        ("inspection_url", "/pose-results"),
+    ):
+        # The console is hash-routed: the page and its query live after "#".
+        route = urlsplit(urlsplit(first.get_json()[field]).fragment)
+        assert route.path == page
+        assert parse_qs(route.query) == {
             "result_id": [first.get_json()["result"]["result_id"]],
             "run_root": [run.as_posix()],
         }

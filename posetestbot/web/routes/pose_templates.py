@@ -56,11 +56,7 @@ from posetestbot.web.security import resolve_web_run_root
 
 pose_templates_bp = Blueprint("pose_templates", __name__)
 MAX_JSON_BYTES = 2 * 1024 * 1024
-MAX_UPLOAD_BATCH_BYTES = 100 * 1024 * 1024
 REQUEST_ROOT = default_working_data_root() / "jobs" / "pose_template_requests"
-WORKPIECE_REQUEST_ROOT = (
-    default_working_data_root() / "jobs" / "workpiece_catalog_requests"
-)
 REQUEST_RETENTION_SECONDS = 24 * 60 * 60
 _RMTREE_AVOIDS_SYMLINK_ATTACKS = shutil.rmtree.avoids_symlink_attacks
 _CAN_ANCHOR_REQUEST_PRUNING = (
@@ -392,10 +388,12 @@ def generate():
 
 @pose_templates_bp.get("/pose-templates/library")
 def library_list():
+    invalid = []
     return jsonify(
         {
             "schema_version": "pose_template_library.v1",
-            "templates": list_template_bundle_summaries(),
+            "templates": list_template_bundle_summaries(invalid=invalid),
+            "invalid_templates": invalid,
         }
     )
 

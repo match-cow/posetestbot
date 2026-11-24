@@ -10,50 +10,37 @@ from flask import Flask, jsonify, request
 from werkzeug.datastructures import ImmutableMultiDict
 from werkzeug.exceptions import RequestEntityTooLarge
 
+from posetestbot.io.artifacts import CALIBRATION_PROFILE_SELECTION, DATASET_MANIFEST, PROCESSED_DIR, RUN_CONFIG
 from posetestbot.web.paths import APP_ROOT
 
 DEFAULT_RUN_ROOT = APP_ROOT / "working_data"
 DEFAULT_RUN_ROOTS = (DEFAULT_RUN_ROOT, Path("/mnt/working_data_ssd"))
-DEFAULT_INPUT_ROOTS = (APP_ROOT / "scripts" / "default_data",)
+# No input root is approved by default; POSETESTBOT_WEB_INPUT_ROOTS adds them.
+DEFAULT_INPUT_ROOTS: tuple[Path, ...] = ()
+RESERVED_RUN_NAMES = {
+    "jobs", "object_catalog", "pose_templates", "calibration_targets",
+    "calibration_library", "sensor_previews", "sensor_snapshots", "monitor_webrtc",
+}
 TRUE_STRINGS = {"1", "true", "yes", "on"}
 FALSE_STRINGS = {"0", "false", "no", "off"}
+# Request fields the global normalizer coerces before a handler runs. Only
+# names a current route reads belong here: a stale entry silently rewrites
+# that key in every JSON body that happens to carry it.
 BOOLEAN_FIELDS = {
     "allow_cameras",
-    "allow_failed_preflight",
-    "allow_missing_preflight",
     "allow_real_robot",
-    "allow_stale_preflight",
-    "compare_hand_eye_methods",
     "confirm_idle_program_exit",
     "download",
-    "from_detected_sensors",
-    "include_runtimes",
-    "include_sensors",
     "include_terminal",
-    "no_gt",
-    "no_masks",
-    "no_nearest_pose_threshold",
-    "no_residual_thresholds",
-    "no_runtimes",
-    "no_sensors",
-    "plan_only",
-    "promote",
-    "require_valid",
 }
 EXECUTION_ACKNOWLEDGEMENT_FIELDS = {
     "allow_cameras",
     "allow_real_robot",
     "confirm_idle_program_exit",
 }
-RUN_PATH_FIELDS = {"candidates", "observations", "profiles", "run_config"}
-OUTPUT_PATH_FIELDS = {"output_profiles"}
 INPUT_PATH_FIELDS = {
     "calibration_profiles",
     "intrinsic_calibration_profiles",
-    "target",
-    "target_spec",
-    "target_to_reference",
-    "target_to_reference_path",
 }
 CALIBRATION_TARGET_MAX_REQUEST_BYTES = 256 * 1024
 CATALOG_AND_TEMPLATE_MAX_JSON_BYTES = 2 * 1024 * 1024
@@ -124,13 +111,42 @@ def resolve_web_run_root(value: Any) -> Path:
             path = APP_ROOT / path
         else:
             path = DEFAULT_RUN_ROOT / path
-    return _require_below(path, web_run_roots(), label="run_root")
+    roots = web_run_roots()
+    if path.is_symlink():
+        raise ValueError("Run folder must not be a symbolic link")
+    if (
+        path.name.startswith(".") or path.name in RESERVED_RUN_NAMES
+        or path in roots or path.parent not in roots
+        or path.resolve() != path
+    ):
+        raise ValueError("run_root must be a non-reserved direct child of an allowed root")
+    return path
 
 
-def resolve_web_scoped_path(
+def require_run_folder_target(root: Path) -> None:
+    """Allow existing runs and initial calibration snapshots in new run folders."""
+    if not root.exists():
+        return
+    if not root.is_dir():
+        raise ValueError("run_root must be a directory")
+    names = {child.name for child in root.iterdir()}
+    if names & {RUN_CONFIG, DATASET_MANIFEST}:
+        return
+    foreign = names - {".run_config.lock", CALIBRATION_PROFILE_SELECTION, PROCESSED_DIR}
+    if PROCESSED_DIR in names:
+        processed = root / PROCESSED_DIR
+        if (
+            not processed.is_dir() or processed.is_symlink()
+            or any(item.name != "calibration_inputs" for item in processed.iterdir())
+        ):
+            foreign.add(PROCESSED_DIR)
+    if foreign:
+        raise ValueError(f"{root.name} already exists and is not a PoseTestBot run folder; choose a new folder name")
+
+
+def resolve_web_input_path(
     value: Any,
     *,
-    scope: str,
     run_root: Path,
     label: str,
 ) -> Path:
@@ -138,21 +154,8 @@ def resolve_web_scoped_path(
         raise ValueError(f"{label} must be a non-empty path")
     path = Path(value).expanduser()
     if not path.is_absolute():
-        if scope == "repository":
-            path = APP_ROOT / path
-        elif scope == "input" and (APP_ROOT / path).exists():
-            path = APP_ROOT / path
-        else:
-            path = run_root / path
-    if scope in {"run", "output"}:
-        roots = (run_root.resolve(),)
-    elif scope == "input":
-        roots = (run_root.resolve(), *web_input_roots())
-    elif scope == "repository":
-        roots = (APP_ROOT.resolve(),)
-    else:
-        raise ValueError(f"Unknown web path scope: {scope}")
-    return _require_below(path, roots, label=label)
+        path = APP_ROOT / path if (APP_ROOT / path).exists() else run_root / path
+    return _require_below(path, (run_root.resolve(), *web_input_roots()), label=label)
 
 
 def _normalize_json_payload(data: dict[str, Any]) -> None:
@@ -166,20 +169,10 @@ def _normalize_json_payload(data: dict[str, Any]) -> None:
         return
     run_root = resolve_web_run_root(raw_run_root)
     data["run_root"] = run_root.as_posix()
-    for key in RUN_PATH_FIELDS & data.keys():
-        if data[key] not in {None, ""}:
-            data[key] = resolve_web_scoped_path(
-                data[key], scope="run", run_root=run_root, label=key
-            ).as_posix()
-    for key in OUTPUT_PATH_FIELDS & data.keys():
-        if data[key] not in {None, ""}:
-            data[key] = resolve_web_scoped_path(
-                data[key], scope="output", run_root=run_root, label=key
-            ).as_posix()
     for key in INPUT_PATH_FIELDS & data.keys():
         if isinstance(data[key], str) and data[key]:
-            data[key] = resolve_web_scoped_path(
-                data[key], scope="input", run_root=run_root, label=key
+            data[key] = resolve_web_input_path(
+                data[key], run_root=run_root, label=key
             ).as_posix()
 
 
@@ -199,16 +192,9 @@ def _normalize_query_arguments() -> None:
     if run_root is not None:
         rewritten = []
         for key, value in normalized_pairs:
-            scope = None
-            if key in RUN_PATH_FIELDS:
-                scope = "run"
-            elif key in OUTPUT_PATH_FIELDS:
-                scope = "output"
-            elif key in INPUT_PATH_FIELDS:
-                scope = "input"
-            if scope is not None and value:
-                value = resolve_web_scoped_path(
-                    value, scope=scope, run_root=run_root, label=key
+            if key in INPUT_PATH_FIELDS and value:
+                value = resolve_web_input_path(
+                    value, run_root=run_root, label=key
                 ).as_posix()
             rewritten.append((key, value))
         normalized_pairs = rewritten

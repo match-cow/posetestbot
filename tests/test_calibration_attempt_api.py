@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import cv2
@@ -38,15 +38,26 @@ from posetestbot.web.routes import calibration as routes
 class FakeJob:
     id: str
     status: str = "queued"
+    message: str | None = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
 
 
 class FakeRunner:
     def __init__(self) -> None:
         self.submissions: list[dict] = []
+        self.jobs: dict[str, FakeJob] = {}
 
     def submit(self, **kwargs):
         self.submissions.append(kwargs)
-        return FakeJob(id=f"calibrationjob{len(self.submissions)}")
+        job = FakeJob(id=f"calibrationjob{len(self.submissions)}")
+        kwargs["before_start"](job.id)
+        self.jobs[job.id] = job
+        return job
+
+    def get(self, job_id: str) -> FakeJob:
+        return self.jobs[job_id]
 
 
 def _configuration() -> dict:
@@ -282,7 +293,6 @@ def test_setup_exposes_exact_two_modes_ready_cameras_targets_and_defaults(
     assert payload["solver"]["intrinsics_policy"] == ("compare_factory_opencv")
     assert [item["id"] for item in payload["solver"]["intrinsics_policies"]] == [
         "compare_factory_opencv",
-        "reuse_compatible_or_factory",
     ]
     synchronization = payload["solver"]["synchronization"]
     assert synchronization["implementation_revision"] == (
@@ -991,6 +1001,24 @@ def test_parent_queue_conflict_is_recorded_on_the_immutable_attempt(
     ).get_json()
     assert attempt["progress"]["status"] == "failed"
     assert attempt["progress"]["failure_stage"] == "job_submission"
+
+
+def test_setup_persists_terminal_job_failure_for_a_running_attempt(calibration_client) -> None:
+    client, runner, run_root, bundle, _ = calibration_client
+    submitted = client.post("/calibration/attempts", json={
+        "run_root": str(run_root), "mode": "eye_in_hand",
+        "sensor_keys": ["realsense_d435:1"], "target_id": bundle["target_id"],
+        "synchronization_policy": "fixed_zero",
+    }).get_json()
+    path = attempt_module.calibration_attempt_root(run_root, submitted["attempt_id"]) / "progress.json"
+    progress = json.loads(path.read_text())
+    assert progress["job_id"] == submitted["job_id"]
+    path.write_text(json.dumps({**progress, "status": "running"}))
+    runner.jobs[submitted["job_id"]].status = "canceled"
+
+    setup = client.get("/calibration/setup", query_string={"run_root": str(run_root)})
+    assert setup.get_json()["latest_attempt"]["status"] == "failed"
+    assert json.loads(path.read_text())["failure_stage"] == "job_execution"
 
 
 def test_camera_discovery_rejects_escaped_folders_and_all_duplicate_identities(

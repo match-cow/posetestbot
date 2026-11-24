@@ -7,10 +7,12 @@ import json
 import os
 import re
 import shutil
+import stat
 import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -95,7 +97,8 @@ def _selection_lock(root: Path):
                 try:
                     with run_config_lock(root):
                         _recover_selection_transaction(root)
-                        _cleanup_orphaned_selection_staging(root)
+                        if not (root / SELECTION_TRANSACTION).exists():
+                            _cleanup_orphaned_selection_staging(root)
                         yield
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
@@ -242,9 +245,12 @@ def _recover_selection_transaction(root: Path) -> None:
     if journal["phase"] == "prepared":
         for staged, target, backup, had_target in reversed(entries):
             if backup.exists() or backup.is_symlink():
-                if target.exists() or target.is_symlink():
+                if backup.is_dir() and (target.exists() or target.is_symlink()):
                     _remove_path(target)
                 os.replace(backup, target)
+                # Replacing a hard link to the same file can be a no-op.
+                if backup.is_file():
+                    backup.unlink()
             elif had_target and not (target.exists() or target.is_symlink()):
                 raise ValueError(
                     "Selection transaction cannot recover a missing prior artifact"
@@ -254,15 +260,20 @@ def _recover_selection_transaction(root: Path) -> None:
             if staged.exists() or staged.is_symlink():
                 _remove_path(staged)
     else:
+        pending = False
         for staged, target, backup, _had_target in entries:
             if not (target.exists() or target.is_symlink()):
                 raise ValueError(
                     "Committed selection transaction is missing a live artifact"
                 )
-            if staged.exists() or staged.is_symlink():
-                _remove_path(staged)
-            if backup.exists() or backup.is_symlink():
-                _remove_path(backup)
+            for residue in (staged, backup):
+                if residue.exists() or residue.is_symlink():
+                    try:
+                        _remove_path(residue)
+                    except OSError:
+                        pending = True
+        if pending:
+            return
     journal_path.unlink()
 
 
@@ -278,9 +289,9 @@ def _promote_paths(
         target.with_name(f".{target.name}.{uuid.uuid4().hex}.bak")
         for _source, target in promotions
     ]
-    moved_existing: list[int] = []
-    promoted: list[int] = []
     journal_path = root / SELECTION_TRANSACTION
+    if journal_path.exists():
+        raise ValueError("Previous pose-template selection cleanup is still pending")
     journal = {
         "schema_version": SELECTION_TRANSACTION_SCHEMA_VERSION,
         "phase": "prepared",
@@ -296,27 +307,17 @@ def _promote_paths(
     }
     atomic_write_json(journal_path, journal)
     try:
-        for index, ((_source, target), backup) in enumerate(
-            zip(promotions, backups, strict=True)
-        ):
+        for (_source, target), backup in zip(promotions, backups, strict=True):
             if target.exists() or target.is_symlink():
-                os.replace(target, backup)
-                moved_existing.append(index)
-        for index, (source, target) in enumerate(promotions):
+                if target.is_dir():
+                    os.replace(target, backup)
+                else:
+                    os.link(target, backup, follow_symlinks=False)
+        for source, target in promotions:
             os.replace(source, target)
-            promoted.append(index)
         result = validate_live()
-    except Exception:
-        for index in reversed(promoted):
-            source, target = promotions[index]
-            if (target.exists() or target.is_symlink()) and not source.exists():
-                os.replace(target, source)
-        for index in reversed(moved_existing):
-            _source, target = promotions[index]
-            backup = backups[index]
-            if backup.exists() or backup.is_symlink():
-                os.replace(backup, target)
-        journal_path.unlink(missing_ok=True)
+    except BaseException:
+        _recover_selection_transaction(root)
         raise
     else:
         journal["phase"] = "committed"
@@ -782,6 +783,45 @@ def load_pose_template_selection(run_root: str | Path) -> dict[str, Any]:
     root = Path(run_root).resolve()
     with _selection_lock(root):
         return _load_pose_template_selection_unlocked(root)
+
+
+@lru_cache(maxsize=64)
+def _preview_selection(root: Path, selection_bytes: bytes) -> dict[str, Any]:
+    return _validate_selection_value(root, json.loads(selection_bytes))
+
+
+def open_pose_template_preview_asset(run_root: Path, instance_uuid: str, asset: str):
+    """Validate one served asset and pin its inode through the HTTP response."""
+    with _selection_lock(run_root):
+        path = run_root / POSE_TEMPLATE_SELECTION
+        _assert_no_symlink_ancestors(run_root, path, label="Selection manifest")
+        selection = _preview_selection(run_root, path.read_bytes())
+        entry = next((item for item in selection["instances"] if item["instance_uuid"] == instance_uuid), None)
+        if entry is None or asset not in entry["assets"]:
+            raise FileNotFoundError("Unknown selected template instance or asset")
+        record = entry["assets"][asset]
+        snapshot = run_root / selection["bundle_snapshot"]
+        asset_path = snapshot / record["path"]
+        _assert_no_symlink_ancestors(run_root, asset_path, label="Selection preview asset")
+        if not asset_path.resolve(strict=True).is_relative_to(snapshot):
+            raise ValueError("Selection preview asset escapes its snapshot")
+        descriptor = os.open(asset_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError("Selection preview asset must be a regular file")
+            handle = os.fdopen(descriptor, "rb")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        try:
+            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+            if digest != record["sha256"]:
+                raise ValueError("Selection preview asset content changed")
+            handle.seek(0)
+        except BaseException:
+            handle.close()
+            raise
+        return handle, digest
 
 
 def prepare_object_instances(run_root: str | Path) -> dict[str, Any]:

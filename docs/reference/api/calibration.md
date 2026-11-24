@@ -36,6 +36,10 @@ the full target and selection contract.
 An attempt retains `request.json`, `progress.json`, intermediate search and
 candidate files, ranking/check evidence, selected target, candidate profiles,
 and promotion evidence below `processed/calibration/<attempt_id>/`.
+The queue binds the job ID before the worker runs. Status and listing reconcile
+a terminal calculation job with its saved progress. Promotion uses a durable
+journal to recover an interrupted multi-file publication. Failed replacement
+restores the previous promoted evidence and exposes the failure for review.
 
 `GET /calibration/attempts/<attempt_id>` also derives a non-artifact
 `promotion_review` from the immutable candidate evidence. Alternative solver
@@ -44,9 +48,21 @@ multi-camera bundle, pairwise disagreement between the independently estimated
 common companion transforms is advisory above 10 mm or 5° and fails closed
 above 20 mm or 10°. A response status of `promotable_with_warnings` enables
 explicit promotion while preserving the exact warning evidence in the promoted
-profiles. The promotion transaction revalidates historical attempts under
-their recorded policy before applying this current retention rule; it does not
-rewrite `ranking.json`.
+profiles. The promotion transaction reproduces the stored ranking under its
+recorded policy before applying the current retention rule. Accepted immutable
+rankings from the initial joint-consistency policy may omit its revision. The
+reader interprets that one published shape using its original v1 thresholds.
+
+Captured sensor type and identity must agree with `run_config.json`. Each
+promoted geometry profile requires its exact matching intrinsic profile.
+Current profiles record the first and last host receipt times of their camera
+evidence. The console reports that capture age and the publication date
+separately. Older profiles without capture dates display an unknown age.
+
+OAK-D Pro RGB requests device undistortion. Current camera sidecars identify
+the pinhole projection as `depthai_device_undistorted`. A raw factory model
+with nonzero coefficients beyond the supported forward model requires the
+gated fitted projection before use.
 
 Typical submission shape:
 
@@ -122,9 +138,56 @@ PoseTestBot's implementation.
 
 | Method and path | Contract |
 | --- | --- |
-| `GET /ui/calibrations?run_root=…` | List compatible promoted calibration sources and current selection |
+| `GET /ui/calibrations?run_root=…` | List compatible promoted calibration sources and current selection, newest first |
 | `POST /ui/calibrations/select` | Build an immutable single- or multi-source run snapshot |
+| `GET /ui/calibrations/library` | List every calibration on disk with its age, cameras, location, and the runs that use it |
+| `POST /ui/calibrations/library/retain` | Copy a calibration a run still holds into the retained library |
+| `DELETE /ui/calibrations/library/<bundle_sha256>` | Permanently delete one retained library entry |
 
 Multi-source selection uses `calibration_profile_selection.v2`, binds every
 source bundle and per-sensor mapping, and records hashes of the exact combined
 profile snapshots below `processed/calibration_inputs/<bundle_sha256>/`.
+
+### Sources and the retained library
+
+A selectable source is either a calibration run that still publishes its
+promoted `calibration_profiles.json`, or an entry in the retained calibration
+library. Each listed source reports `origin` (`run` or `library`),
+`calibrated_at`, and `source_run_root`; for a library entry `source_run_root`
+is the entry directory, and that value is what `source_selections[]` sends
+back. A selection made from a library entry records the entry directory as the
+source `run_root` and adds a `retained` object with the entry's `retained_at`
+and original `origin`. An entry whose bundle a present run still publishes is
+listed once, as the run.
+
+Publication also retains a verified library copy with reason `promotion`.
+If that copy fails, promoted profiles remain usable from their run and
+Calibrations offers **Keep in library** to retry.
+
+`GET /ui/calibrations/library` is independent of any destination run. Each
+calibration has an `availability`:
+
+| Value | Meaning | `selectable` |
+| --- | --- | --- |
+| `run` | Promoted in a calibration run folder that still exists | yes |
+| `library` | Kept in the retained library; its run folder may be gone | yes |
+| `snapshot` | Exists only as the snapshot inside dataset runs that selected it | no, until retained |
+
+`used_by` lists runs whose verified selection references the bundle.
+`unusable` lists run or library files that failed integrity or schema
+validation; they are reported, never offered.
+
+Set `POSETESTBOT_CALIBRATION_AGE_WARNING_DAYS` to a positive integer on the
+backend to enable a warning per dated camera profile. The warning preserves
+selectability and prompts a mount check. Omit the setting to leave it disabled.
+
+`POST /ui/calibrations/library/retain` takes `run_root` and `bundle_sha256`.
+The run must hold that exact bundle, either promoted at its root or as its
+verified selection snapshot; a mismatch returns `409`. Retention is idempotent
+(`already_retained`). `DELETE` requires `{"confirm": true}`. Deleting an entry
+never changes a dataset run: each run keeps its own snapshot.
+
+The library is local storage outside cluster run archives. Include the entire
+`working_data/calibration_library/` tree in the lab's filesystem backup. Restore
+each digest directory with its three files together while the backend is
+stopped. On the next read, PoseTestBot verifies the digests and file identities.

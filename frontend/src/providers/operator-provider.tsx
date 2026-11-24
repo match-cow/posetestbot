@@ -1,5 +1,6 @@
+import { toast } from "sonner"
 import { useQuery } from "@tanstack/react-query"
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react"
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
 import { api } from "@/lib/api"
 import type { Bootstrap, RunIndexItem } from "@/lib/contracts"
 import {
@@ -15,6 +16,7 @@ interface OperatorContextValue {
   runs: RunIndexItem[]
   selectedRun: string
   selectedRunEpoch: number
+  autoSelectedRun: boolean
   selectRun: (path: string) => boolean
   currentWorkflow: ActiveWorkflow | null
   rememberWorkflowStep: (journey: WorkflowJourneyId, stepId: string, status: WorkflowProgressStatus) => void
@@ -115,13 +117,21 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
     if (!restoredSelectionIsStale) return
     localStorage.removeItem("posetestbot.selectedRun")
   }, [restoredSelectionIsStale])
-  const selectedRun = bootstrap
-    ? selectedOverride.path
-      && !restoredSelectionIsStale
-      && isContained(selectedOverride.path, bootstrap.allowed_run_roots)
-      ? selectedOverride.path
-      : runs.find((run) => run.config_valid)?.path ?? bootstrap.default_run_root
-    : ""
+  const explicitSelection = Boolean(bootstrap && selectedOverride.path && !restoredSelectionIsStale && isContained(selectedOverride.path, bootstrap.allowed_run_roots))
+  const selectedRun = explicitSelection ? selectedOverride.path : runs.find(run => run.config_valid)?.path ?? bootstrap?.default_run_root ?? ""
+  const autoSelectedRun = Boolean(selectedRun && !explicitSelection)
+  const lastAutoSelection = useRef("")
+  useEffect(() => {
+    if (!autoSelectedRun || runsQuery.isPending || lastAutoSelection.current === selectedRun) return
+    lastAutoSelection.current = selectedRun
+    const name = runs.find(run => run.path === selectedRun)?.run_name ?? selectedRun.split("/").at(-1) ?? selectedRun
+    toast.info("Run auto-selected", { description: name })
+  }, [autoSelectedRun, runs, runsQuery.isPending, selectedRun])
+  useEffect(() => {
+    if (!bootstrap?.brand.favicon_url) return
+    const favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]')
+    if (favicon) favicon.href = bootstrap.brand.favicon_url
+  }, [bootstrap?.brand.favicon_url])
   const currentWorkflow = workflowSessions[selectedRun] ?? null
   const rememberWorkflowStep = useCallback((journey: WorkflowJourneyId, stepId: string, status: WorkflowProgressStatus) => {
     const workflow = activeWorkflow(journey, stepId, status)
@@ -138,9 +148,11 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
     })
   }, [selectedRun])
 
-  if (bootstrapQuery.isError || runsQuery.isError) {
+  // Only a failed first load blocks the console. A failed background refetch
+  // keeps the last good data on screen so unsaved drafts are not unmounted.
+  if ((bootstrapQuery.isError && !bootstrapQuery.data) || (runsQuery.isError && !runsQuery.data)) {
     const error = bootstrapQuery.error ?? runsQuery.error
-    return <div className="grid min-h-screen place-items-center bg-background p-8 text-destructive">{error instanceof Error ? error.message : "Unable to load console bootstrap"}</div>
+    return <div className="grid min-h-screen place-items-center bg-background p-8 text-center text-destructive"><div><p>{error instanceof Error ? error.message : "Unable to load console bootstrap"}</p><button type="button" className="mt-4 rounded-md border border-destructive/40 px-3 py-1.5 text-sm font-semibold" onClick={() => { void bootstrapQuery.refetch(); void runsQuery.refetch() }}>Retry</button></div></div>
   }
   if (bootstrapQuery.isPending || runsQuery.isPending || !bootstrap || !selectedRun) {
     return <div className="grid min-h-screen place-items-center bg-background text-sm text-muted-foreground">Loading operator console…</div>
@@ -163,7 +175,7 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem("posetestbot.selectedRun", path)
     return true
   }
-  return <OperatorContext.Provider value={{ bootstrap, runs, selectedRun, selectedRunEpoch: selectedOverride.epoch, selectRun, currentWorkflow, rememberWorkflowStep }}>{children}</OperatorContext.Provider>
+  return <OperatorContext.Provider value={{ bootstrap, runs, selectedRun, autoSelectedRun, selectedRunEpoch: selectedOverride.epoch, selectRun, currentWorkflow, rememberWorkflowStep }}>{children}</OperatorContext.Provider>
 }
 
 export function useOperator() {

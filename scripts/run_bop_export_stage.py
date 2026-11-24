@@ -12,6 +12,8 @@ from typing import Any, Callable, Mapping
 
 import cv2
 
+from posetestbot.jobs.cancellation import raise_on_first_cancel_signal
+from posetestbot.pipeline.derived_work import derived_stage_lock, sweep_staging
 from posetestbot.bop.mask_driver import (
     GENERATION_REPORT,
     run_official_bop_mask_generation,
@@ -23,7 +25,6 @@ from posetestbot.bop.writer import (
     export_sensor_scene_to_bop,
     finalize_official_scene_annotations,
     resolve_annotation_mode,
-    targets_filename,
     validate_bop_dataset,
     write_bop_coco_annotations,
     write_bop_dataset_info,
@@ -324,6 +325,11 @@ def main() -> None:
         ],
     )
 
+    with derived_stage_lock(run_root, "bop-export"):
+        _export(args, run_root, input_folder, output_folder, calibration_profiles_path)
+
+
+def _export(args, run_root, input_folder, output_folder, calibration_profiles_path) -> None:
     manifest = load_or_create_run_manifest(run_root)
     upsert_stage(manifest, name="bop_export", status="running")
     write_run_manifest(manifest, run_root)
@@ -332,6 +338,7 @@ def main() -> None:
         f".{output_folder.name}.{uuid.uuid4().hex}.tmp"
     )
     try:
+        sweep_staging(output_folder.parent, output_folder.name, "tmp")
         annotation_mode = resolve_annotation_mode(
             args.annotation_source,
             args.annotation_mode,
@@ -488,6 +495,7 @@ def main() -> None:
                     ),
                     input_sensor_folder=portable_sensor_folder,
                     authoritative_source_sensor_folder=portable_sensor_folder,
+                    run_root=run_root,
                     annotation_source=args.annotation_source,
                     annotation_mode=annotation_mode,
                 )
@@ -645,9 +653,6 @@ def main() -> None:
                 output_folder / export.scene_folder
             )
         if targets_path is not None:
-            artifacts[targets_filename(args.split)] = output_folder / targets_filename(
-                args.split
-            )
             artifacts[BOP_TARGETS_BOP19] = output_folder / BOP_TARGETS_BOP19
         if coco_annotations_path is not None:
             artifacts[BOP_COCO_ANNOTATIONS] = output_folder / BOP_COCO_ANNOTATIONS
@@ -676,15 +681,16 @@ def main() -> None:
             message=message,
         )
         write_run_manifest(manifest, run_root)
-    except Exception as exc:
-        if staging_folder.exists():
-            shutil.rmtree(staging_folder)
-        upsert_stage(manifest, name="bop_export", status="failed", message=str(exc))
+    except BaseException as exc:
+        upsert_stage(manifest, name="bop_export", status="canceled" if isinstance(exc, (KeyboardInterrupt, InterruptedError)) else "failed", message=str(exc))
         write_run_manifest(manifest, run_root)
         raise
+    finally:
+        shutil.rmtree(staging_folder, ignore_errors=True)
 
     print(message)
 
 
 if __name__ == "__main__":
+    raise_on_first_cancel_signal(KeyboardInterrupt("Derived job canceled"))
     main()

@@ -61,9 +61,7 @@ def _camera_matrix(path: Path) -> tuple[np.ndarray, np.ndarray]:
         np.isfinite(distortion)
     ):
         raise ValueError(f"Camera distortion is invalid: {path}")
-    padded = np.zeros(5, dtype=np.float64)
-    padded[: min(5, distortion.size)] = distortion.reshape(-1)[:5]
-    return matrix, padded
+    return matrix, distortion.reshape(-1)
 
 
 def _sensor_metadata(sensor_folder: Path) -> tuple[str, str, tuple[int, int]]:
@@ -183,13 +181,15 @@ def _captured_distortion(
         values = np.asarray(raw, dtype=np.float64).reshape(-1)
         if values.size not in {0, 4, 5, 8, 12, 14} or not np.all(np.isfinite(values)):
             raise ValueError("Captured SDK distortion coefficients are invalid")
-        distortion = np.zeros(5, dtype=np.float64)
-        distortion[: min(5, values.size)] = values[:5]
     else:
-        distortion = cam_k_distortion
+        values = cam_k_distortion
     model = str(camera_data.get("distortion_model") or "brown_conrady")
-    if model == "none" and np.any(np.abs(distortion) > 0.0):
+    if model == "none" and np.any(values != 0.0):
         raise ValueError("Captured distortion model 'none' has nonzero coefficients")
+    if np.any(values[5:] != 0.0):
+        model = "unsupported_extended_sdk_distortion"
+    distortion = np.zeros(5, dtype=np.float64)
+    distortion[: min(5, values.size)] = values[:5]
     projection_source = camera_data.get("projection_source")
     return (
         distortion,

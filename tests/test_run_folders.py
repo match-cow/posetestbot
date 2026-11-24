@@ -16,7 +16,7 @@ import posetestbot.web.routes.run_folders as run_folders_routes_module
 
 import posetestbot.web.routes.ui as ui_routes_module
 
-from posetestbot.jobs.runner import JobRecord
+from posetestbot.jobs.runner import TERMINAL_STATUSES, JobRecord
 
 from posetestbot.pipeline.run_config import (
     SensorRunConfig,
@@ -331,6 +331,46 @@ def test_delete_fails_closed_at_nested_filesystem_boundary_before_isolation(
     assert not list(storage.glob(".posetestbot_run_move_source_*"))
 
 
+@pytest.mark.parametrize("config", [None, "{not json", '{"run_root": "/elsewhere"}'])
+def test_move_refuses_an_unrebindable_run_before_isolating_it(
+    tmp_path: Path, config: str | None
+) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    stuck = first_root / "manifest-only"
+    stuck.mkdir()
+    (stuck / "dataset_manifest.json").write_text("{}")
+    if config is not None:
+        (stuck / "run_config.json").write_text(config)
+    healthy = first_root / "run-a"
+    _write_run(healthy)
+    roots = [first_root, second_root]
+
+    with pytest.raises(ValueError, match="run config|run_config.json"):
+        move_run_folder(
+            stuck,
+            second_root,
+            expected_identity=run_identity(stuck),
+            allowed_roots=roots,
+        )
+
+    # Still visible at its source, with no journal left to block other work.
+    assert (stuck / "dataset_manifest.json").is_file()
+    assert sorted(item.name for item in first_root.iterdir()) == [
+        "manifest-only",
+        "run-a",
+    ]
+    moved = move_run_folder(
+        healthy,
+        second_root,
+        expected_identity=run_identity(healthy),
+        allowed_roots=roots,
+    )
+    assert moved["status"] == "moved"
+
+
 def test_operations_reject_nested_symlink_collision_and_stale_identity(
     tmp_path: Path,
 ) -> None:
@@ -385,8 +425,10 @@ class _FakeRunner:
         self.submissions: list[dict] = []
         self.jobs: list[JobRecord] = []
 
-    def list(self, *, include_services: bool = True):
-        return list(self.jobs)
+    def active_jobs(self):
+        return [
+            job for job in reversed(self.jobs) if job.status not in TERMINAL_STATUSES
+        ]
 
     def submit(self, **values):
         self.submissions.append(values)
@@ -460,6 +502,8 @@ def test_api_returns_cached_inventory_and_queues_scoped_operations(
         source=source,
         expected_identity=run_identity(source),
         destination_root=second_root,
+        destination_root_identity=run_identity(second_root),
+        source_tree_signature=run_folders_module._stable_tree_signature(run_folders_module._signature(source)),
     )
     assert client.get("/ui/run-folders").get_json()["inventory_state"] == "stale"
     recovered_cache = write_run_folder_inventory(

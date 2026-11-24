@@ -377,10 +377,7 @@ def _preview_mesh_artifact(
     return None, None
 
 
-def _preview_mesh_payload(mesh: Any) -> PreviewMeshPayload | None:
-    """Compatibility helper returning only the bounded recognition mesh."""
 
-    return _preview_mesh_artifact(mesh)[0]
 
 
 @dataclass(frozen=True)
@@ -520,27 +517,6 @@ class PoseTemplateCreatorBackend:
             "recognition_mesh_approximation": approximation,
             "provenance": self.provenance(),
         }
-
-    # A readable alias for callers that do not persist the returned artifacts.
-    analyze_orientations = orientation_artifacts
-
-    def posed_contours(
-        self, filename: str, data: bytes, matrix: np.ndarray
-    ) -> list[list[dict[str, float]]]:
-        transform = np.asarray(matrix, dtype=float)
-        if transform.shape != (4, 4) or not np.all(np.isfinite(transform)):
-            raise ValueError("Object pose must be a finite 4x4 matrix")
-        mesh = self.load_mesh(filename, data).copy()
-        mesh.apply_transform(transform)
-        with _BACKEND_LOCK:
-            contours = self.mesh._closed_contours(mesh)
-        return [
-            [
-                {"x_mm": float(point.x_mm), "y_mm": float(point.y_mm)}
-                for point in contour.points
-            ]
-            for contour in contours
-        ]
 
     def build_scene(self, request: dict[str, Any]):
         validated = self.models.LayoutRequestV2.model_validate(request)
@@ -685,7 +661,6 @@ def load_posetemplatecreator_backend(
             )
             required = (
                 (backend.mesh, "_load_mesh"),
-                (backend.mesh, "_closed_contours"),
                 (backend.mesh, "extract_orientations_with_preview"),
                 (backend.scene, "build_scene"),
                 (backend.render, "render_pdf"),

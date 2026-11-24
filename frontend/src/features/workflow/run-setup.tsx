@@ -1,7 +1,9 @@
+import { QueryProblem } from "@/components/query-problem"
 import { useEffect, useMemo, useState } from "react"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Controller, useForm, useWatch } from "react-hook-form"
+import { Link } from "react-router-dom"
 import { Camera, CheckCircle2, Gauge, LoaderCircle, RefreshCw, Save, TriangleAlert } from "lucide-react"
 import { toast } from "sonner"
 import { z } from "zod"
@@ -15,21 +17,28 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { api, ApiError, errorMessage, query } from "@/lib/api"
 import type { CaptureSynchronization, RunConfig, SensorStatus } from "@/lib/contracts"
+import { daysSince, formatAge, formatDate } from "@/lib/utils"
 import { useOperator } from "@/providers/operator-provider"
 
 const DEFAULT_CAPTURE_SPEED_M_S = 0.01
 const MAX_CALIBRATION_CAPTURE_SPEED_M_S = 0.03
 const MAX_DATASET_CAPTURE_SPEED_M_S = 1
 
+const ANNOTATION_REQUIRED_MESSAGE = "Choose the BOP annotation outcome for this dataset."
+
 const setupSchema = (maximumCaptureSpeedMps: number) => z.object({
   run_name: z.string().optional(),
   resolution: z.string().min(1),
   fps: z.number().int().min(1).max(60),
   velocity: z.number().min(0.01).max(maximumCaptureSpeedMps),
-  annotation_mode: z.enum(["none", "pose", "pose_and_masks"]),
+  // Blank until the operator chooses: a preselected outcome gets saved by accident.
+  annotation_mode: z.enum(["", "none", "pose", "pose_and_masks"]).refine((value) => value !== "", ANNOTATION_REQUIRED_MESSAGE),
 })
 
-type SetupValues = z.infer<ReturnType<typeof setupSchema>>
+/** What the form holds: the annotation outcome may still be blank. */
+type SetupFormValues = z.input<ReturnType<typeof setupSchema>>
+/** What validation lets through to save: the outcome has been chosen. */
+type SetupValues = z.output<ReturnType<typeof setupSchema>>
 type RunSensor = RunConfig["capture"]["sensors"][number]
 type MountingMode = "eye_in_hand" | "static"
 const UNCONFIGURED_MOUNTING = "unconfigured"
@@ -54,6 +63,7 @@ type CalibrationProfileSummary = {
   resolution?: [number, number]
   intrinsic_profile_id?: string | null
   calibrated_at?: string | null
+  promoted_at?: string | null
   method?: string | null
   quality?: { num_observations?: number; num_inliers?: number; mean_reprojection_error_px?: number | null }
 }
@@ -70,6 +80,9 @@ type CalibrationSensorMapping = {
 type CalibrationSource = {
   source_run_root: string
   source_run_name: string
+  /** "library": a retained copy whose calibration run folder was deleted. */
+  origin: "run" | "library"
+  calibrated_at: string | null
   bundle_sha256: string | null
   valid: boolean
   compatible: boolean
@@ -115,6 +128,7 @@ type CalibrationLibrarySelected =
   | { valid: false; issues: CalibrationIssue[] }
 
 type CalibrationLibraryResponse = {
+  age_warning_days?: number | null
   selected: CalibrationLibrarySelected | null
   replacement_blockers?: string[]
   calibrations: CalibrationSource[]
@@ -190,26 +204,31 @@ function sharedResolutions(status: SensorStatus | undefined, enabledSensors: Run
   return shared?.length ? shared : ["720p"]
 }
 
-function defaultSetupValues(): SetupValues {
+function defaultSetupValues(intent: WorkflowIntent): SetupFormValues {
   return {
     run_name: "",
     resolution: "720p",
     fps: 6,
     velocity: DEFAULT_CAPTURE_SPEED_M_S,
-    annotation_mode: "none",
+    annotation_mode: intent === "calibration" ? "none" : "",
   }
 }
 
 function setupValuesFromConfig(
   config: RunConfig,
   maximumCaptureSpeedMps: number,
-): SetupValues {
+  intent: WorkflowIntent,
+): SetupFormValues {
   return {
     run_name: config.run_name,
     resolution: config.capture.resolution,
     fps: config.capture.fps,
     velocity: Math.min(config.capture.velocity_m_s, maximumCaptureSpeedMps),
-    annotation_mode: config.bop.annotation_mode,
+    // A calibration recording always stores "none"; that was never a dataset
+    // decision, so it must not arrive preselected in the dataset workflow.
+    annotation_mode: intent === "calibration"
+      ? "none"
+      : config.capture.intent === "dataset" ? config.bop.annotation_mode : "",
   }
 }
 
@@ -238,11 +257,11 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
     retry: false,
   })
   const calibrationSources = calibrations.data?.calibrations ?? []
-  const form = useForm<SetupValues>({
+  const form = useForm<SetupFormValues, unknown, SetupValues>({
     resolver: zodResolver(setupSchema(maximumCaptureSpeedMps)),
     defaultValues: existing.data?.config
-      ? setupValuesFromConfig(existing.data.config, maximumCaptureSpeedMps)
-      : defaultSetupValues(),
+      ? setupValuesFromConfig(existing.data.config, maximumCaptureSpeedMps, intent)
+      : defaultSetupValues(intent),
   })
   const [enabledOverrides, setEnabledOverrides] = useState<Record<string, Record<string, boolean>>>({})
   const [operatorAliasDrafts, setOperatorAliasDrafts] = useState<Record<string, string>>({})
@@ -258,6 +277,10 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
   const setupLookupFailed = existing.isError && !setupNotFound
   const setupControlsDisabled = setupLookupPending || setupLookupFailed
   const cameraContractLocked = existing.data?.camera_contract?.mutable === false
+  // Saving here would rewrite the run as the other workflow's kind and drop
+  // what only that kind owns (a dataset's pose template, for one).
+  const savedIntent = existing.data?.config.capture.intent
+  const intentMismatch = Boolean(savedIntent) && savedIntent !== intent
   const cameraContractBlockers = existing.data?.camera_contract?.blockers ?? []
 
   const detectedByKey = useMemo(() => new Map(
@@ -354,6 +377,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
   const missingMountingSensorKeys = enabledSensors.filter((sensor) => !isConfiguredMounting(sensor.mounting_mode)).map(sensorKey)
   const cameraMountingReady = missingMountingSensorKeys.length === 0
   const selectedResolution = useWatch({ control: form.control, name: "resolution" })
+  const annotationChosen = useWatch({ control: form.control, name: "annotation_mode" }) !== ""
   const savedEnabledSensorKeys = (existing.data?.config.capture.sensors ?? [])
     .filter((sensor) => sensor.enabled !== false)
     .map(sensorKey)
@@ -408,14 +432,19 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
       ? calibrationAssignmentsComplete && replacementConfirmed && !replacementBlocked
       : existingCalibrationReady))
 
+  // Keyed on the saved config alone: the same response also carries readiness
+  // state, and resetting on every refetch wiped edits the operator had not saved.
+  const savedConfig = existing.data?.config
+  const savedConfigKey = savedConfig ? JSON.stringify(savedConfig) : null
   useEffect(() => {
-    const config = existing.data?.config
-    if (!config) return
-    form.reset(setupValuesFromConfig(config, maximumCaptureSpeedMps))
-  }, [existing.data, form, intent, maximumCaptureSpeedMps])
+    if (!savedConfig) return
+    form.reset(setupValuesFromConfig(savedConfig, maximumCaptureSpeedMps, intent))
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- savedConfigKey stands in for savedConfig's content
+  }, [savedConfigKey, form, intent, maximumCaptureSpeedMps])
 
   const save = useMutation({
     mutationFn: async (values: SetupValues) => {
+      if (intentMismatch) throw new Error("The active run belongs to the other workflow; choose a new run folder")
       if (!sensors.data) throw new Error("Camera discovery must finish before saving this setup")
       if (enabledSensors.length === 0) throw new Error("Select at least one camera in Workflow step 1")
       if (!cameraMountingReady) throw new Error(`Choose a Static or Robot-mounted value for: ${missingMountingSensorKeys.join(", ")}`)
@@ -550,13 +579,14 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
   })
 
   return <div className="space-y-5" data-testid={`${intent}-run-setup`}>
+    {intentMismatch && <div role="alert" data-testid="run-intent-mismatch" className="flex items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="font-semibold">The active run is a {savedIntent === "dataset" ? "dataset" : "calibration"} run</div><p className="mt-1 leading-relaxed text-muted-foreground">Saving this page would convert it into a {intent === "dataset" ? "dataset" : "calibration"} run and discard what only the current kind owns. Saving is disabled. <Link to={savedIntent === "dataset" ? "/workflow/dataset" : "/workflow/calibration"} className="font-semibold text-primary-strong underline underline-offset-4">Open its {savedIntent === "dataset" ? "object dataset" : "camera calibration"} workflow</Link>, or <Link to="/run-folders" className="font-semibold text-primary-strong underline underline-offset-4">choose a new run folder</Link> for this workflow.</p></div></div>}
     {cameraContractLocked && <div id="camera-contract-lock-reason" data-testid="camera-contract-lock" className="flex items-start gap-3 rounded-lg border border-warning/40 bg-warning/10 p-4 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" /><div><div className="font-semibold">Capture reference and camera contract fixed for this acquired run</div><p className="mt-1 leading-relaxed text-muted-foreground">Robot-pose Sunrise reference, camera identity, enabled membership, mounting, orientation, resolution, frame rate, and synchronization can no longer change because captured or derived evidence depends on them. Start a fresh run for a different arrangement.</p>{cameraContractBlockers.length > 0 && <ul className="mt-2 list-disc space-y-1 pl-4 font-mono text-[10px] text-muted-foreground">{cameraContractBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}</div></div>}
 
     <Card data-testid="run-camera-selection-section" role="region" aria-labelledby="run-camera-selection-heading">
       <CardHeader className="gap-3 border-b sm:flex-row sm:items-start sm:justify-between">
         <div>
           <CardTitle id="run-camera-selection-heading" className="flex items-center gap-2 text-base"><Camera className="size-4" />Select cameras for this recording</CardTitle>
-          <CardDescription className="mt-1 max-w-3xl">Camera selection happens only here in Workflow step 1. Alias, mounting, orientation, and selection below belong to this run after you save setup; later Devices-default changes do not overwrite them.</CardDescription>
+          <CardDescription className="mt-1 max-w-3xl">Camera selection happens only here in Workflow step 1. Save setup to preserve this run’s camera membership, labels, mounts, and orientation. Later Devices changes affect new runs.</CardDescription>
         </div>
         <div className="shrink-0 rounded-lg border bg-muted/30 px-3 py-2 text-right">
           <div className="text-lg font-semibold leading-none">{enabledSensors.length}</div>
@@ -586,9 +616,15 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
               <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${enabled ? "bg-success/15 text-success" : "bg-muted-foreground/15 text-muted-foreground"}`}>{enabled ? "Selected" : "Not selected"}</span>
             </div>
             <div className={`mt-4 grid gap-4 lg:grid-cols-3 ${enabled ? "" : "opacity-70"}`}>
-              <div className="space-y-1.5"><Label htmlFor={aliasInputId} className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Operator alias for this run</Label><Input id={aliasInputId} data-testid="run-camera-alias" aria-label={`Operator alias for ${key}`} value={operatorAliasFor(sensor)} placeholder={detected?.display_name ?? sensor.display_name ?? sensor.device_id} onChange={(event) => setOperatorAliasDrafts((current) => ({ ...current, [key]: event.target.value }))} disabled={setupControlsDisabled || save.isPending} /><p className="text-[10px] leading-relaxed text-muted-foreground">Saved in <code>run_config.json</code>. Capture planning copies a selected alias into the plan and manifest; later Devices-default changes do not rename this run.</p></div>
-              <div className="space-y-1.5"><Label htmlFor={mountingInputId} className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Mounting for this run</Label><Select value={isConfiguredMounting(sensor.mounting_mode) ? sensor.mounting_mode : UNCONFIGURED_MOUNTING} onValueChange={(value) => { if (value !== UNCONFIGURED_MOUNTING) updateRunMountingMode(sensor, value as MountingMode) }} disabled={setupControlsDisabled || save.isPending || cameraContractLocked}><SelectTrigger id={mountingInputId} data-testid="run-camera-mounting" aria-label={`Mounting for ${key}`} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined}><SelectValue /></SelectTrigger><SelectContent><SelectItem value={UNCONFIGURED_MOUNTING} disabled>Mounting not configured</SelectItem><SelectItem value="eye_in_hand">Robot-mounted</SelectItem><SelectItem value="static">Static</SelectItem></SelectContent></Select><p className={`text-[10px] leading-relaxed ${isConfiguredMounting(sensor.mounting_mode) ? "text-muted-foreground" : "font-medium text-destructive"}`}>{isConfiguredMounting(sensor.mounting_mode) ? <>Save setup to write this run-owned value to <code>run_config.json</code>. The Devices default does not overwrite an existing run.</> : "Required: choose the camera's physical mount before saving this run."}</p></div>
-              <div className="space-y-1.5"><Label htmlFor={orientationInputId} className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Image orientation for this run</Label><Select value={sensor.inverted ? "inverted" : "normal"} onValueChange={(value) => updateRunOrientation(sensor, value === "inverted")} disabled={setupControlsDisabled || save.isPending || cameraContractLocked || sensor.sensor_type !== "realsense_d435"}><SelectTrigger id={orientationInputId} data-testid="run-camera-orientation" aria-label={`Image orientation for ${key}`} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="normal">Normal</SelectItem><SelectItem value="inverted">Inverted (180°)</SelectItem></SelectContent></Select><p className="text-[10px] leading-relaxed text-muted-foreground">Save setup to persist this run-owned value. Changing it requires orientation-compatible calibration; override is available only for RealSense D435 cameras.</p></div>
+              <div className="space-y-1.5"><Label htmlFor={aliasInputId} className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Operator alias for this run</Label><Input id={aliasInputId} data-testid="run-camera-alias" aria-label={`Operator alias for ${key}`} value={operatorAliasFor(sensor)} placeholder={detected?.display_name ?? sensor.display_name ?? sensor.device_id} onChange={(event) => setOperatorAliasDrafts((current) => ({ ...current, [key]: event.target.value }))} disabled={setupControlsDisabled || save.isPending} /></div>
+              <div className="space-y-1.5"><Label htmlFor={mountingInputId} className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Mounting for this run</Label><Select value={isConfiguredMounting(sensor.mounting_mode) ? sensor.mounting_mode : UNCONFIGURED_MOUNTING} onValueChange={(value) => { if (value !== UNCONFIGURED_MOUNTING) updateRunMountingMode(sensor, value as MountingMode) }} disabled={setupControlsDisabled || save.isPending || cameraContractLocked}><SelectTrigger id={mountingInputId} data-testid="run-camera-mounting" aria-label={`Mounting for ${key}`} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined}><SelectValue /></SelectTrigger><SelectContent><SelectItem value={UNCONFIGURED_MOUNTING} disabled>Mounting not configured</SelectItem><SelectItem value="eye_in_hand">Robot-mounted</SelectItem><SelectItem value="static">Static</SelectItem></SelectContent></Select><p className={`text-[10px] leading-relaxed ${isConfiguredMounting(sensor.mounting_mode) ? "text-muted-foreground" : "font-medium text-destructive"}`}>{isConfiguredMounting(sensor.mounting_mode) ? null : "Choose the physical mount before saving this run."}</p></div>
+              <div className="space-y-1.5">
+                <Label htmlFor={sensor.sensor_type === "realsense_d435" ? orientationInputId : undefined} className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Image orientation</Label>
+                {sensor.sensor_type === "realsense_d435" ? <Select value={sensor.inverted ? "inverted" : "normal"} onValueChange={(value) => updateRunOrientation(sensor, value === "inverted")} disabled={setupControlsDisabled || save.isPending || cameraContractLocked}>
+                  <SelectTrigger id={orientationInputId} data-testid="run-camera-orientation" aria-label={`Image orientation for ${key}`} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined}><SelectValue /></SelectTrigger>
+                  <SelectContent><SelectItem value="normal">Normal</SelectItem><SelectItem value="inverted">Inverted (180°)</SelectItem></SelectContent>
+                </Select> : <p className="text-xs">Normal (fixed for this camera)</p>}
+              </div>
             </div>
             <div className={`mt-3 flex items-center gap-1 border-t pt-3 text-[10px] ${(readiness !== "ready" || !isConfiguredMounting(sensor.mounting_mode)) && enabled ? "text-destructive" : "text-muted-foreground"}`}><Gauge className="size-3" />{isConfiguredMounting(sensor.mounting_mode) ? `${mountingLabel(sensor.mounting_mode)} camera` : "Mounting not configured"} · {sensor.inverted ? "inverted 180°" : "normal orientation"} · {readiness}</div>
           </div>
@@ -605,6 +641,47 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
         <div className="grid gap-4 sm:grid-cols-2"><Field id="run-name" label="Run display name (optional)" hint="Human-readable metadata only. Leave blank to use the folder name; changing it does not select or rename storage." error={form.formState.errors.run_name?.message}><Input id="run-name" {...form.register("run_name")} placeholder="Defaults to folder name" /></Field><Field id="resolution" label="Image resolution" hint="Only modes shared by every enabled camera are offered."><Controller control={form.control} name="resolution" render={({ field }) => <Select value={field.value} onValueChange={field.onChange} disabled={cameraContractLocked}><SelectTrigger id="resolution" aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined}><SelectValue /></SelectTrigger><SelectContent>{resolutionOptions.map((resolution) => <SelectItem value={resolution} key={resolution}>{resolution === "720p" ? "1280 × 720" : resolution === "360p" ? "672 × 376" : resolution}</SelectItem>)}</SelectContent></Select>} /></Field></div>
         <div className="grid gap-4 sm:grid-cols-2"><Field id="fps" label={<span className="inline-flex items-center gap-1">Frames per second <HelpTip label="frames per second">The requested RGB-D frame rate for each enabled camera. Higher rates create more data and may exceed a camera or USB connection's supported mode.</HelpTip></span>} hint="How many RGB-D frames each camera should request per second." error={form.formState.errors.fps?.message}><Input id="fps" type="number" min={1} max={60} disabled={cameraContractLocked} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined} {...form.register("fps", { valueAsNumber: true })} /></Field><Field id="velocity" label={<span className="inline-flex items-center gap-1">{intent === "dataset" ? "Requested robot capture speed (m/s)" : "Robot capture speed limit (m/s)"} <HelpTip label="robot capture speed">{captureSpeedHelp}</HelpTip></span>} hint={captureSpeedHint} error={form.formState.errors.velocity?.message}><Input id="velocity" type="number" min="0.01" max={maximumCaptureSpeedMps} step="0.01" {...form.register("velocity", { valueAsNumber: true })} /></Field></div>
 
+        {intent === "dataset" && <section className="space-y-3 rounded-lg border bg-muted/15 p-4" data-testid="bop-annotation-mode-setup" aria-labelledby="bop-annotation-mode-heading">
+          <div><h3 id="bop-annotation-mode-heading" className="text-sm font-semibold">BOP annotation outcome <span className="text-destructive">Required</span></h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Choose what this dataset must contain when it is finished. The base image/model export is always produced; choosing ground truth records the intent and does not queue rendering.</p></div>
+          <Controller control={form.control} name="annotation_mode" render={({ field }) => <Select value={field.value} onValueChange={field.onChange}><SelectTrigger id="annotation-mode" aria-label="BOP annotation mode" aria-invalid={!annotationChosen} aria-describedby={annotationChosen ? undefined : "annotation-mode-required"}><SelectValue placeholder="Choose the dataset outcome" /></SelectTrigger><SelectContent><SelectItem value="none">Base BOP dataset only — no ground truth</SelectItem><SelectItem value="pose">Pose ground truth</SelectItem><SelectItem value="pose_and_masks">Pose ground truth + masks</SelectItem></SelectContent></Select>} />
+          {!annotationChosen && <p id="annotation-mode-required" data-testid="annotation-mode-required" className="text-[11px] font-medium text-destructive">{ANNOTATION_REQUIRED_MESSAGE} Nothing is preselected.</p>}
+        </section>}
+
+        {intent === "dataset" && <section className="space-y-3" aria-labelledby="saved-calibration-heading">
+          <div><h3 id="saved-calibration-heading" className="text-sm font-semibold">Saved camera calibration <span className="text-destructive">Required</span></h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Choose a promoted source for each enabled camera, newest first. Static and robot-mounted cameras may come from different calibration runs; PoseTestBot combines only the assigned profile pairs into one immutable, run-owned snapshot. <Link to="/calibrations" className="font-semibold text-primary-strong underline underline-offset-4">Review all calibrations and their age</Link>.</p></div>
+          {existingCalibrationReady && !hasCalibrationDraft && <div className="flex items-start gap-2 rounded-lg border border-success/35 bg-success/5 p-3 text-xs"><CheckCircle2 className="mt-0.5 size-4 shrink-0 text-success" /><div><div className="font-semibold">A verified calibration snapshot is selected</div><div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{existingCalibration}</div><p className="mt-1 text-muted-foreground">Both profile files and the selection record agree on bundle <span className="font-mono">{configuredSelectionHash?.slice(0, 16)}…</span>. Assign sources below only if you intend to replace it.</p></div></div>}
+          {hasCameraContractChanges && !hasCalibrationDraft && <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" /><div><div className="font-semibold">Camera contract changed for this run</div><p className="mt-1 text-muted-foreground">The previous calibration cannot be reused implicitly after camera membership, resolution, mounting, or image-orientation changes. Assign a compatible promoted source to every enabled camera before saving.</p></div></div>}
+          {hasInvalidExistingSelection && !hasCalibrationDraft && <div className="flex items-start gap-2 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="font-semibold">Saved calibration selection needs attention</div><p className="mt-1 text-muted-foreground">{librarySelection?.valid === false && librarySelection.issues[0] ? librarySelection.issues[0].message : "The selected snapshot does not match the bundle recorded in run_config.json."} Assign and validate saved calibrations before recording.</p></div></div>}
+          {calibrations.isError ? <QueryProblem title="Calibration sources unavailable" error={calibrations.error} retry={() => void calibrations.refetch()} /> : calibrations.isPending ? <div className="flex items-center gap-2 rounded-lg border p-4 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Loading promoted calibrations…</div> : calibrationSources.length === 0 ? <div className="rounded-lg border border-dashed p-4 text-xs text-muted-foreground">No selectable calibration was found. Complete and promote the camera-calibration workflow, or open <Link to="/calibrations" className="font-semibold text-primary-strong underline underline-offset-4">Calibrations</Link> to recover one that only survives inside an earlier dataset run.</div> : <div className="space-y-3" data-testid="calibration-source-assignments">{calibrationAssignmentRows.map(({ sensor, key, eligibleSources, selectedSource, selectedMapping }) => {
+            const selectId = `calibration-source-${key.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`
+            const ageWarningDays = calibrations.data?.age_warning_days
+            const selectedProfile = selectedSource?.calibration_profiles.profiles.find((item) => item.profile_id === selectedMapping?.profile_id)
+            const selectedAge = daysSince(selectedProfile?.calibrated_at)
+            const verifyMount = selectedAge != null && ageWarningDays != null && selectedAge >= ageWarningDays
+            const relevantIssues = calibrationSources.flatMap((source) => source.issues.filter((issue) => issue.sensor_key === key))
+            return <div className="rounded-lg border p-3" data-testid="calibration-source-assignment" data-sensor-key={key} key={key}>
+              <div className="flex flex-wrap items-start justify-between gap-2"><div><Label htmlFor={selectId} className="font-semibold">{cameraLabel(sensor)}</Label><div className="mt-0.5 font-mono text-[9px] text-muted-foreground">{key}</div></div><span className="rounded-full bg-muted px-2 py-1 text-[10px] font-semibold">{mountingLabel(sensor.mounting_mode)}</span></div>
+              {eligibleSources.length ? <div className="mt-3 space-y-2"><Select value={selectedSource?.source_run_root ?? ""} onValueChange={(sourceRunRoot) => { setCalibrationAssignments((current) => ({ runRoot: selectedRun, sourceBySensor: { ...(current?.runRoot === selectedRun ? current.sourceBySensor : {}), [key]: sourceRunRoot } })); setConfirmReplacement(false) }}><SelectTrigger id={selectId} aria-label={`Calibration source for ${cameraLabel(sensor)}`}><SelectValue placeholder="Choose a promoted calibration run" /></SelectTrigger><SelectContent>{eligibleSources.map((source) => {
+                const mapping = calibrationMappingFor(source, sensor, selectedResolution)
+                const profile = source.calibration_profiles.profiles.find((item) => item.profile_id === mapping?.profile_id)
+                return <SelectItem value={source.source_run_root} key={source.source_run_root}><span className="flex min-w-0 flex-col"><span>{source.source_run_name} · {profile?.calibrated_at ? formatAge(profile.calibrated_at) : "capture date unavailable"}{source.origin === "library" ? " · kept in library" : ""}</span><span className="truncate font-mono text-[9px] text-muted-foreground">{profile?.promoted_at && `Published ${formatDate(profile.promoted_at)} · `}{mapping?.profile_id} · {source.source_run_root}</span></span></SelectItem>
+              })}</SelectContent></Select>{selectedMapping && <p className="text-[10px] text-muted-foreground">Profile <span className="font-mono">{selectedMapping.profile_id}</span> · lens <span className="font-mono">{selectedMapping.intrinsic_profile_id}</span></p>}{verifyMount && <p className="text-[11px] font-semibold text-warning-foreground">{ageWarningDays}+ days since capture. Confirm the mount before reuse.</p>}</div> : <div className="mt-3 rounded border border-destructive/30 bg-destructive/5 p-2 text-[11px] text-destructive">{isConfiguredMounting(sensor.mounting_mode) ? `No promoted source matches this camera identity, ${sensor.mounting_mode === "static" ? "static" : "robot-mounted"} mount, orientation, and selected resolution.` : "Choose this camera's mounting before selecting a calibration source."}{relevantIssues[0] ? ` ${relevantIssues[0].message}` : ""}</div>}
+            </div>
+          })}</div>}
+          {calibrationSources.length > 0 && <details className="rounded-lg border bg-muted/20"><summary className="cursor-pointer px-3 py-2 text-[11px] font-semibold">Available source-run provenance</summary><div className="space-y-2 border-t p-3">{calibrationSources.map((source) => <div className="text-[10px]" key={source.source_run_root}><div className="font-semibold">{source.source_run_name}</div><div className="break-all font-mono text-muted-foreground">{source.source_run_root}</div><div className="mt-0.5 text-muted-foreground">{formatAge(source.calibrated_at)} · {source.origin === "library" ? "kept in calibration library" : "calibration run folder"} · {source.calibration_profiles.valid_profile_count} valid camera profile{source.calibration_profiles.valid_profile_count === 1 ? "" : "s"} · bundle {source.bundle_sha256?.slice(0, 16) ?? "unavailable"}…</div></div>)}</div></details>}
+          {hasCalibrationDraft && calibrationAssignmentsComplete && <div className="rounded-lg border border-primary/25 bg-primary/5 p-3 text-xs"><div className="font-semibold">Ready to combine and validate</div><p className="mt-1 text-muted-foreground">The server will recheck every assignment, build a deterministic profile collection, and preserve each source run and sensor mapping in the selection record.</p></div>}
+          {hasCalibrationDraft && !calibrationAssignmentsComplete && <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><div className="font-semibold">A source is still required for every enabled camera</div><p className="mt-1 text-muted-foreground">Partial selections are kept as a browser-local draft and cannot change the run.</p></div>}
+          {replacementBlocked && <div className="flex items-start gap-2 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="font-semibold">This run can no longer change calibration</div><p className="mt-1 text-muted-foreground">Derived dataset evidence already depends on the current snapshot. Start a new run to use another calibration.</p><ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-muted-foreground">{replacementBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div></div>}
+          {replacingSelection && !replacementBlocked && <Label className="flex cursor-pointer items-start gap-3 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><Checkbox aria-label="Confirm replacing the current calibration selection" checked={confirmReplacement} onCheckedChange={(checked) => setConfirmReplacement(checked === true)} /><span><span className="block font-semibold">Replace the current calibration selection</span><span className="mt-1 block font-normal text-muted-foreground">I understand this replaces bundle <span className="font-mono">{currentSelectedBundleHash?.slice(0, 12)}…</span> with the camera-by-camera combination above. The server will reject the change if the current selection changed since this page loaded.</span></span></Label>}
+        </section>}
+        {intent === "dataset" && <section className="space-y-3 rounded-lg border bg-muted/15 p-4" data-testid="capture-synchronization-setup" aria-labelledby="capture-synchronization-heading">
+          <div><h3 id="capture-synchronization-heading" className="text-sm font-semibold">Cross-camera timing</h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">All PoseTestBot acquisitions use timestamp-aligned RGB-D streams.</p></div>
+          <div className="rounded border border-primary/25 bg-primary/5 p-3 text-xs leading-relaxed"><div className="font-semibold">Timestamp association</div><p className="mt-1 text-muted-foreground">Each camera preserves its own RGB-D stream and timestamps. Processing associates frames and robot poses using the promoted calibration timing evidence; it does not claim simultaneous camera exposures.</p></div>
+        </section>}
+
+        <details className="rounded-lg border bg-muted/15">
+          <summary className="cursor-pointer px-4 py-3 text-xs font-semibold">Fixed acquisition contract</summary>
+          <div className="space-y-3 px-4 pb-4">
         <section className="space-y-3 rounded-lg border bg-muted/15 p-4" data-testid="robot-pose-reference-setup" aria-labelledby="robot-pose-reference-heading">
           <div><h3 id="robot-pose-reference-heading" className="text-sm font-semibold">Fixed PoseTemplateBase robot-pose reference</h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Every <code>robot_pose.v1</code> packet must report the commissioned Application Data path below together with this run's exact ID. The setting is not browser-editable.</p></div>
           <div data-testid="robot-pose-reference-path" className="rounded border bg-background p-3 font-mono text-xs">{POSE_TEMPLATE_BASE_SUNRISE_PATH}</div>
@@ -612,39 +689,8 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
           <div className="rounded border border-warning/35 bg-warning/5 p-3 text-xs leading-relaxed"><span className="font-semibold">Controller contract:</span> Packets with a different frame path, missing run ID, or a non-current schema are rejected before capture evidence can be accepted.</div>
         </section>
 
-        {intent === "dataset" && <section className="space-y-3 rounded-lg border bg-muted/15 p-4" data-testid="capture-synchronization-setup" aria-labelledby="capture-synchronization-heading">
-          <div><h3 id="capture-synchronization-heading" className="text-sm font-semibold">Cross-camera timing</h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">All PoseTestBot acquisitions use timestamp-aligned RGB-D streams.</p></div>
-          <div className="rounded border border-primary/25 bg-primary/5 p-3 text-xs leading-relaxed"><div className="font-semibold">Timestamp association</div><p className="mt-1 text-muted-foreground">Each camera preserves its own RGB-D stream and timestamps. Processing associates frames and robot poses using the promoted calibration timing evidence; it does not claim simultaneous camera exposures.</p></div>
-        </section>}
-
-        {intent === "dataset" && <section className="space-y-3 rounded-lg border bg-muted/15 p-4" data-testid="bop-annotation-mode-setup" aria-labelledby="bop-annotation-mode-heading">
-          <div><h3 id="bop-annotation-mode-heading" className="text-sm font-semibold">BOP annotation outcome</h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">The base image/model export is always produced first. Ground-truth rendering remains a separate optional background job after processing.</p></div>
-          <Controller control={form.control} name="annotation_mode" render={({ field }) => <Select value={field.value} onValueChange={field.onChange}><SelectTrigger id="annotation-mode" aria-label="BOP annotation mode"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">Base BOP dataset only</SelectItem><SelectItem value="pose">Optional pose ground truth</SelectItem><SelectItem value="pose_and_masks">Optional pose + masks</SelectItem></SelectContent></Select>} />
-          <p className="text-[11px] leading-relaxed text-muted-foreground">This explicit run contract records the intended final dataset evidence. Selecting an annotated outcome does not queue rendering.</p>
-        </section>}
-
-        {intent === "dataset" && <section className="space-y-3" aria-labelledby="saved-calibration-heading">
-          <div><h3 id="saved-calibration-heading" className="text-sm font-semibold">Saved camera calibration <span className="text-destructive">Required</span></h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Choose a promoted source for each enabled camera. Static and robot-mounted cameras may come from different calibration runs; PoseTestBot combines only the assigned profile pairs into one immutable, run-owned snapshot.</p></div>
-          {existingCalibrationReady && !hasCalibrationDraft && <div className="flex items-start gap-2 rounded-lg border border-success/35 bg-success/5 p-3 text-xs"><CheckCircle2 className="mt-0.5 size-4 shrink-0 text-success" /><div><div className="font-semibold">A verified calibration snapshot is selected</div><div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{existingCalibration}</div><p className="mt-1 text-muted-foreground">Both profile files and the selection record agree on bundle <span className="font-mono">{configuredSelectionHash?.slice(0, 16)}…</span>. Assign sources below only if you intend to replace it.</p></div></div>}
-          {hasCameraContractChanges && !hasCalibrationDraft && <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" /><div><div className="font-semibold">Camera contract changed for this run</div><p className="mt-1 text-muted-foreground">The previous calibration cannot be reused implicitly after camera membership, resolution, mounting, or image-orientation changes. Assign a compatible promoted source to every enabled camera before saving.</p></div></div>}
-          {hasInvalidExistingSelection && !hasCalibrationDraft && <div className="flex items-start gap-2 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="font-semibold">Saved calibration selection needs attention</div><p className="mt-1 text-muted-foreground">{librarySelection?.valid === false && librarySelection.issues[0] ? librarySelection.issues[0].message : "The selected snapshot does not match the bundle recorded in run_config.json."} Assign and validate saved calibrations before recording.</p></div></div>}
-          {calibrations.isPending ? <div className="flex items-center gap-2 rounded-lg border p-4 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Loading promoted calibrations…</div> : calibrationSources.length === 0 ? <div className="rounded-lg border border-dashed p-4 text-xs text-muted-foreground">No reusable promoted calibrations were found. Complete and promote the camera-calibration workflow first.</div> : <div className="space-y-3" data-testid="calibration-source-assignments">{calibrationAssignmentRows.map(({ sensor, key, eligibleSources, selectedSource, selectedMapping }) => {
-            const selectId = `calibration-source-${key.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`
-            const relevantIssues = calibrationSources.flatMap((source) => source.issues.filter((issue) => issue.sensor_key === key))
-            return <div className="rounded-lg border p-3" data-testid="calibration-source-assignment" data-sensor-key={key} key={key}>
-              <div className="flex flex-wrap items-start justify-between gap-2"><div><Label htmlFor={selectId} className="font-semibold">{cameraLabel(sensor)}</Label><div className="mt-0.5 font-mono text-[9px] text-muted-foreground">{key}</div></div><span className="rounded-full bg-muted px-2 py-1 text-[10px] font-semibold">{mountingLabel(sensor.mounting_mode)}</span></div>
-              {eligibleSources.length ? <div className="mt-3 space-y-2"><Select value={selectedSource?.source_run_root ?? ""} onValueChange={(sourceRunRoot) => { setCalibrationAssignments((current) => ({ runRoot: selectedRun, sourceBySensor: { ...(current?.runRoot === selectedRun ? current.sourceBySensor : {}), [key]: sourceRunRoot } })); setConfirmReplacement(false) }}><SelectTrigger id={selectId} aria-label={`Calibration source for ${cameraLabel(sensor)}`}><SelectValue placeholder="Choose a promoted calibration run" /></SelectTrigger><SelectContent>{eligibleSources.map((source) => {
-                const mapping = calibrationMappingFor(source, sensor, selectedResolution)
-                return <SelectItem value={source.source_run_root} key={source.source_run_root}><span className="flex min-w-0 flex-col"><span>{source.source_run_name}</span><span className="truncate font-mono text-[9px] text-muted-foreground">{mapping?.profile_id} · {source.source_run_root}</span></span></SelectItem>
-              })}</SelectContent></Select>{selectedMapping && <p className="text-[10px] text-muted-foreground">Profile <span className="font-mono">{selectedMapping.profile_id}</span> · lens <span className="font-mono">{selectedMapping.intrinsic_profile_id}</span></p>}</div> : <div className="mt-3 rounded border border-destructive/30 bg-destructive/5 p-2 text-[11px] text-destructive">{isConfiguredMounting(sensor.mounting_mode) ? `No promoted source matches this camera identity, ${sensor.mounting_mode === "static" ? "static" : "robot-mounted"} mount, orientation, and selected resolution.` : "Choose this camera's mounting before selecting a calibration source."}{relevantIssues[0] ? ` ${relevantIssues[0].message}` : ""}</div>}
-            </div>
-          })}</div>}
-          {calibrationSources.length > 0 && <details className="rounded-lg border bg-muted/20"><summary className="cursor-pointer px-3 py-2 text-[11px] font-semibold">Available source-run provenance</summary><div className="space-y-2 border-t p-3">{calibrationSources.map((source) => <div className="text-[10px]" key={source.source_run_root}><div className="font-semibold">{source.source_run_name}</div><div className="break-all font-mono text-muted-foreground">{source.source_run_root}</div><div className="mt-0.5 text-muted-foreground">{source.calibration_profiles.valid_profile_count} valid camera profile{source.calibration_profiles.valid_profile_count === 1 ? "" : "s"} · bundle {source.bundle_sha256?.slice(0, 16) ?? "unavailable"}…</div></div>)}</div></details>}
-          {hasCalibrationDraft && calibrationAssignmentsComplete && <div className="rounded-lg border border-primary/25 bg-primary/5 p-3 text-xs"><div className="font-semibold">Ready to combine and validate</div><p className="mt-1 text-muted-foreground">The server will recheck every assignment, build a deterministic profile collection, and preserve each source run and sensor mapping in the selection record.</p></div>}
-          {hasCalibrationDraft && !calibrationAssignmentsComplete && <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><div className="font-semibold">A source is still required for every enabled camera</div><p className="mt-1 text-muted-foreground">Partial selections are kept as a browser-local draft and cannot change the run.</p></div>}
-          {replacementBlocked && <div className="flex items-start gap-2 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="font-semibold">This run can no longer change calibration</div><p className="mt-1 text-muted-foreground">Derived dataset evidence already depends on the current snapshot. Start a new run to use another calibration.</p><ul className="mt-2 list-disc space-y-1 pl-4 text-[11px] text-muted-foreground">{replacementBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div></div>}
-          {replacingSelection && !replacementBlocked && <Label className="flex cursor-pointer items-start gap-3 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs"><Checkbox aria-label="Confirm replacing the current calibration selection" checked={confirmReplacement} onCheckedChange={(checked) => setConfirmReplacement(checked === true)} /><span><span className="block font-semibold">Replace the current calibration selection</span><span className="mt-1 block font-normal text-muted-foreground">I understand this replaces bundle <span className="font-mono">{currentSelectedBundleHash?.slice(0, 12)}…</span> with the camera-by-camera combination above. The server will reject the change if the current selection changed since this page loaded.</span></span></Label>}
-        </section>}
+          </div>
+        </details>
 
         </fieldset>
         <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -654,8 +700,10 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
               ? <div className="flex min-w-0 items-start gap-2 text-xs" role="alert"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="font-semibold text-destructive">The active run’s setup could not be loaded</div><p className="mt-1 text-muted-foreground">{errorMessage(existing.error)} Existing setup may still be present, so saving remains disabled.</p><Button type="button" variant="outline" size="sm" className="mt-2" onClick={() => existing.refetch()} disabled={existing.isFetching}><RefreshCw className={existing.isFetching ? "animate-spin" : undefined} />Retry setup lookup</Button></div></div>
               : !cameraMountingReady
                 ? <p className="text-xs font-medium text-destructive" data-testid="run-mounting-required">Choose Static or Robot-mounted for every enabled camera. PoseTestBot will not assume a mounting.</p>
-                : null}
-          <Button type="submit" className="sm:ml-auto" disabled={setupControlsDisabled || save.isPending || sensors.isPending || enabledSensors.length === 0 || !calibrationReady}>{setupLookupPending || save.isPending ? <LoaderCircle className="animate-spin" /> : <Save />}{save.isPending ? (hasCalibrationDraft ? "Validating and saving…" : "Saving…") : (hasCalibrationDraft ? "Validate and save setup" : "Save setup")}</Button>
+                : !annotationChosen
+                  ? <p className="text-xs font-medium text-destructive" data-testid="run-annotation-required">{ANNOTATION_REQUIRED_MESSAGE}</p>
+                  : null}
+          <Button type="submit" className="sm:ml-auto" disabled={setupControlsDisabled || save.isPending || sensors.isPending || enabledSensors.length === 0 || !calibrationReady || !annotationChosen || intentMismatch}>{setupLookupPending || save.isPending ? <LoaderCircle className="animate-spin" /> : <Save />}{save.isPending ? (hasCalibrationDraft ? "Validating and saving…" : "Saving…") : (hasCalibrationDraft ? "Validate and save setup" : "Save setup")}</Button>
         </div>
       </form></CardContent>
     </Card>

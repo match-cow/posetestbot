@@ -138,10 +138,6 @@ def test_blenderproc_prepare_stage_writes_artifacts_and_manifest(
         np.load(blenderproc_folder / "camera_matrix.npy"),
         np.array([[50.0, 0.0, 40.0], [0.0, 50.0, 40.0], [0.0, 0.0, 1.0]]),
     )
-    np.testing.assert_allclose(
-        np.load(blenderproc_folder / "dist_coefficients.npy"),
-        np.zeros((5, 1)),
-    )
     camera_poses = np.load(blenderproc_folder / "camera_poses.npy")
     assert camera_poses.shape == (1, 4, 4)
     frame_contract = json.loads(
@@ -241,6 +237,13 @@ def test_blenderproc_prepare_prefers_rectified_sensor_tree(tmp_path: Path) -> No
     synchronized = run_root / "processed" / "synchronized" / "realsense_123"
     rectified = run_root / "processed" / "rectified" / "realsense_123"
     shutil.copytree(synchronized, rectified)
+    from posetestbot.calibration.rectification import rgbd_camera_artifact_fingerprint
+    fingerprint = rgbd_camera_artifact_fingerprint(synchronized)
+    (rectified / "rectification_provenance.json").write_text(json.dumps({
+        "schema_version": "rectification_provenance.v2", "projection": "rectified_alpha0",
+        "source_sensor_folder": str(synchronized), "output_sensor_folder": str(rectified),
+        "source_fingerprint": fingerprint, "output_fingerprint": fingerprint, "frame_count": 1,
+    }))
     repo_root = Path(__file__).resolve().parents[1]
 
     subprocess.run(

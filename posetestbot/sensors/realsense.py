@@ -330,7 +330,7 @@ def capture_realsense_rgbd(
     recorded_frame_stems: set[str] = set()
     sidecars_written = False
     started_at_ns = time.time_ns()
-    last_frame_wall_timestamp_ns = 0
+    last_fallback_frame_ms = 0
     image_rotation_degrees = 180 if inverted else 0
     orientation = "inverted" if inverted else "normal"
 
@@ -350,6 +350,7 @@ def capture_realsense_rgbd(
             # delivers the frameset.  Alignment, conversion, preview and disk
             # work must not become part of the robot/camera sync timestamp.
             host_received_timestamp_ns = time.monotonic_ns()
+            host_wall_timestamp_ns = time.time_ns()
             if stop_requested and stop_requested():
                 break
             aligned_frames = align.process(frames)
@@ -439,11 +440,12 @@ def capture_realsense_rgbd(
                 key = cv2_preview.waitKey(1)
 
             if record and output is not None:
-                host_wall_timestamp_ns = time.time_ns()
-                min_next_wall_timestamp_ns = last_frame_wall_timestamp_ns + 1_000_000
-                if host_wall_timestamp_ns < min_next_wall_timestamp_ns:
-                    host_wall_timestamp_ns = min_next_wall_timestamp_ns
-                last_frame_wall_timestamp_ns = host_wall_timestamp_ns
+                if frame_stem is None:
+                    fallback_ms = max(host_wall_timestamp_ns // 1_000_000, last_fallback_frame_ms + 1)
+                    while str(fallback_ms) in recorded_frame_stems:
+                        fallback_ms += 1
+                    last_fallback_frame_ms = fallback_ms
+                    frame_stem = str(fallback_ms)
                 depth_timestamp_ns = _frame_timestamp_ns(aligned_depth_frame)
                 timestamp_metadata = _realsense_timestamp_metadata(
                     color_frame,

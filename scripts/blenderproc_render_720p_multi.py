@@ -94,7 +94,6 @@ def _rigid_transform(value, *, label):
 
 def load_object(
     object_dir,
-    object_name,
     *,
     obj_id,
     instance_uuid,
@@ -144,7 +143,6 @@ def load_objects(objects_dir, objects_json):
     return [
         load_object(
             objects_dir,
-            item["name"],
             obj_id=int(item["obj_id"]),
             instance_uuid=item["instance_uuid"],
             mesh=item["mesh"],

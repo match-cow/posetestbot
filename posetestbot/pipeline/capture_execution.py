@@ -395,7 +395,7 @@ def _sensor_output_path(command: Mapping[str, Any]) -> Path:
     if not isinstance(raw_output, str) or not raw_output:
         raise ValueError("Every sensor_capture command requires output_folder")
     output_path = Path(raw_output)
-    return output_path if output_path.is_absolute() else Path.cwd() / output_path
+    return output_path if output_path.is_absolute() else _repo_root() / output_path
 
 
 def _raw_pose_count(run_root: Path) -> int:
@@ -456,17 +456,12 @@ def _sensor_output_paths_from_plan(
     for command in commands:
         if not isinstance(command, Mapping) or command.get("role") != "sensor_capture":
             continue
-        raw_output = command.get("output_folder")
-        if not isinstance(raw_output, str) or not raw_output:
-            raise ValueError("Every sensor_capture command requires output_folder")
-        output_path = Path(raw_output)
-        if not output_path.is_absolute():
-            output_path = Path.cwd() / output_path
+        output_path = _sensor_output_path(command)
         try:
             output_path.resolve().relative_to(root_resolved)
         except ValueError as exc:
             raise ValueError(
-                f"Sensor output folder escapes the run root: {raw_output}"
+                f"Sensor output folder escapes the run root: {output_path}"
             ) from exc
         output_paths.append(output_path)
     if len(output_paths) != len(set(path.resolve() for path in output_paths)):
@@ -494,10 +489,10 @@ def _assert_capture_outputs_absent(
 
 def _validate_capture_execution_boundary(
     run_root: Path,
+    config: Mapping[str, Any],
 ) -> CaptureExecutionBoundary:
     """Perform only read-only checks before supervisor artifact creation."""
 
-    config = load_run_config_for_run_root(run_root)
     capture = config.get("capture")
     if not isinstance(capture, Mapping):
         raise ValueError("Run configuration capture must be an object")
@@ -811,20 +806,6 @@ def build_capture_execution_plan(
 
 def capture_execution_plan_path(run_root: str | Path) -> Path:
     return Path(run_root) / CAPTURE_EXECUTION_PLAN
-
-
-def load_capture_execution_plan(run_root: str | Path) -> dict[str, Any]:
-    path = capture_execution_plan_path(run_root)
-    with open(path, "r") as f:
-        value = json.load(f)
-    if not isinstance(value, dict):
-        raise ValueError(f"Capture execution plan must be a JSON object: {path}")
-    if value.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError(
-            f"Unsupported capture execution plan schema: "
-            f"{value.get('schema_version')!r}"
-        )
-    return value
 
 
 def write_capture_execution_plan(
@@ -1158,6 +1139,7 @@ def run_capture_execution(
     receive_idle_timeout_s: float = DEFAULT_RECEIVE_IDLE_TIMEOUT_S,
     collect_sensors: Callable[[], dict] = collect_sensor_status,
     write_plan_if_missing: bool = True,
+    approved_config_sha256: str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     """Execute full real capture with process-group supervision."""
 
@@ -1200,37 +1182,6 @@ def run_capture_execution(
         )
 
     run_root_path = Path(run_root)
-    with run_config_lock(run_root_path):
-        boundary = _validate_capture_execution_boundary(run_root_path)
-        plan = build_capture_execution_plan(
-            run_root_path,
-            allow_cameras=allow_cameras,
-            allow_real_robot=allow_real_robot,
-            include_sensor_status=include_sensor_status,
-            collect_sensors=collect_sensors,
-            write_plan_if_missing=write_plan_if_missing,
-            camera_startup_attempts=camera_startup_attempts,
-            camera_startup_retry_delay_s=camera_startup_retry_delay_s,
-        )
-        commands, receiver_command = _validated_execution_commands(
-            plan,
-            boundary=boundary,
-        )
-        # Sensor discovery can take time. Recheck under the shared run-config
-        # transaction before publishing the first durable execution evidence.
-        _assert_capture_outputs_absent(
-            run_root_path,
-            boundary.sensor_output_paths,
-        )
-
-        logs_dir = run_root_path / CAPTURE_EXECUTION_LOGS_DIR
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        plan_path = write_capture_execution_plan(run_root_path, plan)
-        manifest = load_or_create_run_manifest(run_root_path)
-        upsert_stage(manifest, name="capture_execution", status="running")
-        write_run_manifest(manifest, run_root_path)
-
-    started_monotonic = time.monotonic()
     process_infos: list[dict[str, Any]] = []
     background_processes: list[dict[str, Any]] = []
     status = "succeeded"
@@ -1255,7 +1206,45 @@ def run_capture_execution(
             ),
         )
 
-    status_path = record_status("starting", "Capture execution supervisor starting.")
+    with run_config_lock(run_root_path):
+        config = load_run_config_for_run_root(
+            run_root_path, approved_sha256=approved_config_sha256
+        )
+        boundary = _validate_capture_execution_boundary(run_root_path, config)
+        plan = build_capture_execution_plan(
+            run_root_path,
+            allow_cameras=allow_cameras,
+            allow_real_robot=allow_real_robot,
+            include_sensor_status=include_sensor_status,
+            collect_sensors=collect_sensors,
+            write_plan_if_missing=write_plan_if_missing,
+            camera_startup_attempts=camera_startup_attempts,
+            camera_startup_retry_delay_s=camera_startup_retry_delay_s,
+        )
+        commands, receiver_command = _validated_execution_commands(
+            plan,
+            boundary=boundary,
+        )
+        # Recheck after sensor discovery, before publishing execution evidence.
+        if approved_config_sha256 is not None:
+            load_run_config_for_run_root(
+                run_root_path, approved_sha256=approved_config_sha256
+            )
+        _assert_capture_outputs_absent(
+            run_root_path,
+            boundary.sensor_output_paths,
+        )
+
+        logs_dir = run_root_path / CAPTURE_EXECUTION_LOGS_DIR
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        plan_path = write_capture_execution_plan(run_root_path, plan)
+        manifest = load_or_create_run_manifest(run_root_path)
+        upsert_stage(manifest, name="capture_execution", status="running")
+        write_run_manifest(manifest, run_root_path)
+        started_monotonic = time.monotonic()
+        status_path = record_status(
+            "starting", "Capture execution supervisor starting."
+        )
 
     def cleanup_processes(reason: str) -> list[str]:
         active_infos: list[dict[str, Any]] = []
@@ -1792,7 +1781,7 @@ def run_capture_execution(
     if status == "succeeded":
         completion = build_capture_completion(
             run_root_path,
-            load_run_config_for_run_root(run_root_path),
+            config,
             process_records,
         )
         if completion["status"] != "ok":

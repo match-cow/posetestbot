@@ -12,13 +12,14 @@ import stat
 import threading
 import uuid
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
 from flask import current_app, has_app_context
 
-from posetestbot.jobs.runner import LocalJobRunner
-from posetestbot.web.paths import APP_ROOT
+from posetestbot.jobs.runner import RUN_SCOPE, LocalJobRunner, ResourceBusyError
+from posetestbot.web.paths import working_data_root
 
 
 RUNTIME_EXTENSION_KEY = "posetestbot.web_runtime"
@@ -138,7 +139,7 @@ class WebSettings:
             host=os.environ.get("POSETESTBOT_WEB_HOST", "0.0.0.0"),
             port=int(os.environ.get("POSETESTBOT_WEB_PORT", "5000")),
             debug=_env_bool("POSETESTBOT_WEB_DEBUG", default=False),
-            job_root=APP_ROOT / "working_data" / "jobs",
+            job_root=working_data_root() / "jobs",
             cluster_url=cluster_url,
             cluster_token=cluster_token,
             cluster_enabled=_env_bool(
@@ -231,11 +232,86 @@ def get_job_runner() -> LocalJobRunner:
     return get_web_runtime().job_runner
 
 
+def assert_no_active_run_jobs(run_root: Path) -> None:
+    root = run_root.resolve()
+    active = []
+    for job in get_job_runner().active_jobs():
+        if job.scope_kind != RUN_SCOPE or not job.run_root:
+            continue
+        try:
+            job_root = Path(job.run_root).resolve()
+        except (OSError, RuntimeError):
+            job_root = Path(job.run_root)
+        if job_root == root:
+            active.append(job.id)
+    if active:
+        raise ResourceBusyError(
+            "Run folder has active background work: " + ", ".join(sorted(active))
+        )
+
+
 def get_cluster_client():
     runtime = get_web_runtime()
     if runtime.cluster_client is None:
         raise RuntimeError("Cluster controller token is not configured")
     return runtime.cluster_client
+
+
+_run_storage_submission_lock = threading.Lock()
+
+
+def serialize_run_storage_submission(view):
+    """Keep local storage mutations and cluster submissions from racing."""
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        with _run_storage_submission_lock:
+            return view(*args, **kwargs)
+
+    return wrapped
+
+
+def cluster_run_activity() -> dict[str, Any]:
+    runtime = get_web_runtime()
+    if not runtime.settings.cluster_enabled:
+        return {"available": True, "active_run_roots": [], "reason": None}
+    roots: set[str] = set()
+    terminal = {"succeeded", "succeeded-with-warning", "failed", "canceled", "deleted"}
+    try:
+        controller = get_cluster_client()
+        archives = controller.archives()["archives"]
+        response = controller.estimation_jobs(limit=100)
+        jobs = response["jobs"]
+        if not isinstance(archives, list) or not isinstance(jobs, list):
+            raise ValueError("Invalid controller activity response")
+        for record in archives:
+            if record["state"] not in terminal:
+                path = record["source_run_root"]
+                if not isinstance(path, str) or not Path(path).is_absolute():
+                    raise ValueError("Invalid archive source")
+                roots.add(path)
+        for record in jobs:
+            if record["state"] not in terminal:
+                path = record["payload"]["run_root"]
+                if not isinstance(path, str) or not Path(path).is_absolute():
+                    raise ValueError("Invalid estimation source")
+                roots.add(path)
+        if len(archives) >= 100 or len(jobs) >= 100 or response.get("next_cursor"):
+            if controller.status().get("state", {}).get("active_job_count") != 0:
+                raise ValueError("Controller activity listing may be incomplete")
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError, AttributeError):
+        return {
+            "available": False, "active_run_roots": sorted(roots),
+            "reason": "Cluster run activity could not be verified. Wait for controller work to finish or restore the controller connection.",
+        }
+    return {"available": True, "active_run_roots": sorted(roots), "reason": None}
+
+
+def assert_no_active_cluster_run_jobs(run_root: Path) -> None:
+    activity = cluster_run_activity()
+    if run_root.as_posix() in activity["active_run_roots"]:
+        raise ResourceBusyError("An archive or estimation job is using this run folder.")
+    if not activity["available"]:
+        raise ResourceBusyError(activity["reason"])
 
 
 def get_cluster_service_manager():

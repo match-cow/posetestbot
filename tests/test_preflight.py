@@ -237,6 +237,19 @@ def test_preflight_queue_summary_rejects_missing_failed_and_stale_evidence(
     write_run_preflight_report(run_root, ready)
     assert run_preflight_queue_summary(run_root, config)["ready_for_queue"] is True
 
+    missing_status = {
+        key: value for key, value in ready.items() if key != "overall_status"
+    }
+    for malformed in (
+        missing_status,
+        *({**ready, "overall_status": status} for status in (None, "ready", [])),
+    ):
+        write_run_preflight_report(run_root, malformed)
+        summary = run_preflight_queue_summary(run_root, config)
+        assert summary["ready_for_queue"] is False
+        assert summary["queue_blocker"] == "invalid_preflight"
+    write_run_preflight_report(run_root, ready)
+
     changed = {**config, "run_name": "changed"}
     assert (
         run_preflight_queue_summary(run_root, changed)["queue_blocker"]

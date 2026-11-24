@@ -14,9 +14,7 @@ EXPECTED_DIRECT_SUBMISSIONS = {
     "posetestbot/web/routes/bop_annotations.py": {
         "queue_bop_annotations": "run",
     },
-    "posetestbot/web/routes/bop_evaluation.py": {
-        "queue_bop_evaluation": "run",
-    },
+    "posetestbot/web/routes/bop_evaluation.py": {},
     "posetestbot/web/routes/calibration.py": {
         "calibration_attempt_create_endpoint": "run",
         "calibration_attempt_promote_endpoint": "run",
@@ -45,6 +43,7 @@ EXPECTED_DIRECT_SUBMISSIONS = {
     "posetestbot/web/routes/workpieces.py": {
         "workpiece_catalog_upload": "library",
         "workpiece_catalog_unit_correction": "library",
+        "workpiece_catalog_delete": "library",
     },
 }
 

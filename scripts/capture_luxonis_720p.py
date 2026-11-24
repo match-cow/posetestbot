@@ -1,5 +1,7 @@
 import argparse
+import signal
 import sys
+import threading
 
 from posetestbot.sensors.oak_d_pro import (
     DEFAULT_RGB_DEPTH_DELTA_NS,
@@ -21,12 +23,6 @@ def parse_args() -> argparse.Namespace:
         "--test",
         action="store_true",
         help="Capture without recording frames.",
-    )
-    parser.add_argument(
-        "--downscaleColor",
-        action="store_true",
-        default=False,
-        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--fps",
@@ -80,6 +76,11 @@ def main() -> int:
         )
         return 2
 
+    # The capture supervisor ends every recording with SIGTERM. Dying on it
+    # mid-frame leaves an RGB without its depth or metadata, which fails the
+    # completion check for an otherwise good run.
+    stop_requested = threading.Event()
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: stop_requested.set())
     try:
         summary = capture_oak_d_pro_rgbd(
             args.output_path,
@@ -90,6 +91,7 @@ def main() -> int:
             preview=args.preview,
             record=not args.test,
             max_rgb_depth_delta_ns=int(args.max_rgb_depth_delta_ms * 1_000_000),
+            stop_requested=stop_requested.is_set,
         )
     except (OAKDProCaptureError, ValueError) as exc:
         print(f"capture_luxonis_720p.py: {exc}", file=sys.stderr)

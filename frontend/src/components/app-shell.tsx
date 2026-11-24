@@ -1,7 +1,7 @@
 import { useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
-import { ArrowRight, BookOpen, Bot, Boxes, ChartNoAxesCombined, Check, Circle, CircleDot, Cpu, FolderOpen, Folders, Gauge, Grid3X3, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Route, ScanSearch, Sun, Workflow } from "lucide-react"
+import { ArrowRight, BookOpen, Boxes, Camera, ChartNoAxesCombined, Check, Circle, CircleDot, Cpu, Crosshair, FolderOpen, Folders, Gauge, Grid3X3, Layers, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Route, ScanSearch, Sun, Workflow } from "lucide-react"
 import { RestartControl } from "@/components/restart-control"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select"
@@ -14,19 +14,23 @@ import { cn } from "@/lib/utils"
 import { activeWorkflowHref, type ActiveWorkflow, type WorkflowProgressStatus } from "@/lib/workflow-session"
 import { toast } from "sonner"
 
+// Operate: the guided path and its background work. Prepare: reusable
+// libraries that feed it. Inspect: derived results. Storage: run folders.
 const navigationGroups = [
   {
     label: "Operate",
     items: [
       { to: "/dashboard", label: "Dashboard", icon: Gauge },
       { to: "/workflow/setup", label: "Workflow", icon: Workflow, match: "/workflow" },
+      { to: "/jobs", label: "Jobs", icon: ListChecks },
     ],
   },
   {
     label: "Prepare",
     items: [
-      { to: "/devices", label: "Devices", icon: Bot },
+      { to: "/devices", label: "Devices", icon: Camera },
       { to: "/calibration-targets", label: "Calibration Targets", icon: Grid3X3 },
+      { to: "/calibrations", label: "Calibrations", icon: Crosshair },
       { to: "/workpieces", label: "Workpiece Catalogue", icon: PackageSearch },
       { to: "/pose-templates", label: "Pose Templates", icon: LayoutTemplate },
     ],
@@ -35,11 +39,16 @@ const navigationGroups = [
     label: "Inspect",
     items: [
       { to: "/cell", label: "Cell View", icon: Boxes },
-      { to: "/run-folders", label: "Run folders", icon: Folders },
       { to: "/pose-estimation", label: "Pose Estimation", icon: Cpu },
       { to: "/pose-results", label: "Pose Results", icon: ScanSearch },
       { to: "/bop-evaluation", label: "BOP Evaluation", icon: ChartNoAxesCombined },
-      { to: "/jobs", label: "Jobs", icon: ListChecks },
+      { to: "/depth-evaluation", label: "Depth Evaluation", icon: Layers },
+    ],
+  },
+  {
+    label: "Storage",
+    items: [
+      { to: "/run-folders", label: "Run folders", icon: Folders },
     ],
   },
 ]
@@ -92,7 +101,7 @@ function CurrentWorkflowCard({ workflow, runtime }: { workflow: ActiveWorkflow; 
 }
 
 export function AppShell() {
-  const { bootstrap, runs, selectedRun, selectRun, currentWorkflow } = useOperator()
+  const { bootstrap, runs, selectedRun, autoSelectedRun, selectRun, currentWorkflow } = useOperator()
   const { theme, setTheme } = useTheme()
   const location = useLocation()
   const workflowHref = currentWorkflow ? activeWorkflowHref(currentWorkflow) : "/workflow/setup"
@@ -119,8 +128,8 @@ export function AppShell() {
     refetchInterval: (state) => state.state.data?.active_count ? 1_000 : 5_000,
   })
   const processingJobs = useQuery({
-    queryKey: ["jobs"],
-    queryFn: () => api<{ jobs: Job[]; resources: Record<string, string> }>("/jobs"),
+    queryKey: ["jobs", selectedRun, "dataset-processing"],
+    queryFn: () => api<{ jobs: Job[] }>(query("/jobs", { run_root: selectedRun, search: '"purpose": "dataset_processing"' })),
     enabled: currentWorkflow?.journey === "dataset" && currentWorkflow.stepId === "sync",
     refetchInterval: (state) => state.state.data?.jobs.some((job) => ["queued", "running", "canceling"].includes(job.status)) ? 1_000 : 5_000,
   })
@@ -184,7 +193,7 @@ export function AppShell() {
           className="fixed inset-y-0 left-0 z-40 hidden w-[244px] flex-col overflow-y-auto border-r border-sidebar-border bg-sidebar px-4 py-5 text-sidebar-foreground xl:flex"
         >
           <Link to="/dashboard" className="flex items-center gap-3 px-2">
-            <img src={bootstrap.brand.logo_urls[theme]} alt={bootstrap.brand.name} className="size-9 rounded-[7px] object-contain" />
+            <img src={bootstrap.brand.logo_urls[theme] || bootstrap.brand.logo_url} alt={bootstrap.brand.name} className="size-9 rounded-[7px] object-contain" />
             <div><div className="font-display text-[17px] font-semibold tracking-tight">PoseTestBot</div><div className="text-[9px] font-bold uppercase tracking-[0.18em] text-sidebar-foreground/50">Operator console</div></div>
           </Link>
           <nav className="mt-7 space-y-5" aria-label="Primary navigation">
@@ -210,7 +219,7 @@ export function AppShell() {
             <div className="mx-auto flex h-full max-w-[1600px] flex-wrap items-center justify-between gap-3 px-4 sm:px-5 xl:px-7">
               <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
                 <Link to="/dashboard" className="shrink-0 xl:hidden" aria-label="Open dashboard">
-                  <img src={bootstrap.brand.logo_urls[theme]} alt="" className="size-8 rounded-[7px] object-contain" />
+                  <img src={bootstrap.brand.logo_urls[theme] || bootstrap.brand.logo_url} alt="" className="size-8 rounded-[7px] object-contain" />
                 </Link>
                 <section
                   aria-label="Active run context"
@@ -228,7 +237,7 @@ export function AppShell() {
                         <span className="grid size-7 shrink-0 place-items-center rounded-md bg-primary/10"><FolderOpen className="size-4 text-primary-strong" aria-hidden="true" /></span>
                         <span className="hidden shrink-0 text-[9px] font-bold uppercase tracking-[0.14em] text-primary-strong sm:inline">Active acquisition run</span>
                         <span className="hidden h-3.5 w-px shrink-0 bg-border sm:inline" aria-hidden="true" />
-                        <strong className="max-w-[34%] shrink-0 truncate text-xs" data-testid="active-run-name">{activeRunName}</strong>
+                        <strong className="max-w-[34%] shrink-0 truncate text-xs" data-testid="active-run-name">{activeRunName}</strong>{autoSelectedRun && <span className="shrink-0 rounded border px-1.5 py-0.5 text-[9px] text-muted-foreground">Auto-selected</span>}
                         <span className="hidden shrink-0 text-[8px] font-bold uppercase tracking-wider text-muted-foreground md:inline">Folder</span>
                         <span className="hidden min-w-0 flex-1 truncate font-mono text-[9px] text-muted-foreground md:inline" data-testid="active-run-path">{selectedRun}</span>
                         <span className={cn("hidden shrink-0 rounded-full border px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider lg:inline-flex", activeRun?.config_valid ? "border-success/30 bg-success/10 text-success" : "border-warning/35 bg-warning/10 text-warning-foreground")}>{activeRun?.config_valid ? "Configured" : "Not configured"}</span>

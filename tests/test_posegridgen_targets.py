@@ -172,6 +172,16 @@ def test_pdf_compensation_is_separate_from_physical_opencv_board(
     assert source["target_bounds"]["width_mm"] == pytest.approx(111.1)
     assert source["target_bounds"]["height_mm"] == pytest.approx(69.3)
     assert source["features"][0]["corners_mm"][1][0] == pytest.approx(30.3)
+    # The preview places physical geometry on the compensated printed page.
+    from posetestbot.calibration.target_preview import render_target_preview_png
+
+    preview = cv2.imdecode(
+        np.frombuffer(
+            render_target_preview_png(target, source_manifest=source), dtype=np.uint8
+        ),
+        cv2.IMREAD_GRAYSCALE,
+    )
+    assert preview is not None and int(preview.min()) == 0
 
     object_points = np.concatenate(points).astype(np.float32)
     true_k = np.asarray(

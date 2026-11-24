@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sync-delta",
         default=None,
-        help="Sync delta in ms, or a JSON file mapping sensor types to ms.",
+        help="Sync delta in ms (default 0), or a JSON file mapping every sensor folder name to ms.",
     )
     parser.add_argument(
         "--timestamp-source",

@@ -23,6 +23,6 @@ def robot_status():
     return route_support.robot_status()
 
 
-@system_status_bp.route("/hardware/status", methods=["GET", "POST"])
+@system_status_bp.get("/hardware/status")
 def hardware_status():
     return route_support.hardware_status()

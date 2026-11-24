@@ -25,12 +25,6 @@ export interface PreviewMeshLike {
   faces: readonly TriangleFace[]
 }
 
-export interface LayoutPoseLike {
-  x_mm: number
-  y_mm: number
-  rotation_deg: number
-}
-
 export interface IsometricPoint {
   x: number
   y: number
@@ -82,34 +76,6 @@ function normalized(value: number) {
 
 function assertMatrix(matrix: Matrix4x4Tuple) {
   matrix.forEach((row, rowIndex) => row.forEach((value, columnIndex) => assertFinite(value, `Matrix value [${rowIndex}][${columnIndex}]`)))
-}
-
-function multiplyMatrices(left: Matrix4x4Tuple, right: Matrix4x4Tuple): Matrix4x4Tuple {
-  const multiplyRow = (row: readonly [number, number, number, number]): readonly [number, number, number, number] => [
-    normalized(row[0] * right[0][0] + row[1] * right[1][0] + row[2] * right[2][0] + row[3] * right[3][0]),
-    normalized(row[0] * right[0][1] + row[1] * right[1][1] + row[2] * right[2][1] + row[3] * right[3][1]),
-    normalized(row[0] * right[0][2] + row[1] * right[1][2] + row[2] * right[2][2] + row[3] * right[3][2]),
-    normalized(row[0] * right[0][3] + row[1] * right[1][3] + row[2] * right[2][3] + row[3] * right[3][3]),
-  ]
-  return [multiplyRow(left[0]), multiplyRow(left[1]), multiplyRow(left[2]), multiplyRow(left[3])]
-}
-
-/** Compose the planar editor pose after the selected grounded orientation. */
-export function composeLayoutTransform(pose: LayoutPoseLike, sourceToPlaced: Matrix4x4Tuple): Matrix4x4Tuple {
-  assertFinite(pose.x_mm, "Pose X")
-  assertFinite(pose.y_mm, "Pose Y")
-  assertFinite(pose.rotation_deg, "Pose rotation")
-  assertMatrix(sourceToPlaced)
-  const angle = pose.rotation_deg * Math.PI / 180
-  const cosine = normalized(Math.cos(angle))
-  const sine = normalized(Math.sin(angle))
-  const templateFromPlaced: Matrix4x4Tuple = [
-    [cosine, -sine, 0, pose.x_mm],
-    [sine, cosine, 0, pose.y_mm],
-    [0, 0, 1, 0],
-    [0, 0, 0, 1],
-  ]
-  return multiplyMatrices(templateFromPlaced, sourceToPlaced)
 }
 
 function transformVertex(vertex: Vector3Tuple, matrix: Matrix4x4Tuple): WorldPoint {

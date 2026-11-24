@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import os
 import shutil
 import subprocess
@@ -508,15 +509,29 @@ def test_http_queued_export_status_download_and_job_identity(tmp_path, monkeypat
         time.sleep(0.05)
     assert job.status == "succeeded", job.tail
     assert job.resources == ["cpu", "disk_io"]
-    status = client.get(url, query_string={"run_root": str(run)})
+    moved = run.rename(run.with_name("retained pose results #?%"))
+    run.symlink_to(moved, target_is_directory=True)
+    assert runner.get(job_id).run_root == str(run)
+    status = client.get(url, query_string={"run_root": str(moved)})
     assert status.status_code == 200 and status.json["download_available"]
+    assert status.json["job_id"] == job_id and job.run_root == str(run)
     assert status.json["settings"]["fps"] == 30
     assert "sources" not in status.json
     download = client.get(status.json["download_url"])
     assert download.status_code == 200
     assert download.headers["Content-Disposition"].startswith("attachment;")
     assert zipfile.is_zipfile(io.BytesIO(download.data))
-    folder = exports.export_folder(run, export_id)
+    folder = exports.export_folder(moved, export_id)
+    with pytest.raises(ValueError, match="original run location"):
+        exports.run_export_request(folder / "request.json")
+    unrelated = runner.submit(
+        name="unrelated", command=[sys.executable, "-c", "pass"], scope_kind="global"
+    )
+    runner.wait(unrelated.id, timeout=5)
+    (folder / "job.json").write_text(json.dumps({"job_id": unrelated.id}))
+    assert client.get(url, query_string={"run_root": str(moved)}).status_code == 400
+    assert client.get(status.json["download_url"]).status_code == 400
+    (folder / "job.json").write_text(json.dumps({"job_id": job_id}))
     (folder / "progress.json").write_text('{"state": "rendering"}')
     assert client.get(status.json["download_url"]).status_code == 409
     assert (

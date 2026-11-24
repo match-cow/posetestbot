@@ -16,6 +16,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--intent", choices=sorted(CAPTURE_INTENTS), required=True)
     parser.add_argument("--allow-cameras", action="store_true", required=True)
     parser.add_argument("--allow-real-robot", action="store_true", required=True)
+    parser.add_argument(
+        "--approved-config-sha256", help="Configuration digest bound at queue time."
+    )
     parser.add_argument("--json", action="store_true")
     return parser.parse_args()
 
@@ -27,6 +30,7 @@ def main() -> None:
         intent=args.intent,
         allow_cameras=args.allow_cameras,
         allow_real_robot=args.allow_real_robot,
+        approved_config_sha256=args.approved_config_sha256,
     )
     print(f"Wrote {path}")
     if args.json:

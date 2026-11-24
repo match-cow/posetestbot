@@ -61,7 +61,9 @@ def _intrinsic_profiles_path(run_root: Path, cli_value: str | None) -> Path:
 
 def main() -> None:
     args = parse_args()
-    run_root = Path(args.run_root)
+    # Resolved, so a relative run root is not joined to itself when the
+    # selected snapshot path is verified against the run.
+    run_root = Path(args.run_root).resolve()
     profiles_path = _intrinsic_profiles_path(run_root, args.intrinsic_profiles)
     manifest = load_or_create_run_manifest(run_root)
     upsert_stage(manifest, name="camera_rectification", status="running")

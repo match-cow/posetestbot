@@ -11,6 +11,7 @@ import sys
 import time
 
 from dataclasses import replace
+from contextlib import contextmanager
 
 from pathlib import Path
 
@@ -38,6 +39,8 @@ from posetestbot.pipeline.capture_execution import (
 
 from posetestbot.pipeline.run_config import (
     create_run_config,
+    run_config_lock,
+    run_config_sha256,
     sensor_config_from_token,
     write_run_config,
 )
@@ -461,6 +464,41 @@ def test_capture_execution_rejects_stale_plan_after_camera_is_disabled(
     assert filesystem_snapshot(run_root) == before
 
 
+def test_capture_execution_rechecks_approval_after_taking_the_lock(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "run"
+    config = create_run_config(
+        run_root=root, capture_intent="calibration", bop_annotation_mode="none"
+    )
+    write_run_config(root, config)
+
+    @contextmanager
+    def lock_after_edit(path):
+        write_run_config(
+            root, replace(config, run_name="Changed while waiting for lock")
+        )
+        with run_config_lock(path):
+            yield
+
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution.run_config_lock", lock_after_edit
+    )
+
+    def forbidden_discovery():
+        pytest.fail("A stale approval reached sensor discovery")
+
+    with pytest.raises(ValueError, match="changed since capture approval"):
+        run_capture_execution(
+            root,
+            allow_cameras=True,
+            allow_real_robot=True,
+            approved_config_sha256=run_config_sha256(config.to_dict()),
+            collect_sensors=forbidden_discovery,
+        )
+    assert not (root / CAPTURE_EXECUTION_STATUS).exists()
+
+
 def test_capture_execution_full_mode_stops_sensor_process_after_receiver(
     tmp_path: Path,
     monkeypatch,
@@ -537,6 +575,18 @@ def test_capture_execution_full_mode_stops_sensor_process_after_receiver(
         fake_terminate,
     )
 
+    @contextmanager
+    def assert_starting_before_unlock(path):
+        with run_config_lock(path):
+            yield
+            starting = json.loads((path / CAPTURE_EXECUTION_STATUS).read_text())
+            assert starting["status"] == "starting"
+
+    monkeypatch.setattr(
+        "posetestbot.pipeline.capture_execution.run_config_lock",
+        assert_starting_before_unlock,
+    )
+
     report_path, report = run_capture_execution(
         run_root,
         allow_cameras=True,
@@ -545,6 +595,7 @@ def test_capture_execution_full_mode_stops_sensor_process_after_receiver(
         timeout_s=5,
         receive_start_timeout_s=11,
         receive_idle_timeout_s=7,
+        approved_config_sha256=run_config_sha256(config.to_dict()),
     )
 
     assert report_path == run_root / CAPTURE_EXECUTION_REPORT

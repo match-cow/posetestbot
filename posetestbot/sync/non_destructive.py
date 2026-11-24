@@ -188,7 +188,7 @@ def robot_timestamp_ns(
 
 def resolve_frame_timestamp(
     record: Mapping[str, Any], timestamp_source: str
-) -> tuple[int | None, str | None, bool]:
+) -> int | None:
     if timestamp_source == "host_received":
         value = record.get("host_received_timestamp_ns")
     elif timestamp_source == "host_wall":
@@ -198,16 +198,7 @@ def resolve_frame_timestamp(
     else:
         raise ValueError("timestamp_source must be host_received, host_wall, or sensor")
 
-    actual_source = timestamp_source if value is not None else None
-    return (
-        (int(value), actual_source, False) if value is not None else (None, None, False)
-    )
-
-
-def frame_timestamp_ns(record: Mapping[str, Any], timestamp_source: str) -> int | None:
-    """Return the explicitly selected current timestamp."""
-
-    return resolve_frame_timestamp(record, timestamp_source)[0]
+    return int(value) if value is not None else None
 
 
 def indexed_robot_poses(
@@ -324,6 +315,11 @@ def robot_pose_packet_loss(
             continue
         found = True
         total += value
+        after = source_packet.get("estimated_packets_lost_after_pose", 0)
+        if isinstance(after, bool) or not isinstance(after, int) or after < 0:
+            audited = False
+        else:
+            total += after
     return audited and found, total
 
 
@@ -354,7 +350,7 @@ def _relative_path(path: Path, root: Path) -> str:
 def resolve_sync_delta_ms(
     sensor_folder: str | Path, sync_delta: int | float | Mapping[str, Any] | None
 ) -> float:
-    value: object = 100.0
+    value: object = 0.0
     if sync_delta is not None:
         if isinstance(sync_delta, bool):
             raise ValueError(
@@ -363,9 +359,14 @@ def resolve_sync_delta_ms(
         if isinstance(sync_delta, int | float):
             value = sync_delta
         elif isinstance(sync_delta, Mapping):
-            value = sync_delta.get(Path(sensor_folder).name, value)
+            name = Path(sensor_folder).name
+            if name not in sync_delta:
+                raise ValueError(f"Synchronization delta mapping is missing sensor folder {name!r}")
+            value = sync_delta[name]
         else:
             raise ValueError("Synchronization delta must be a number or sensor mapping")
+    if isinstance(value, bool):
+        raise ValueError("Synchronization delta must be a finite number, not a boolean")
     try:
         result = float(value)
     except (TypeError, ValueError) as exc:
@@ -550,7 +551,7 @@ def synchronize_sensor_folder(
         sensor_sync_delta_ms = resolve_sync_delta_ms(sensor_path, sync_delta)
         sync_delta_ns = int(sensor_sync_delta_ms * 1_000_000)
 
-        resolved_records: list[tuple[int | None, str | None, bool, dict[str, Any]]] = []
+        resolved_records: list[tuple[int, dict[str, Any]]] = []
         for frame_record in frame_records:
             _resolve_source_frame_path(
                 sensor_path, frame_record.get("rgb_path"), RGB_DIR
@@ -569,26 +570,20 @@ def synchronize_sensor_folder(
                     f"{frame_record.get('color_timestamp_domain')!r}; required "
                     f"{required_frame_timestamp_domain!r}"
                 )
-            resolved = resolve_frame_timestamp(frame_record, timestamp_source)
-            if resolved[0] is None or resolved[1] != timestamp_source or resolved[2]:
+            timestamp_ns = resolve_frame_timestamp(frame_record, timestamp_source)
+            if timestamp_ns is None:
                 raise ValueError(
                     f"Frame {frame_record.get('frame_id')!r} in "
                     f"{sensor_path.name} cannot prove required "
                     f"{timestamp_source!r} timing without fallback"
                 )
-            resolved_records.append((*resolved, frame_record))
-        resolved_records.sort(
-            key=lambda item: (item[0] is None, item[0] if item[0] is not None else 0)
-        )
+            resolved_records.append((timestamp_ns, frame_record))
+        resolved_records.sort(key=lambda item: item[0])
 
         matched: dict[str, Any] = {}
         derived_metadata: list[dict[str, Any]] = []
         dropped: list[dict[str, Any]] = []
         nearest_deltas_ns: list[int] = []
-        timestamp_source_counts: dict[str, int] = {}
-        timestamp_fallback_count = 0
-        timestamp_missing_count = 0
-        incompatible_timestamp_pair_count = 0
         outside_motion_interval_frame_count = 0
         eligible_in_motion_frames = 0
         nearest_pose_delta_rejection_count = 0
@@ -600,32 +595,7 @@ def synchronize_sensor_folder(
             else []
         )
 
-        for timestamp_ns, actual_source, fallback, frame_record in resolved_records:
-            if timestamp_ns is None or actual_source is None:
-                raise ValueError(
-                    f"Frame {frame_record.get('frame_id')!r} is missing "
-                    f"{timestamp_source} timestamp evidence"
-                )
-            timestamp_source_counts[actual_source] = (
-                timestamp_source_counts.get(actual_source, 0) + 1
-            )
-            if fallback:
-                timestamp_fallback_count += 1
-            if (actual_source, resolved_robot_timestamp_source) not in (
-                SUPPORTED_TIMESTAMP_PAIRS
-            ):
-                incompatible_timestamp_pair_count += 1
-                dropped.append(
-                    {
-                        "frame_id": frame_record.get("frame_id"),
-                        "timestamp_ns": timestamp_ns,
-                        "timestamp_source": actual_source,
-                        "robot_timestamp_source": (resolved_robot_timestamp_source),
-                        "reason": "frame/robot timestamp fallback clocks are incompatible",
-                    }
-                )
-                continue
-
+        for timestamp_ns, frame_record in resolved_records:
             delayed_timestamp_ns = timestamp_ns - sync_delta_ns
             motion = motion_for_timestamp(delayed_timestamp_ns, intervals)
             if motion is None:
@@ -634,7 +604,7 @@ def synchronize_sensor_folder(
                     {
                         "frame_id": frame_record.get("frame_id"),
                         "timestamp_ns": timestamp_ns,
-                        "timestamp_source": actual_source,
+                        "timestamp_source": timestamp_source,
                         "robot_timestamp_source": (resolved_robot_timestamp_source),
                         "delayed_timestamp_ns": delayed_timestamp_ns,
                         "reason": "outside robot motion intervals",
@@ -654,7 +624,7 @@ def synchronize_sensor_folder(
                     {
                         "frame_id": frame_record.get("frame_id"),
                         "timestamp_ns": timestamp_ns,
-                        "timestamp_source": actual_source,
+                        "timestamp_source": timestamp_source,
                         "robot_timestamp_source": (resolved_robot_timestamp_source),
                         "delayed_timestamp_ns": delayed_timestamp_ns,
                         "motion": motion,
@@ -695,8 +665,8 @@ def synchronize_sensor_folder(
                 "motion": motion,
                 "image_frame": timestamp_ns // 1_000_000,
                 "image_timestamp_ns": timestamp_ns,
-                "timestamp_source": actual_source,
-                "timestamp_fallback": fallback,
+                "timestamp_source": timestamp_source,
+                "timestamp_fallback": False,
                 "robot_timestamp_source": resolved_robot_timestamp_source,
                 "sensor_timestamp_ns": frame_record.get("sensor_timestamp_ns"),
                 "host_received_timestamp_ns": frame_record.get(
@@ -734,9 +704,9 @@ def synchronize_sensor_folder(
                     "source_rgb_path": frame_record.get("rgb_path"),
                     "source_depth_path": frame_record.get("depth_path"),
                     "sync_requested_timestamp_source": timestamp_source,
-                    "sync_timestamp_source": actual_source,
+                    "sync_timestamp_source": timestamp_source,
                     "sync_robot_timestamp_source": (resolved_robot_timestamp_source),
-                    "sync_timestamp_fallback": fallback,
+                    "sync_timestamp_fallback": False,
                     "sync_timestamp_ns": timestamp_ns,
                     "sync_delta_ms": sensor_sync_delta_ms,
                     "matched_robot_pose_index": closest_pose["pose_index"],
@@ -765,25 +735,19 @@ def synchronize_sensor_folder(
             "output_folder": _relative_path(output_folder, run_path),
             "requested_timestamp_source": timestamp_source,
             "requested_frame_timestamp_source": timestamp_source,
-            "timestamp_source": (
-                timestamp_source if timestamp_fallback_count == 0 else "mixed"
-            ),
-            "frame_timestamp_source": (
-                timestamp_source if timestamp_fallback_count == 0 else "mixed"
-            ),
+            "timestamp_source": timestamp_source,
+            "frame_timestamp_source": timestamp_source,
             "robot_timestamp_source": resolved_robot_timestamp_source,
             "timestamp_pair": {
-                "frame_timestamp_source": (
-                    timestamp_source if timestamp_fallback_count == 0 else "mixed"
-                ),
+                "frame_timestamp_source": timestamp_source,
                 "requested_frame_timestamp_source": timestamp_source,
                 "robot_timestamp_source": resolved_robot_timestamp_source,
             },
             "timestamp_pair_provenance_audited": True,
-            "timestamp_source_counts": timestamp_source_counts,
-            "timestamp_fallback_count": timestamp_fallback_count,
-            "timestamp_missing_count": timestamp_missing_count,
-            "incompatible_timestamp_pair_count": (incompatible_timestamp_pair_count),
+            "timestamp_source_counts": {timestamp_source: len(resolved_records)},
+            "timestamp_fallback_count": 0,
+            "timestamp_missing_count": 0,
+            "incompatible_timestamp_pair_count": 0,
             "sync_delta_ms": sensor_sync_delta_ms,
             "max_nearest_pose_delta_ms": nearest_pose_threshold_ms,
             "required_frame_timestamp_domain": required_frame_timestamp_domain,

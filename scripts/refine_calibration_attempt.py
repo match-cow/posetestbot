@@ -13,6 +13,7 @@ from posetestbot.calibration.attempts import (
 from posetestbot.calibration.reprojection_refinement import (
     create_reprojection_refinement,
 )
+from posetestbot.jobs.cancellation import raise_on_first_cancel_signal
 
 
 def main() -> None:
@@ -32,6 +33,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.replace_refinement and (not args.promote or not args.refinement_id):
         parser.error("--replace-refinement requires --refinement-id and --promote")
+    raise_on_first_cancel_signal(KeyboardInterrupt("Calibration refinement canceled"))
     refinement_id = args.refinement_id
     if refinement_id is None:
         result = create_reprojection_refinement(args.run_root, args.attempt_id)
@@ -48,7 +50,7 @@ def main() -> None:
             flush=True,
         )
     if args.promote:
-        create_promotion_request(
+        request = create_promotion_request(
             args.run_root,
             args.attempt_id,
             operator=args.operator,
@@ -57,7 +59,7 @@ def main() -> None:
         )
         print(
             json.dumps(
-                promote_calibration_attempt(args.run_root, args.attempt_id), indent=2
+                promote_calibration_attempt(args.run_root, args.attempt_id, requested_at=request["created_at"]), indent=2
             )
         )
     elif args.refinement_id is not None:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
+from types import SimpleNamespace
 from datetime import timedelta
 from pathlib import Path
 
@@ -131,7 +133,7 @@ def test_write_oak_d_pro_rgbd_frame_uses_capture_wall_timestamp(
     assert metadata["device_timestamp_ns"] == 9_000_000_000
     assert metadata["depth_device_timestamp_ns"] == 9_001_000_000
     assert metadata["capture_wall_timestamp_ns"] == capture_wall_ns
-    assert metadata["host_wall_timestamp_ns"] == capture_wall_ns
+    assert metadata["host_wall_timestamp_ns"] == host_wall_received_ns
     assert metadata["host_wall_received_timestamp_ns"] == host_wall_received_ns
     assert metadata["host_received_timestamp_ns"] == 123
     assert metadata["rgb_sequence_num"] == 7
@@ -181,6 +183,45 @@ def test_capture_wraps_depthai_device_open_failures(tmp_path: Path) -> None:
         raise AssertionError("device-open failure was not wrapped")
 
 
+def test_capture_stop_finishes_current_pair_and_records_undistorted_projection(tmp_path, monkeypatch):
+    from posetestbot.sensors import oak_d_pro
+
+    packet = FakeDepthAIFrame(
+        timestamp_ns=4_900_000_000, device_timestamp_ns=9_000_000_000, sequence_num=1,
+        rgb_image=np.zeros((3, 4, 3), dtype=np.uint8), depth_image=np.ones((3, 4), dtype=np.uint16),
+    )
+    events = []
+    device = SimpleNamespace(
+        getMxId=lambda: "oak-stop-test", close=lambda: events.append("closed"),
+        readCalibration=lambda: SimpleNamespace(getCameraIntrinsics=lambda *_: [[600, 0, 640], [0, 600, 360], [0, 0, 1]]),
+    )
+    pipeline = SimpleNamespace(
+        start=lambda: events.append("started"), stop=lambda: events.append("stopped"),
+        wait=lambda: events.append("drained"), isRunning=lambda: True,
+    )
+
+    def receive():
+        events.append("received")
+        return {"rgb": packet, "depth": packet}
+
+    dai = SimpleNamespace(
+        __version__="3.7.1", Pipeline=lambda _: nullcontext(pipeline),
+        CameraBoardSocket=SimpleNamespace(CAM_A=0), Clock=SimpleNamespace(now=lambda: timedelta(seconds=5)),
+    )
+    monkeypatch.setattr(oak_d_pro, "_open_device", lambda *_: device)
+    monkeypatch.setattr(oak_d_pro, "_build_pipeline_outputs", lambda *_, **__: SimpleNamespace(tryGet=receive))
+
+    result = capture_oak_d_pro_rgbd(tmp_path, dai_module=dai, stop_requested=lambda: "received" in events)
+
+    assert result["frame_count"] == 1
+    assert events == ["started", "received", "stopped", "drained", "closed"]
+    assert not list((tmp_path / RGB_DIR).glob(".*.png"))
+    projection = json.loads((tmp_path / "camera_data.json").read_text())
+    assert projection["projection_source"] == "depthai_device_undistorted"
+    assert projection["distortion_model"] == "none"
+    assert projection["distortion"] == [0.0] * 5
+
+
 def test_oak_preview_uses_nonblocking_latest_frame_queue_and_closes() -> None:
     frames = [np.zeros((2, 3, 3), dtype=np.uint8), np.ones((2, 3, 3), dtype=np.uint8)]
 
@@ -224,7 +265,8 @@ def test_oak_preview_uses_nonblocking_latest_frame_queue_and_closes() -> None:
         def build(self, *_args, **_kwargs):
             pass
 
-        def requestOutput(self, *_args):
+        def requestOutput(self, *_args, enableUndistortion):
+            assert enableUndistortion is True
             return Output(self.queue)
 
     class Device:

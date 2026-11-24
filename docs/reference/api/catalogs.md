@@ -17,11 +17,11 @@ templates and placements so later library changes cannot modify old runs.
 | `POST /workpieces/catalog/<catalog_uuid>/unit-corrections` | Create a new canonical geometry revision after archive, confirmation, provenance, and expected hash/revision checks |
 | `GET /workpieces/catalog/<catalog_uuid>/assets/<kind>` | Download an allow-listed managed asset |
 | `GET /workpieces/catalog/export` | Download metadata-only `object_catalog.v1` JSON |
-| `POST /workpieces/catalog/import` | Import metadata; records missing managed binary assets as skipped |
-| `DELETE /workpieces/catalog/<catalog_uuid>` | Confirmed retirement/tombstone and queued asset cleanup after template-reference checks |
+| `POST /workpieces/catalog/import` | Merge supplied metadata fields and report entries with missing managed binary assets |
+| `DELETE /workpieces/catalog/<catalog_uuid>` | Queue confirmed reference validation, retirement and asset cleanup. HTTP `202` returns the local job ID |
 
 Catalogue mutations are serialized across threads/processes and atomically
-publish numbered manifest revisions. UUID and BOP `obj_id` values are never
+publish write-once numbered manifest revisions. UUID and BOP `obj_id` values are never
 reused. JSON export does not embed CAD, canonical PLY, or textures.
 
 See [Workpiece Catalogue](../../WORKPIECE_CATALOGUE.md) for upload fields,
@@ -46,7 +46,7 @@ catalogue assets.
 | `POST /pose-templates/preview` | Queue exact slicing/preview validation |
 | `GET /pose-templates/preview/<request_id>` | Poll preview result |
 | `POST /pose-templates/generate` | Publish an immutable validated bundle |
-| `GET /pose-templates/library` | List active/archived global bundles |
+| `GET /pose-templates/library` | List active/archived global bundles and `invalid_templates` with diagnostic messages and deletable UUIDs |
 | `GET /pose-templates/library/<template_uuid>` | Return one bundle and lifecycle state |
 | `POST /pose-templates/library/<template_uuid>/<action>` | Apply an allow-listed archive/restore action |
 | `DELETE /pose-templates/library/<template_uuid>` | Tombstone a confirmed bundle and queue asset cleanup |
@@ -56,7 +56,9 @@ catalogue assets.
 | `GET /pose-templates/library/<template_uuid>/assets/<instance_uuid>/<kind>` | Return an allow-listed per-instance asset |
 
 Deleted template UUIDs are never reused. Existing run snapshots remain
-independent of library retirement.
+independent of library retirement. Confirmed deletion can retire an invalid
+bundle by its canonical directory UUID. Catalogue deletion requires references
+to be verifiable across all remaining published bundles.
 
 ## Run-owned selection
 
@@ -66,5 +68,7 @@ independent of library retirement.
 | `POST /pose-templates/runs/selection` | Atomically replace run selection and `object_instances.json` |
 
 Replacement uses a durable hidden transaction journal so recovery cannot
-expose a half-updated run. See
+expose a half-updated run. Committed cleanup can be retried while the new
+selection remains readable. Cell preview requests verify each requested
+asset against the selected hash. See
 [Pose templates and object GT](../../POSETEMPLATECREATOR_OBJECT_GT.md).

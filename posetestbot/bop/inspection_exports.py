@@ -19,6 +19,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from posetestbot.jobs.cancellation import write_terminal_progress
 from posetestbot.bop.evaluation import _has_symlink_component, _sha256_file
 from posetestbot.bop.inspection import (
     DEFAULT_HYPOTHESES,
@@ -32,6 +33,7 @@ from posetestbot.bop.inspection import (
     _load_json,
     _required_plain_file,
     _safe_relative,
+    _valid_recorded_run_root,
     colorize_depth,
     inspection_frame_from_index,
     matching_inspection_frames,
@@ -253,7 +255,7 @@ def read_export_request(root, export_id):
         request.get("schema_version") != SCHEMA
         or request.get("renderer") != RENDERER
         or request.get("export_id") != export_id
-        or request.get("run_root") != Path(root).resolve().as_posix()
+        or not _valid_recorded_run_root(request.get("run_root"))
     ):
         raise ValueError("Export request identity is invalid")
     if normalize_settings(request["settings"]) != request["settings"]:
@@ -271,25 +273,33 @@ def read_export_artifact(root, export_id, name):
     )
 
 
-def export_download_path(root, export_id):
-    request = read_export_request(root, export_id)
+def read_export_output(root, export_id, request):
     folder = export_folder(root, export_id)
     record = read_export_artifact(root, export_id, "output.json")
     path = folder / f"{export_id}.{request['settings']['format']}"
     _required_plain_file(path, root=Path(root).resolve(), label="Completed export")
+    manifest_path = _required_plain_file(
+        folder / "manifest.json", root=folder, label="Export manifest"
+    )
+    contents = manifest_path.read_bytes()
+    manifest = json.loads(contents)
     if (
-        record.get("request_sha256") != _sha256_file(folder / "request.json")
-        or record.get("manifest_sha256")
-        != _sha256_file(
-            _required_plain_file(
-                folder / "manifest.json",
-                root=Path(root).resolve(),
-                label="Export manifest",
-            )
-        )
+        manifest.get("export_id") != export_id
+        or manifest.get("schema_version") != SCHEMA
+        or manifest.get("renderer") != RENDERER
+        or record.get("filename") != path.name
+        or record.get("request_sha256") != _sha256_file(folder / "request.json")
+        or record.get("manifest_sha256") != hashlib.sha256(contents).hexdigest()
         or record.get("size_bytes") != path.stat().st_size
-        or record.get("sha256") != _sha256_file(path)
     ):
+        raise ValueError("Completed export failed its integrity check")
+    return path, record
+
+
+def export_download_path(root, export_id):
+    request = read_export_request(root, export_id)
+    path, record = read_export_output(root, export_id, request)
+    if record.get("sha256") != _sha256_file(path):
         raise ValueError("Completed export failed its integrity check")
     return path
 
@@ -330,6 +340,8 @@ def run_export_request(request_path: str | Path) -> dict:
     if request_path != folder / "request.json":
         raise ValueError("Export request must be in the run visualization folder")
     request = read_export_request(root, export_id)
+    if request["run_root"] != root.as_posix():
+        raise ValueError("Export worker requires the original run location")
     request_sha256 = _sha256_file(request_path)
     settings = request["settings"]
     output = folder / f"{export_id}.{settings['format']}"
@@ -535,10 +547,11 @@ def run_export_request(request_path: str | Path) -> dict:
         progress("completed")
         return record
     except BaseException as exc:
-        progress(
-            "canceled" if isinstance(exc, ExportCanceled) else "failed",
-            error=str(exc) or "Export interrupted",
-        )
+        # A failure after the rename would otherwise leave a finished-looking
+        # file beside a canceled or failed state.
+        output.unlink(missing_ok=True)
+        (folder / "output.json").unlink(missing_ok=True)
+        write_terminal_progress(progress, exc, ExportCanceled)
         raise
     finally:
         if encoder and encoder.poll() is None:

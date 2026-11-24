@@ -487,8 +487,17 @@ def _validate_sender(
 @contextmanager
 def _cancellation_signal_handlers(enabled: bool) -> Iterator[None]:
     previous_handlers: dict[int, Any] = {}
+    canceled = False
 
     def cancel(signum: int, _frame: Any) -> None:
+        # The capture supervisor signals the whole process group and ``uv run``
+        # forwards the same signal, so one cancellation arrives twice. A second
+        # raise, or the default action once handlers are restored, would land
+        # while the partial pose evidence is being written and lose it.
+        nonlocal canceled
+        canceled = True
+        for handled in previous_handlers:
+            signal.signal(handled, signal.SIG_IGN)
         try:
             name = signal.Signals(signum).name
         except ValueError:
@@ -505,8 +514,9 @@ def _cancellation_signal_handlers(enabled: bool) -> Iterator[None]:
     try:
         yield
     finally:
-        for receiver_signal, handler in previous_handlers.items():
-            signal.signal(receiver_signal, handler)
+        if not canceled:
+            for receiver_signal, handler in previous_handlers.items():
+                signal.signal(receiver_signal, handler)
 
 
 def run_pose_receiver(
@@ -679,7 +689,7 @@ def run_pose_receiver(
                         )
                     if previous_sender_sequence is None:
                         source_packet["sequence_delta"] = 0
-                        source_packet["estimated_packets_lost"] = 0
+                        source_packet["estimated_packets_lost"] = sender_sequence
                     else:
                         sequence_delta = sender_sequence - previous_sender_sequence
                         source_packet["sequence_delta"] = sequence_delta
@@ -693,6 +703,9 @@ def run_pose_receiver(
                                 "Robot pose stream ended before any pose packet was "
                                 "captured."
                             )
+                        last_packet = poses[len(poses) - 1]["source_packet"]
+                        last_packet["stream_end_sequence"] = sender_sequence
+                        last_packet["estimated_packets_lost_after_pose"] = source_packet["estimated_packets_lost"]
                         break
 
                     if not poses:
@@ -718,24 +731,27 @@ def run_pose_receiver(
                         )
                     print(f"Received poses: {len(poses)}", end="\r", flush=True)
 
-        _promote_raw_pose_claim(claim, poses)
-        set_manifest_artifact(
-            manifest,
-            RAW_ROBOT_EE_POSES,
-            raw_pose_path,
-            run_root=run_root,
-        )
-        artifacts = _stage_artifact_paths(manifest, run_root)
-        artifacts[RAW_ROBOT_EE_POSES] = raw_pose_path
-        upsert_stage(
-            manifest,
-            name="robot_pose_capture",
-            status="succeeded",
-            artifacts=artifacts,
-            run_root=run_root,
-            message=f"Captured {len(poses)} robot poses.",
-        )
-        write_run_manifest(manifest, run_root)
+            # Still inside the cancellation handlers: a stop arriving here
+            # must take the partial-evidence path, not kill the process with
+            # every received pose still in memory.
+            _promote_raw_pose_claim(claim, poses)
+            set_manifest_artifact(
+                manifest,
+                RAW_ROBOT_EE_POSES,
+                raw_pose_path,
+                run_root=run_root,
+            )
+            artifacts = _stage_artifact_paths(manifest, run_root)
+            artifacts[RAW_ROBOT_EE_POSES] = raw_pose_path
+            upsert_stage(
+                manifest,
+                name="robot_pose_capture",
+                status="succeeded",
+                artifacts=artifacts,
+                run_root=run_root,
+                message=f"Captured {len(poses)} robot poses.",
+            )
+            write_run_manifest(manifest, run_root)
     except (PoseReceiverCanceled, KeyboardInterrupt, InterruptedError) as exc:
         canceled = (
             exc

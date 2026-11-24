@@ -5,6 +5,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import posetestbot.bop.evaluation as evaluation_module
@@ -43,8 +44,24 @@ class FakeRunner:
         self.submissions: list[dict[str, Any]] = []
 
     def submit(self, **kwargs: Any) -> FakeJob:
+        job = FakeJob(f"bopeval{len(self.submissions) + 1}", kwargs)
+        if before_start := kwargs.get("before_start"):
+            before_start(job.id)
         self.submissions.append(kwargs)
-        return FakeJob(f"bopeval{len(self.submissions)}", kwargs)
+        return job
+
+    def get(self, job_id: str):
+        for index, submission in enumerate(self.submissions, 1):
+            if job_id == f"bopeval{index}":
+                return SimpleNamespace(
+                    **{
+                        key: submission[key]
+                        for key in ("name", "command", "scope_kind", "parameters")
+                    },
+                    run_root=str(submission["run_root"]),
+                    status="queued",
+                )
+        raise KeyError(job_id)
 
 
 def _client_for_run(tmp_path: Path, monkeypatch):
@@ -121,8 +138,8 @@ def test_setup_and_result_import_expose_compatible_method_choices(
         "/bop/evaluation/results",
         data={
             "run_root": run_root.as_posix(),
-            "method_name": "FoundationPose",
-            "result": (
+            "display_name": "FoundationPose",
+            "file": (
                 io.BytesIO(source.read_bytes()),
                 source.name,
             ),
@@ -153,7 +170,7 @@ def test_real_result_evaluation_is_queued_with_only_cpu_and_disk_resources(
 
     response = client.post(
         "/bop/evaluations",
-        json={"run_root": run_root.as_posix(), "result_id": result["result_id"]},
+        json={"run_root": run_root.as_posix(), "source": {"kind": "registered_result", "result_id": result["result_id"]}},
     )
 
     assert response.status_code == 202
@@ -175,11 +192,12 @@ def test_simulated_result_generation_and_evaluation_are_queued_together(
         "translation_sigma_mm": 1.0,
         "rotation_sigma_deg": 0.25,
         "seed": 42,
+        "score": 1.0,
     }
 
     response = client.post(
         "/bop/evaluations",
-        json={"run_root": run_root.as_posix(), "simulation": simulation},
+        json={"run_root": run_root.as_posix(), "source": {"kind": "gt_simulation", **simulation}},
     )
 
     assert response.status_code == 202

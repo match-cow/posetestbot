@@ -126,7 +126,7 @@ def combined_scene_gt_bytes(run_root: Path) -> bytes:
     ):
         raise ValueError("The BOP export manifest is unsupported")
     if (
-        manifest.get("annotation_state") != "complete"
+        manifest.get("annotation_state") not in {"poses", "complete"}
         or manifest.get("annotation_source") != "blenderproc"
     ):
         raise ValueError("The BOP export has no completed pose ground truth")

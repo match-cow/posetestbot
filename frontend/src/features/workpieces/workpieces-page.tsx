@@ -388,7 +388,7 @@ export function WorkpiecesPage() {
   const [importOpen, setImportOpen] = useState(false)
   const [importFile, setImportFile] = useState<File | null>(null)
   const [unitCorrectionOpen, setUnitCorrectionOpen] = useState(false)
-  const [unitConversion, setUnitConversion] = useState<UnitConversion>("meter_to_millimeter")
+  const [unitConversion, setUnitConversion] = useState<UnitConversion | "">("")
   const [unitCorrectionOperator, setUnitCorrectionOperator] = useState("")
   const [unitCorrectionConfirmed, setUnitCorrectionConfirmed] = useState(false)
   const [confirmation, setConfirmation] = useState<{ action: CatalogueAction; item: Workpiece } | null>(null)
@@ -510,18 +510,29 @@ export function WorkpiecesPage() {
     onError: (error) => toast.error("Metadata was not saved", { description: errorMessage(error) }),
   })
 
-  const catalogueAction = useMutation<Workpiece | { status: string; asset_cleanup?: { status: string; last_error?: string | null } }, Error, { action: CatalogueAction; item: Workpiece }>({
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null)
+  const deletionJob = useQuery({ queryKey: ["job", pendingDelete?.id], queryFn: () => api<{ job: Job }>(`/jobs/${pendingDelete?.id}`), enabled: Boolean(pendingDelete), refetchInterval: (value) => terminalJobStates.has(value.state.data?.job.status ?? "") ? false : 1000 })
+  useEffect(() => {
+    const job = deletionJob.data?.job
+    if (!pendingDelete || !job || !terminalJobStates.has(job.status)) return
+    if (job.status === "succeeded") toast.success("Workpiece deleted", { description: pendingDelete.name })
+    else toast.error("Workpiece deletion did not complete", { description: jobFailureDetail(job) })
+    void client.invalidateQueries({ queryKey: ["workpiece-catalog"] })
+    queueMicrotask(() => setPendingDelete(null))
+  }, [client, deletionJob.data?.job, pendingDelete])
+
+  const catalogueAction = useMutation<Workpiece | { job_id: string }, Error, { action: CatalogueAction; item: Workpiece }>({
     mutationFn: ({ action, item }: { action: CatalogueAction; item: Workpiece }) => action === "delete"
-      ? api<{ status: string }>(`/workpieces/catalog/${item.catalog_uuid}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) })
+      ? api<{ job_id: string }>(`/workpieces/catalog/${item.catalog_uuid}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) })
       : api<Workpiece>(`/workpieces/catalog/${item.catalog_uuid}/${action}`, { method: "POST" }),
     onSuccess: (result, variables) => {
-      const verb = variables.action === "delete" ? "deleted" : variables.action === "archive" ? "archived" : "restored"
-      if (variables.action === "delete" && "status" in result && result.status === "deleted_cleanup_pending") {
-        toast.warning("Catalogue identity retired; file cleanup is pending", { description: result.asset_cleanup?.last_error ?? variables.item.name })
+      if ("job_id" in result) {
+        setPendingDelete({ id: result.job_id, name: variables.item.name })
+        toast.success("Workpiece deletion queued", { description: "The reference check and cleanup continue after navigation. Open Jobs for details." })
+        void client.invalidateQueries({ queryKey: ["jobs"] })
       } else {
-        toast.success(`Workpiece ${verb}`, { description: variables.item.name })
+        toast.success(variables.action === "archive" ? "Workpiece archived" : "Workpiece restored", { description: variables.item.name })
       }
-      if (variables.action === "delete" && selectedId === variables.item.catalog_uuid) setSelectedId(null)
       setConfirmation(null)
       void client.invalidateQueries({ queryKey: ["workpiece-catalog"] })
       void client.invalidateQueries({ queryKey: ["workpiece-status"] })
@@ -740,6 +751,7 @@ export function WorkpiecesPage() {
     </Card>
 
     {pendingUpload && <BackgroundJobProgress testId="workpiece-upload-progress" title={`Inspecting ${pendingUpload.filename}`} description="Canonical conversion and mesh inspection run in the background. This catalogue refreshes automatically." jobId={pendingUpload.id} status={uploadJob.data?.job.status ?? "queued"} />}
+    {pendingDelete && <BackgroundJobProgress testId="workpiece-delete-progress" title={`Deleting ${pendingDelete.name}`} description="The worker checks template references before retiring the workpiece." jobId={pendingDelete.id} status={deletionJob.data?.job.status ?? "queued"} />}
 
     {pendingCorrection && <BackgroundJobProgress testId="workpiece-unit-correction-progress" title={`Correcting units for ${pendingCorrection.name}`} description="A new canonical geometry revision is being derived. The retained upload and published template snapshots stay unchanged." jobId={pendingCorrection.id} status={correctionJob.data?.job.status ?? "queued"} />}
 
@@ -784,7 +796,7 @@ export function WorkpiecesPage() {
                       disabled={selected.state !== "archived" || !unitCorrectionAvailable || Boolean(pendingCorrection)}
                       aria-describedby={unitCorrectionDisabledReason ? "unit-correction-disabled-reason" : undefined}
                       title={!unitCorrectionAvailable ? "PoseTemplateCreator is required for unit correction" : selected.state === "active" ? "Archive this workpiece before correcting its model units" : "Create a corrected canonical geometry revision"}
-                      onClick={() => { setUnitConversion("meter_to_millimeter"); setUnitCorrectionOperator(""); setUnitCorrectionConfirmed(false); setUnitCorrectionOpen(true) }}
+                      onClick={() => { setUnitConversion(""); setUnitCorrectionOperator(""); setUnitCorrectionConfirmed(false); setUnitCorrectionOpen(true) }}
                     ><Scaling />Correct model units</Button>
                     <Button variant="outline" onClick={() => confirmCatalogueAction(selected.state === "active" ? "archive" : "restore", selected)}>{selected.state === "active" ? <Archive /> : <RotateCcw />}{selected.state === "active" ? "Archive" : "Restore"}</Button>
                     <Button variant="ghost" className="text-destructive hover:text-destructive" aria-label={`Delete ${selected.name}`} title="Permanently delete this workpiece" onClick={() => confirmCatalogueAction("delete", selected)}><Trash2 />Delete</Button>
@@ -863,12 +875,12 @@ export function WorkpiecesPage() {
           </div>
           <div className="grid grid-cols-2 overflow-hidden rounded-lg border text-xs">
             <div className="border-r p-4"><div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Current dimensions</div><div className="mt-2 font-mono">{formatScaledBounds(selected.extraction.bounds_mm, 1)}</div></div>
-            <div className="p-4"><div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">After correction</div><div className="mt-2 font-mono text-primary-strong">{formatScaledBounds(selected.extraction.bounds_mm, unitConversion === "meter_to_millimeter" ? 1000 : 0.001)}</div></div>
+            <div className="p-4"><div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">After correction</div><div className="mt-2 font-mono text-primary-strong">{unitConversion ? formatScaledBounds(selected.extraction.bounds_mm, unitConversion === "meter_to_millimeter" ? 1000 : 0.001) : "Choose a correction"}</div></div>
           </div>
           <Field label="Operator" htmlFor="unit-correction-operator" hint="Recorded with the geometry revision for auditability."><Input id="unit-correction-operator" aria-label="Unit correction operator" value={unitCorrectionOperator} onChange={(event) => { setUnitCorrectionOperator(event.target.value); setUnitCorrectionConfirmed(false) }} placeholder="Name or operator ID" /></Field>
           <Label className="flex items-start gap-3 rounded-lg border border-warning/35 bg-warning/5 p-4"><Checkbox aria-label="Confirm unit correction" checked={unitCorrectionConfirmed} onCheckedChange={(value) => setUnitCorrectionConfirmed(value === true)} /><span><span className="block font-semibold">I checked the before and after dimensions</span><span className="mt-1 block text-xs font-normal text-muted-foreground">The catalogue UUID and BOP object ID stay stable, while the canonical mesh hash and geometry revision change.</span></span></Label>
         </div>}
-        <DialogFooter><Button variant="outline" onClick={() => setUnitCorrectionOpen(false)} disabled={correctUnits.isPending}>Cancel</Button><Button onClick={() => selected && correctUnits.mutate({ item: selected, conversion: unitConversion, operator: unitCorrectionOperator })} disabled={!unitCorrectionAvailable || !selected || selected.state !== "archived" || !unitCorrectionOperator.trim() || !unitCorrectionConfirmed || correctUnits.isPending}>{correctUnits.isPending ? <LoaderCircle className="animate-spin" /> : <Scaling />}Queue unit correction</Button></DialogFooter>
+        {!unitConversion && <p className="text-xs text-destructive">Choose the source unit correction to continue.</p>}<DialogFooter><Button variant="outline" onClick={() => setUnitCorrectionOpen(false)} disabled={correctUnits.isPending}>Cancel</Button><Button onClick={() => selected && unitConversion && correctUnits.mutate({ item: selected, conversion: unitConversion, operator: unitCorrectionOperator })} disabled={!unitCorrectionAvailable || !selected || selected.state !== "archived" || !unitConversion || !unitCorrectionOperator.trim() || !unitCorrectionConfirmed || correctUnits.isPending}>{correctUnits.isPending ? <LoaderCircle className="animate-spin" /> : <Scaling />}Queue unit correction</Button></DialogFooter>
       </DialogContent>
     </Dialog>
 

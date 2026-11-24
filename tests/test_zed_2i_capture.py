@@ -149,6 +149,45 @@ def test_zed_capture_uses_resolved_serial_and_shared_frame_contract(tmp_path) ->
     assert all(record["sensor_id"] == "987654" for record in records)
 
 
+def test_zed_capture_stops_between_frames_and_rounds_depth(tmp_path) -> None:
+    stop = iter([False, False, True])
+
+    summary = capture_zed_2i_rgbd(
+        tmp_path,
+        sl_module=FakeSL(FakeZEDCamera()),
+        cv2_module=cv2,
+        stop_requested=lambda: next(stop),
+    )
+
+    assert summary["frame_count"] == 2
+    depth_files = sorted((tmp_path / DEPTH_DIR).glob("*.png"))
+    assert len(depth_files) == len(list((tmp_path / RGB_DIR).glob("*.png"))) == 2
+    assert len((tmp_path / FRAME_METADATA_JSONL).read_text().splitlines()) == 2
+    # The fake reports 101.5 mm for the first frame: nearest, not truncated.
+    first = cv2.imread(depth_files[0].as_posix(), cv2.IMREAD_UNCHANGED)
+    assert first[1, 1] == 102
+
+
+def test_zed_capture_fails_when_the_camera_stops_delivering(tmp_path) -> None:
+    class StalledCamera(FakeZEDCamera):
+        def grab(self, _runtime_parameters):
+            self.grab_index += 1
+            return "SUCCESS" if self.grab_index == 1 else "CAMERA_NOT_DETECTED"
+
+    camera = StalledCamera()
+
+    with pytest.raises(ZED2iCaptureError, match="delivered no frame"):
+        capture_zed_2i_rgbd(
+            tmp_path,
+            sl_module=FakeSL(camera),
+            cv2_module=cv2,
+            stall_timeout_s=0.05,
+        )
+
+    assert camera.closed is True
+    assert len(list((tmp_path / RGB_DIR).glob("*.png"))) == 1
+
+
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [

@@ -26,11 +26,15 @@ from posetestbot.bop.inspection_exports import (
     export_folder,
     mp4_status,
     read_export_artifact,
+    read_export_output,
     read_export_request,
 )
-from posetestbot.io.atomic import atomic_write_json
 from posetestbot.jobs.runner import ResourceBusyError
-from posetestbot.web.paths import APP_ROOT
+from posetestbot.web.inspect_jobs import (
+    bound_inspect_job,
+    read_inspect_job_id,
+    submit_inspect_job,
+)
 from posetestbot.web.runtime import job_runner
 from posetestbot.web.routes.ui import discover_web_runs
 from posetestbot.web.security import resolve_web_run_root
@@ -321,55 +325,35 @@ def queue_bop_inspection_export():
         export = create_export_request(run_root, value)
         export_id = export["export_id"]
         folder = export_folder(run_root, export_id)
-        try:
-            job = job_runner.submit(
-                name="bop_inspection_export",
-                command=[
-                    "uv",
-                    "run",
-                    "python",
-                    "scripts/run_bop_inspection_export.py",
-                    "--request",
-                    (folder / "request.json").as_posix(),
-                ],
-                cwd=APP_ROOT,
-                resources=["cpu", "disk_io"],
-                scope_kind="run",
-                run_root=run_root,
-                parameters={
-                    "export_id": export_id,
-                    "result_id": export["settings"]["result_id"],
-                    "scene_id": export["settings"]["scene_id"],
-                    "format": export["settings"]["format"],
-                },
-            )
-        except Exception as exc:
-            atomic_write_json(
-                folder / "progress.json",
-                {
-                    "state": "failed",
-                    "error": str(exc),
-                    "completed_frames": 0,
-                    "total_frames": len(export["frame_ids"]),
-                },
-            )
-            raise
-        atomic_write_json(folder / "job.json", {"job_id": job.id})
+        job = submit_inspect_job(
+            job_runner,
+            root=run_root,
+            folder=folder,
+            name="bop_inspection_export",
+            script="scripts/run_bop_inspection_export.py",
+            parameters={
+                "export_id": export_id,
+                "result_id": export["settings"]["result_id"],
+                "scene_id": export["settings"]["scene_id"],
+                "format": export["settings"]["format"],
+            },
+        )
         return jsonify({"export_id": export_id, "job_id": job.id}), 202
     except Exception as exc:
         return _error(exc)
 
 
-def _export_job(run_root, export_id):
-    saved = read_export_artifact(run_root, export_id, "job.json")
-    job = job_runner.get(saved["job_id"])
-    if (
-        job.run_root != run_root.as_posix()
-        or job.name != "bop_inspection_export"
-        or job.parameters.get("export_id") != export_id
-    ):
-        raise ValueError("Export job identity does not match the run")
-    return job
+def _export_job(run_root, saved):
+    folder = export_folder(run_root, saved["export_id"])
+    return bound_inspect_job(
+        job_runner,
+        root=run_root,
+        folder=folder,
+        recorded_root=saved["run_root"],
+        job_id=read_inspect_job_id(folder),
+        name="bop_inspection_export",
+        id_parameter="export_id",
+    )
 
 
 @bop_inspection_bp.get("/bop/inspection/exports/<export_id>")
@@ -378,8 +362,10 @@ def bop_inspection_export_status(export_id: str):
         run_root = resolve_web_run_root(request.args.get("run_root"))
         saved = read_export_request(run_root, export_id)
         progress = read_export_artifact(run_root, export_id, "progress.json")
-        job = _export_job(run_root, export_id)
+        job = _export_job(run_root, saved)
         available = job.status == "succeeded" and progress.get("state") == "completed"
+        if available:
+            read_export_output(run_root, export_id, saved)
         return jsonify(
             {
                 "export_id": export_id,
@@ -410,7 +396,7 @@ def bop_inspection_export_status(export_id: str):
 def bop_inspection_export_download(export_id: str):
     try:
         run_root = resolve_web_run_root(request.args.get("run_root"))
-        job = _export_job(run_root, export_id)
+        job = _export_job(run_root, read_export_request(run_root, export_id))
         progress = read_export_artifact(run_root, export_id, "progress.json")
         if job.status != "succeeded" or progress.get("state") != "completed":
             return jsonify({"output": "Export is not completed"}), 409

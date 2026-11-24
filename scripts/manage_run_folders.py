@@ -42,6 +42,21 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="Required acknowledgement for permanent run-folder deletion.",
     )
+    calibration = delete.add_mutually_exclusive_group()
+    calibration.add_argument(
+        "--retain-calibration",
+        dest="retain_calibration",
+        action="store_const",
+        const=True,
+        help="Keep the run's promoted calibration in the calibration library.",
+    )
+    calibration.add_argument(
+        "--discard-calibration",
+        dest="retain_calibration",
+        action="store_const",
+        const=False,
+        help="Delete the run's promoted calibration with the run.",
+    )
     return parser
 
 
@@ -87,6 +102,7 @@ def main() -> None:
                 "inode": args.expected_inode,
             },
             allowed_roots=web_run_roots(),
+            retain_calibration=args.retain_calibration,
         )
         warning = _invalidate(args.cache)
         result["inventory_cache_invalidated"] = warning is None

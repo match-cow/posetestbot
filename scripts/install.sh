@@ -25,7 +25,7 @@ Usage:
 Options:
   --check-only             Verify the current environment without installing.
   --with-system-packages   Install common Ubuntu packages for local lab use.
-  --with-blenderproc       Install BlenderProc as a uv tool when missing.
+  --with-blenderproc       Install pinned BlenderProc for GT/depth references.
   --with-playwright-browsers
                            Install Chromium for Playwright browser UI tests.
   --with-web-build         Reinstall locked Bun packages and rebuild the bundled UI.
@@ -389,6 +389,7 @@ verify_web_console() {
   compgen -G "${ui_root}/assets/workpieces-page-*.js" >/dev/null || die "Bundled web UI has no lazy Workpiece Catalogue asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/pose-templates-page-*.js" >/dev/null || die "Bundled web UI has no lazy Pose Templates asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/bop-evaluation-page-*.js" >/dev/null || die "Bundled web UI has no lazy BOP Evaluation asset. Run scripts/install.sh --with-web-build."
+  compgen -G "${ui_root}/assets/depth-evaluation-page-*.js" >/dev/null || die "Bundled web UI has no lazy Depth Evaluation asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/pose-estimation-page-*.js" >/dev/null || die "Bundled web UI has no lazy Pose Estimation asset. Run scripts/install.sh --with-web-build."
   compgen -G "${ui_root}/assets/run-folders-page-*.js" >/dev/null || die "Bundled web UI has no lazy Run folders asset. Run scripts/install.sh --with-web-build."
   [[ -f "${cell_asset}" ]] || die "Bundled Cell template is missing ${cell_asset}."
@@ -433,6 +434,8 @@ modules = [
     "trimesh",
     "posetestbot.web.app",
     "posetestbot.bop.robot_consistency",
+    "posetestbot.bop.depth_evaluation",
+    "posetestbot.bop.depth_videos",
     "posetestbot.cluster.client",
     "posetestbot.cluster.controller_service",
 ]
@@ -483,7 +486,7 @@ run_readiness_checks() {
   log "Checking required Python imports."
   run_import_smoke
 
-  log "Checking optional Pose Results MP4 export (FFmpeg/libx264)."
+  log "Checking optional Pose Results and Depth Evaluation MP4 export (FFmpeg/libx264)."
   uv_python -c '
 from posetestbot.bop.inspection_exports import mp4_status
 status = mp4_status()

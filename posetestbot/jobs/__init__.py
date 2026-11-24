@@ -1,2 +1,2 @@
-"""Local job execution helpers for the PoseTestBot rewrite."""
+"""Local background job execution."""
 

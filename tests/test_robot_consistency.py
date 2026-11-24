@@ -278,6 +278,21 @@ def test_export_robot_transforms_sparse_frame_binding_and_mm_scores(
     assert all(_hash(path) == digest for path, digest in before.items())
 
 
+def test_estimates_are_held_to_the_import_tolerance_not_the_calibration_one() -> None:
+    # A rotation printed to four decimals is a valid BOP19 row. Rejecting it
+    # here would discard an evaluation the official toolkit already scored.
+    pose = np.eye(4)
+    pose[:3, :3] = np.round(Rotation.from_euler("xyz", [11, 23, 37], degrees=True).as_matrix(), 4)
+    with pytest.raises(ValueError):
+        rc._rigid(pose)
+
+    assert rc._estimated_pose(pose) is pose
+
+    pose[:3, :3] *= 1 + 2 * evaluation.RESULT_ROTATION_TOLERANCE
+    with pytest.raises(ValueError, match="finite pose estimates"):
+        rc._estimated_pose(pose)
+
+
 def test_consistent_bias_is_not_ground_truth_accuracy(tmp_path: Path) -> None:
     run = make_robot_consistency_run(tmp_path)
     manifest, targets, inputs = _inputs(run)
@@ -344,12 +359,12 @@ def test_unordered_repeated_instances_use_one_to_one_matching_and_macro_average(
                 "t": " ".join(map(str, annotation["cam_t_m2c"])),
             },
         )
-    rows.append({**rows[0], "score": 100, "t": "1000 1000 1000"})
+    rows.append({**rows[0], "score": 0.001, "t": "1000 1000 1000"})
     path = write_result_csv(first_result, rows=rows)
     report = rc.evaluate(run, path, manifest, targets, inputs)
     assert report["evaluated_track_count"] == 2
     assert report["eligible_frames"] == report["matched_frames"] == 4
-    assert report["unmatched_predictions"] == 1
+    assert report["unmatched_predictions"] == 0
     assert sorted(track["mvd_mm"] for track in report["tracks"]) == pytest.approx(
         [0, 2], abs=1e-10
     )
@@ -387,11 +402,19 @@ def test_missing_prerequisites_are_unavailable_without_fabricating_metrics(
 def test_rejected_or_missing_predictions_do_not_create_a_zero_score(
     tmp_path: Path,
 ) -> None:
+    import csv
+
     run = make_robot_consistency_run(tmp_path)
     manifest, targets, inputs = _inputs(run)
-    report = rc.evaluate(
-        run, _result(run, inputs, offsets=(0, 101)), manifest, targets, inputs
-    )
+    rejected = _result(run, inputs, offsets=(0, 101))
+    with rejected.open() as handle:
+        rows = list(csv.DictReader(handle))
+    # A correct but lower-ranked hypothesis must not rescue the rejected view.
+    corrected = _result(run, inputs, offsets=(0, 0))
+    with corrected.open() as handle:
+        alternate = list(csv.DictReader(handle))[1]
+    rows.append({**alternate, "score": 0.5})
+    report = rc.evaluate(run, write_result_csv(rejected, rows=rows), manifest, targets, inputs)
     assert report["status"] == "unavailable"
     assert report["metrics"] == []
     assert report["coverage"] == 0.5

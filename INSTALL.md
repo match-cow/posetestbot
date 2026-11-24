@@ -6,8 +6,9 @@ This guide covers the detailed lab SDK and optional runtime setup.
 
 PoseTestBot is acquisition-first: the repository captures, calibrates,
 synchronizes, optionally prepares ground-truth/masks, and exports BOP datasets.
-Its only evaluation runtime is the optional Inspect-only official BOP19
-dataset-validation path; it does not install or execute pose estimators.
+Its evaluation runtimes are the optional Inspect-only official BOP19
+dataset-validation path and pinned BlenderProc depth-quality reference rendering;
+it does not install or execute pose estimators.
 Use Python 3.12 and `uv` for Python environment management. The project requires
 `>=3.12,<3.13`; `uv` installs the matching interpreter when necessary. PoseTestBot targets only the
 physical lab iiwa; normal setup and validation never execute capture automatically.
@@ -61,7 +62,7 @@ the installed package roots and version against the checkout. Keep using the
 repository checkout for its scripts and pinned optional runtimes.
 
 Omit `--with-posegridgen` when this checkout only needs to consume existing
-`calibration_target.v2` files. The Calibration Targets generator is then
+`calibration_target.v3` files. The Calibration Targets generator is then
 reported unavailable, while calibration readers and the bundled UI continue
 to work.
 
@@ -111,6 +112,18 @@ be inspected.
 `--with-blenderproc` installs the validated BlenderProc 2.8.0 as a `uv` tool
 when it is missing and replaces another detected BlenderProc version. The web
 readiness check and render worker both reject every other version.
+
+**Inspect → Depth Evaluation** uses this same pinned BlenderProc 2.8.0 tool
+and its Blender installation, with CPU rendering. Provision both before
+starting studies. Depth studies accept completed `pose` or `pose_and_masks`
+exports and immutable geometry, instance, calibration, and frame-bound GT
+evidence. Neither BOP Toolkit nor a result CSV is required. Existing NumPy,
+OpenCV, Pillow, and Matplotlib dependencies provide metrics and research bundles.
+The completed study's **Videos** view additionally uses optional FFmpeg/libx264
+for per-camera quality MP4 previews and downloads; it reuses retained results
+without rerendering. `--with-system-packages` provisions FFmpeg, and the installer
+checks encoder availability for both Pose Results and Depth Evaluation.
+See [Depth quality](docs/concepts/depth-evaluation.md). No hardware is accessed.
 
 `--with-playwright-browsers` installs Chromium for Playwright browser UI tests
 after the uv environment has been synchronized. Keep this opt-in on lab hosts
@@ -199,6 +212,12 @@ Dashboard polls capacity from the filesystem that will contain the selected
 run, including a not-yet-created child folder. It warns below the smaller of
 500 GiB or 15% free and reports critical capacity below the smaller of 100 GiB
 or 5% free.
+
+Set `POSETESTBOT_CALIBRATION_AGE_WARNING_DAYS` to a positive whole number in
+the backend environment to flag dated camera profiles for a mount check in
+the console. Profiles remain selectable. Include
+`working_data/calibration_library/` in regular filesystem backups alongside
+run archives.
 
 ## Manual Prerequisites
 
@@ -397,6 +416,10 @@ readiness as distinct states. Lifecycle actions are fixed server-owned
 `systemctl --user --no-block` jobs. Stopping requires confirmation because it
 can interrupt archive transfer, estimator staging, or result collection.
 Remote SLURM identity remains durable and is reconciled after restart.
+Confirmed archive deletion requires the companion's
+`DELETE /v1/archives/{archive_id}` route. If deletion reports an unsupported
+operation or a bare `Not Found` from an older companion, update that checkout
+and restart its fixed controller service before retrying.
 
 For a persistent workstation deployment, instantiate both examples in
 `deploy/systemd/` below `~/.config/systemd/user/`, replacing every `@...@`
@@ -654,8 +677,8 @@ acquisition contract.
 
 ### BlenderProc
 
-BlenderProc is only needed for non-dry-run optional GT scene validation and
-pose generation. The full annotation mode uses the separately pinned BOP
+BlenderProc is needed for non-dry-run optional GT scene validation, pose
+generation, and Inspect depth-reference rendering. Full annotation mode uses the separately pinned BOP
 Toolkit for masks and visibility against captured depth. Dry-run render
 planning and ordinary acquisition checks do not require BlenderProc.
 Explicit objectless render plans also skip BlenderProc completely.

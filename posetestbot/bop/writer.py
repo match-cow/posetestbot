@@ -22,6 +22,7 @@ from posetestbot.calibration.profiles import (
     CalibrationStatus,
     profile_to_dict,
 )
+from posetestbot.calibration.rectification import sensor_input_projection
 from posetestbot.io.atomic import atomic_write_bytes, atomic_write_json
 from posetestbot.io.artifacts import (
     BOP_COCO_ANNOTATIONS,
@@ -1465,6 +1466,7 @@ def export_sensor_scene_to_bop(
     authoritative_source_sensor_folder: str | None = None,
     input_fingerprint_sha256: str | None = None,
     authoritative_source_fingerprint_sha256: str | None = None,
+    run_root: Path | None = None,
     annotation_source: str = "none",
     annotation_mode: str,
 ) -> BopSceneExport:
@@ -1482,6 +1484,7 @@ def export_sensor_scene_to_bop(
             raise ValueError(
                 f"Calibration profile {calibration_profile.profile_id} is not valid"
             )
+    detected_projection = sensor_input_projection(sensor_folder, run_root=run_root)
     scene_folder = output_root / split / f"{scene_id:06d}"
     if scene_folder.exists():
         if not overwrite:
@@ -1495,11 +1498,6 @@ def export_sensor_scene_to_bop(
     rgb_dest.mkdir(parents=True)
     depth_dest.mkdir(parents=True)
 
-    detected_projection = (
-        "rectified"
-        if (sensor_folder / "rectification_provenance.json").is_file()
-        else "native"
-    )
     projection = source_projection or detected_projection
     if projection not in {"native", "rectified"}:
         raise ValueError(f"Unsupported BOP input projection: {projection!r}")
@@ -1778,15 +1776,11 @@ def export_sensor_scene_to_bop(
     )
 
 
-def targets_filename(split: str) -> str:
-    if split == "test":
-        return BOP_TARGETS_BOP19
-    return f"{split}_targets_bop19.json"
-
-
 def write_bop_targets(
     output_root: str | Path, exports: list[BopSceneExport], *, split: str
 ) -> Path:
+    if split != "test":
+        raise ValueError("BOP19 target inventory requires the test split")
     output_root = Path(output_root)
     targets = [
         target
@@ -1794,7 +1788,7 @@ def write_bop_targets(
         for target in export.targets or []
         if export.split == split
     ]
-    return _write_json(output_root / targets_filename(split), targets)
+    return _write_json(output_root / BOP_TARGETS_BOP19, targets)
 
 
 def write_bop_frame_map(output_root: str | Path, exports: list[BopSceneExport]) -> Path:
@@ -2151,9 +2145,9 @@ def _annotation_bbox(
 ) -> list[float]:
     bbox = None
     if isinstance(annotation_info, Mapping):
-        bbox = annotation_info.get("bbox_visib") or annotation_info.get("bbox_obj")
+        bbox = annotation_info.get("bbox_obj")
     if bbox is None:
-        bbox = annotation.get("bbox_visib") or annotation.get("bbox_obj")
+        bbox = annotation.get("bbox_obj")
     if not isinstance(bbox, list | tuple) or len(bbox) < 4:
         return [0.0, 0.0, 0.0, 0.0]
     try:
@@ -2167,12 +2161,10 @@ def _annotation_area(
     annotation_info: object,
 ) -> float:
     if isinstance(annotation_info, Mapping):
-        for key in ("px_count_visib", "px_count_valid", "px_count_all"):
-            value = annotation_info.get(key)
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                continue
+        try:
+            return float(annotation_info.get("px_count_all"))
+        except (TypeError, ValueError):
+            pass
     return float(max(0.0, bbox[2]) * max(0.0, bbox[3]))
 
 
@@ -2244,7 +2236,7 @@ def coco_annotations_from_exports(
                     "im_id": bop_image_id,
                     "sensor_name": export.sensor_name,
                     "split": export.split,
-                    "scene_folder": scene_folder.as_posix(),
+                    "scene_folder": export.scene_folder,
                 },
             }
             images.append(image_record)

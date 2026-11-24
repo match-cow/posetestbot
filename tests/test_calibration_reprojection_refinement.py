@@ -530,6 +530,20 @@ def test_explicit_refinement_replacement_preserves_and_binds_previous_promotion(
     )
     assert status["previous_promotion"] == request["previous_promotion"]
     attempts._validate_promotion_request_identity(tmp_path, attempt_id, request, status)
+    restored = attempts._fail_promotion(tmp_path, folder, status, "replacement interrupted")
+    assert restored["status"] == "promoted"
+    assert restored["reprojection_refinement"]["refinement_id"] == previous_id
+    assert restored["last_replacement_failure"]["error"] == "replacement interrupted"
+    assert json.loads((folder / "promotion.json").read_text()) == restored
+    assert (folder / "promotion_request.json").read_text() == "{}"
+    attempt["promotion"] = restored
+    request = attempts.create_promotion_request(
+        tmp_path,
+        attempt_id,
+        reprojection_refinement_id=refinement_id,
+        replace_promoted_refinement=True,
+    )
+    status = json.loads((folder / "promotion.json").read_text())
     (tmp_path / request["previous_promotion"][0]["path"]).write_text("tampered")
     with pytest.raises(ValueError, match="prior promotion evidence changed"):
         attempts._validate_promotion_request_identity(

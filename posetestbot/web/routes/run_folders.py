@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 
 from flask import Blueprint, jsonify, request
 
-from posetestbot.jobs.runner import ResourceBusyError, TERMINAL_STATUSES
+from posetestbot.calibration.retained_library import run_has_promoted_calibration
+from posetestbot.jobs.runner import JobRecord, ResourceBusyError
 from posetestbot.run_folders import (
     INVENTORY_FILENAME,
     INVENTORY_SCHEMA_VERSION,
@@ -24,9 +26,15 @@ from posetestbot.run_folders import (
 )
 from posetestbot.web.paths import APP_ROOT
 from posetestbot.web.routes.ui import run_storage_status
-from posetestbot.web.runtime import get_job_runner
+from posetestbot.web.runtime import (
+    assert_no_active_cluster_run_jobs,
+    assert_no_active_run_jobs,
+    cluster_run_activity,
+    get_job_runner,
+    serialize_run_storage_submission,
+)
 from posetestbot.web.security import (
-    DEFAULT_RUN_ROOT,
+    resolve_web_run_root,
     web_run_roots,
 )
 
@@ -47,22 +55,8 @@ def _json_object() -> dict[str, Any]:
     return value
 
 
-def _raw_run_path(value: Any) -> Path:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("run_root must be a non-empty path")
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        if path.parts and path.parts[0] == DEFAULT_RUN_ROOT.name:
-            path = APP_ROOT / path
-        else:
-            path = DEFAULT_RUN_ROOT / path
-    if path.is_symlink():
-        raise ValueError("Run folder must not be a symbolic link")
-    return path
-
-
 def _source_from_payload(value: Mapping[str, Any]) -> Path:
-    resolved = _raw_run_path(value.get("run_root"))
+    resolved = resolve_web_run_root(value.get("run_root"))
     return resolve_direct_run_folder(resolved, allowed_roots=web_run_roots())
 
 
@@ -86,49 +80,10 @@ def _inventory_cache_path() -> Path:
     return Path(get_job_runner().job_root) / INVENTORY_FILENAME
 
 
-def _all_jobs():
-    return get_job_runner().list(include_services=True)
-
-
-def _active_inventory_job():
-    candidates = [
-        job
-        for job in _all_jobs()
-        if job.status not in TERMINAL_STATUSES
-        and bool((job.parameters or {}).get("run_folder_inventory"))
-    ]
-    return max(candidates, key=lambda item: item.created_at) if candidates else None
-
-
-def _active_operation_job():
-    candidates = [
-        job
-        for job in _all_jobs()
-        if job.status not in TERMINAL_STATUSES
-        and (job.parameters or {}).get("run_folder_operation") in {"move", "delete"}
-    ]
-    return max(candidates, key=lambda item: item.created_at) if candidates else None
-
-
-def _assert_no_active_run_jobs(run_root: Path) -> None:
-    active = []
-    for job in _all_jobs():
-        if (
-            job.status in TERMINAL_STATUSES
-            or job.scope_kind != "run"
-            or not job.run_root
-        ):
-            continue
-        try:
-            same_run = Path(job.run_root).resolve() == run_root.resolve()
-        except OSError:
-            same_run = job.run_root == run_root.as_posix()
-        if same_run:
-            active.append(job.id)
-    if active:
-        raise ResourceBusyError(
-            "Run folder has active background work: " + ", ".join(sorted(active))
-        )
+def _active_inventory_job(jobs: list[JobRecord]) -> JobRecord | None:
+    return next(
+        (job for job in jobs if job.parameters.get("run_folder_inventory")), None
+    )
 
 
 def _inventory_is_stale(value: Mapping[str, Any] | None) -> bool:
@@ -200,9 +155,10 @@ def _require_current_inventory_selection(
     expected_identity: Mapping[str, Any],
     destination_root: Path | None = None,
     expected_destination_root_identity: Mapping[str, Any] | None = None,
-) -> None:
+) -> Mapping[str, Any]:
     cached = load_run_folder_inventory(_inventory_cache_path())
-    if _active_inventory_job() is not None or _inventory_is_stale(cached):
+    refresh = _active_inventory_job(get_job_runner().active_jobs())
+    if refresh is not None or _inventory_is_stale(cached):
         raise RuntimeError(
             "Run-folder inventory is not current; refresh inventory before "
             "changing run storage"
@@ -227,7 +183,7 @@ def _require_current_inventory_selection(
             "inventory before changing run storage"
         )
     if destination_root is None:
-        return
+        return matching_runs[0]
     selected_destination_identity = {
         "device": (
             expected_destination_root_identity.get("device")
@@ -250,6 +206,7 @@ def _require_current_inventory_selection(
             "Destination root no longer matches the current inventory; refresh "
             "inventory before moving the run"
         )
+    return matching_runs[0]
 
 
 def _job_response(job, **values: Any):
@@ -279,8 +236,16 @@ def _error(exc: Exception):
 @run_folders_bp.get("/ui/run-folders")
 def run_folder_inventory():
     cached = load_run_folder_inventory(_inventory_cache_path())
-    refresh = _active_inventory_job()
-    operation = _active_operation_job()
+    jobs = get_job_runner().active_jobs()
+    refresh = _active_inventory_job(jobs)
+    operation = next(
+        (
+            job
+            for job in jobs
+            if job.parameters.get("run_folder_operation") in {"move", "delete"}
+        ),
+        None,
+    )
     stale = _inventory_is_stale(cached)
     if refresh is not None:
         state = "refreshing"
@@ -305,6 +270,7 @@ def run_folder_inventory():
             {
                 "path": root.as_posix(),
                 "exists": exists,
+                "unavailable_reason": None if exists and os.access(root, os.W_OK) else "Storage root is missing or not writable.",
                 "identity": (
                     cached_identity if cached_identity == current_identity else None
                 ),
@@ -339,10 +305,22 @@ def run_folder_inventory():
     )
 
 
+@run_folders_bp.get("/ui/run-folders/cluster-activity")
+def run_folder_cluster_activity():
+    activity = cluster_run_activity()
+    approved = []
+    for value in activity["active_run_roots"]:
+        try:
+            approved.append(resolve_web_run_root(value).as_posix())
+        except ValueError:
+            continue
+    return jsonify({**activity, "active_run_roots": approved})
+
+
 @run_folders_bp.post("/ui/run-folders/refresh")
 def refresh_run_folder_inventory():
     try:
-        active = _active_inventory_job()
+        active = _active_inventory_job(get_job_runner().active_jobs())
         if active is not None:
             return _job_response(active)
         job_runner = get_job_runner()
@@ -371,6 +349,7 @@ def refresh_run_folder_inventory():
 
 
 @run_folders_bp.post("/ui/run-folders/move")
+@serialize_run_storage_submission
 def move_run_folder():
     try:
         value = _json_object()
@@ -395,7 +374,8 @@ def move_run_folder():
             expected_destination_root_identity=expected_destination,
             allowed_roots=web_run_roots(),
         )
-        _assert_no_active_run_jobs(source)
+        assert_no_active_run_jobs(source)
+        assert_no_active_cluster_run_jobs(source)
         destination = preflight["destination"]
         job_runner = get_job_runner()
         job = job_runner.submit(
@@ -440,6 +420,7 @@ def move_run_folder():
 
 
 @run_folders_bp.delete("/ui/run-folders")
+@serialize_run_storage_submission
 def delete_run_folder():
     try:
         value = _json_object()
@@ -448,11 +429,25 @@ def delete_run_folder():
         source = _source_from_payload(value)
         expected = _expected_identity(value)
         validate_expected_identity(source, expected)
-        _require_current_inventory_selection(
+        inventory_entry = _require_current_inventory_selection(
             source,
             expected_identity=expected,
         )
-        _assert_no_active_run_jobs(source)
+        # Deleting a calibration run is the usual way to lose a calibration, so
+        # the operator states the outcome instead of inheriting a default.
+        retain_calibration = value.get("retain_calibration")
+        holds_calibration = bool(inventory_entry.get("calibration_retention")) or run_has_promoted_calibration(source)
+        if holds_calibration and not isinstance(retain_calibration, bool):
+            raise ValueError(
+                "retain_calibration must be literal true or false because this "
+                "run holds calibration evidence that requires a retention decision"
+            )
+        if not holds_calibration and retain_calibration is not None:
+            raise ValueError(
+                "retain_calibration applies only to a promoted calibration or its last verified snapshot"
+            )
+        assert_no_active_run_jobs(source)
+        assert_no_active_cluster_run_jobs(source)
         job_runner = get_job_runner()
         job = job_runner.submit(
             name="run_folder_delete",
@@ -470,6 +465,15 @@ def delete_run_folder():
                 "--cache",
                 _inventory_cache_path().as_posix(),
                 "--confirm-delete",
+                *(
+                    [
+                        "--retain-calibration"
+                        if retain_calibration
+                        else "--discard-calibration"
+                    ]
+                    if holds_calibration
+                    else []
+                ),
             ],
             cwd=APP_ROOT,
             resources=["disk_io", "run_folder_storage"],
@@ -479,6 +483,11 @@ def delete_run_folder():
                 "run_folder_operation": "delete",
                 "cancelable": False,
                 "source_run_root": source.as_posix(),
+                **(
+                    {"retain_calibration": retain_calibration}
+                    if holds_calibration
+                    else {}
+                ),
             },
         )
         return _job_response(job, source_run_root=source.as_posix())

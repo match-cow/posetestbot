@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from posetestbot.io.atomic import atomic_write_json
 from posetestbot.pipeline.capture_completion import build_capture_completion
 from posetestbot.pipeline.orchestration import (
     capture_job_recipe,
@@ -19,6 +20,8 @@ from posetestbot.pipeline.orchestration import (
 from posetestbot.pipeline.preflight import write_run_preflight_report
 from posetestbot.pipeline.run_config import (
     create_run_config,
+    run_config_sha256,
+    run_config_lock,
     sensor_config_from_token,
     write_run_config,
 )
@@ -156,7 +159,8 @@ def _completed_processes() -> list[dict]:
 
 def test_plan_and_job_recipes_are_fixed_and_purpose_scoped(tmp_path: Path) -> None:
     run_root = tmp_path / "calibration"
-    _write_config(run_root, intent="calibration")
+    config = _write_config(run_root, intent="calibration")
+    _write_ready_preflight(run_root, config)
 
     path, plan = plan_capture(run_root, max_frames=2, warmup_frames=3)
 
@@ -190,6 +194,8 @@ def test_plan_and_job_recipes_are_fixed_and_purpose_scoped(tmp_path: Path) -> No
         "calibration",
         "--allow-cameras",
         "--allow-real-robot",
+        "--approved-config-sha256",
+        run_config_sha256(config),
     )
     assert capture.resources == ("camera", "disk_io", "robot_command")
     assert capture.parameters["purpose"] == "capture"
@@ -210,18 +216,8 @@ def test_plan_and_job_recipes_are_fixed_and_purpose_scoped(tmp_path: Path) -> No
         )
 
 
-def test_capture_rechecks_camera_before_writing_capture_artifacts(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "blocked-before-plan"
-    config = _write_config(run_root, intent="calibration")
-    write_run_preflight_report(
-        run_root,
-        {
-            "schema_version": "run_preflight.v2",
-            "overall_status": "ok",
-            "config": config,
-            "selected_sensor_readiness": {
+def _write_ready_preflight(run_root: Path, config: dict) -> dict:
+    readiness = {
                 "schema_version": "selected_sensor_readiness.v1",
                 "selected_count": 1,
                 "ready_count": 1,
@@ -240,9 +236,25 @@ def test_capture_rechecks_camera_before_writing_capture_artifacts(
                         "recorded_output": False,
                     }
                 ],
-            },
+    }
+    write_run_preflight_report(
+        run_root,
+        {
+            "schema_version": "run_preflight.v2",
+            "overall_status": "ok",
+            "config": config,
+            "selected_sensor_readiness": readiness,
         },
     )
+    return readiness
+
+
+def test_capture_rechecks_camera_before_writing_capture_artifacts(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "blocked-before-plan"
+    config = _write_config(run_root, intent="calibration")
+    _write_ready_preflight(run_root, config)
     blocked_readiness = {
         "schema_version": "selected_sensor_readiness.v1",
         "selected_count": 1,
@@ -275,6 +287,45 @@ def test_capture_rechecks_camera_before_writing_capture_artifacts(
     assert not (run_root / f"realsense_{SENSOR_ID}").exists()
 
 
+@pytest.mark.parametrize("during_probe", [False, True])
+def test_capture_rejects_config_drift_even_if_preflight_was_refreshed(
+    tmp_path, during_probe
+):
+    root = tmp_path / "run"
+    config = _write_config(root, intent="calibration")
+    readiness = _write_ready_preflight(root, config)
+    recipe = capture_job_recipe(
+        root, intent="calibration", allow_cameras=True, allow_real_robot=True
+    )
+    approved = recipe.command[-1]
+    assert recipe.parameters["approved_config_sha256"] == approved
+
+    def change_velocity():
+        changed = {**config, "capture": {**config["capture"], "velocity_m_s": 0.002}}
+        with run_config_lock(root):
+            atomic_write_json(root / "run_config.json", changed)
+        _write_ready_preflight(root, changed)
+
+    def probe(_config):
+        assert during_probe, "Drift before launch must be rejected before probing"
+        change_velocity()
+        return readiness
+
+    if not during_probe:
+        change_velocity()
+    with pytest.raises(ValueError, match="changed since capture approval"):
+        execute_capture(
+            root,
+            intent="calibration",
+            allow_cameras=True,
+            allow_real_robot=True,
+            approved_config_sha256=approved,
+            probe_selected_sensors=probe,
+        )
+    assert not (root / "capture_plan.json").exists()
+    assert not (root / "capture_execution_status.json").exists()
+
+
 def test_capture_completion_requires_only_current_raw_contracts(tmp_path: Path) -> None:
     run_root = tmp_path / "capture"
     config = _write_config(run_root, intent="calibration")
@@ -285,6 +336,14 @@ def test_capture_completion_requires_only_current_raw_contracts(tmp_path: Path) 
     assert report["schema_version"] == "capture_completion.v1"
     assert report["status"] == "ok"
     assert report["error_count"] == 0
+
+    # A frame writer's leftover temporary file is not an unpaired frame.
+    leftover = run_root / "realsense_123" / "rgb" / ".1700000000000.abc.png"
+    leftover.write_bytes(b"partial")
+    assert build_capture_completion(run_root, config, _completed_processes())[
+        "status"
+    ] == "ok"
+    leftover.unlink()
 
     metadata_path = run_root / "realsense_123" / "frame_metadata.jsonl"
     records = [json.loads(line) for line in metadata_path.read_text().splitlines()]
@@ -465,19 +524,12 @@ def test_purpose_specific_apis_reject_extra_fields_and_queue_exact_recipes(
 ) -> None:
     calibration_root = tmp_path / "calibration"
     dataset_root = tmp_path / "dataset"
-    _write_config(calibration_root, intent="calibration")
+    config = _write_config(calibration_root, intent="calibration")
+    _write_ready_preflight(calibration_root, config)
     _write_config(dataset_root, intent="dataset")
     runner = _FakeRunner()
     monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", tmp_path.as_posix())
     monkeypatch.setattr(route_support, "job_runner", runner)
-    monkeypatch.setattr(
-        route_support,
-        "run_preflight_queue_summary",
-        lambda *_args, **_kwargs: {
-            "ready_for_queue": True,
-            "queue_blocker": None,
-        },
-    )
     monkeypatch.setattr(
         "posetestbot.pipeline.orchestration.verify_calibration_profile_selection",
         lambda *_args, **_kwargs: {"schema_version": "calibration_profile_selection.v2"},
@@ -506,17 +558,32 @@ def test_purpose_specific_apis_reject_extra_fields_and_queue_exact_recipes(
         assert "Unsupported fields" in response.get_json()["output"]
     assert runner.submissions == []
 
+    capture_payload = {
+        "run_root": str(calibration_root),
+        "intent": "calibration",
+        "allow_cameras": True,
+        "allow_real_robot": True,
+    }
+    for acknowledgement in ("allow_cameras", "allow_real_robot"):
+        rejected = client.post(
+            "/capture/jobs", json={**capture_payload, acknowledgement: 1}
+        )
+        assert rejected.status_code == 400
+    preflight = json.loads((calibration_root / "run_preflight_report.json").read_text())
+    del preflight["overall_status"]
+    write_run_preflight_report(calibration_root, preflight)
+    rejected = client.post("/capture/jobs", json=capture_payload)
+    assert rejected.status_code == 400
+    assert "invalid_preflight" in rejected.json["output"]
+    assert runner.submissions == []
+    _write_ready_preflight(calibration_root, config)
+
     assert client.post(
         "/preflight/jobs", json={"run_root": calibration_root.as_posix()}
     ).status_code == 202
     assert client.post(
         "/capture/jobs",
-        json={
-            "run_root": calibration_root.as_posix(),
-            "intent": "calibration",
-            "allow_cameras": True,
-            "allow_real_robot": True,
-        },
+        json=capture_payload,
     ).status_code == 202
     assert client.post(
         "/dataset-processing/jobs", json={"run_root": dataset_root.as_posix()}
@@ -554,6 +621,10 @@ def test_purpose_specific_apis_reject_extra_fields_and_queue_exact_recipes(
         "dataset_processing",
         "robot_command",
         "robot_command",
+    ]
+    assert runner.submissions[1]["command"][-2:] == [
+        "--approved-config-sha256",
+        run_config_sha256(config),
     ]
     assert runner.submissions[-2]["command"] == [
         "uv",

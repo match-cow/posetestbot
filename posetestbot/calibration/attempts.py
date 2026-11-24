@@ -10,7 +10,7 @@ import re
 import shutil
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -60,7 +60,6 @@ from posetestbot.calibration.intrinsics import (
     factory_intrinsic_profile,
     load_intrinsic_profile_collection,
     projection_is_opencv_compatible,
-    select_intrinsic_profile,
     sensor_intrinsic_identity,
     write_intrinsic_profile_collection,
 )
@@ -75,6 +74,11 @@ from posetestbot.calibration.profiles import (
     load_profile_collection,
     rectified_intrinsics_from_native,
     write_profile_collection,
+)
+from posetestbot.calibration.promotion_transaction import (
+    clear_promotion_staging,
+    recover_promotion_transaction,
+    replace_promotion_artifacts as _transactional_replace,
 )
 from posetestbot.calibration.target_library import (
     LIBRARY_DIRECTORY,
@@ -117,7 +121,7 @@ from posetestbot.calibration.time_offset import (
     search_configuration as time_offset_search_configuration,
     sign_convention as time_offset_sign_convention,
 )
-from posetestbot.io.atomic import atomic_write_json
+from posetestbot.io.atomic import atomic_write_bytes, atomic_write_json
 from posetestbot.io.artifacts import (
     ARUCO_DETECTIONS,
     CALIBRATION_PROFILES,
@@ -176,6 +180,7 @@ CHECKS_FILE = "checks.json"
 CANDIDATE_PROFILES_FILE = "candidate_profiles.json"
 PROMOTION_REQUEST_FILE = "promotion_request.json"
 PROMOTION_FILE = "promotion.json"
+ACTIVE_ATTEMPT_STATES = {"queued", "running"}
 TARGET_BUNDLE_DIRECTORY = "target_bundle"
 ATTEMPT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 ATTEMPT_MIN_MOTION_POSES = 4
@@ -224,9 +229,6 @@ DEFAULT_INTRINSICS_POLICY = "compare_factory_opencv"
 INTRINSICS_POLICIES = {
     "compare_factory_opencv": (
         "Compare captured factory intrinsics with a gated OpenCV calibration"
-    ),
-    "reuse_compatible_or_factory": (
-        "Reuse an exact compatible profile, otherwise captured factory intrinsics"
     ),
 }
 PHASES = (
@@ -353,8 +355,6 @@ def _calibration_timestamp_preflight(
     for sensor in sensors:
         sensor_policy = _timestamp_policy_for_sensor(policy, sensor)
         required_domain = sensor_policy["required_frame_timestamp_domain"]
-        if required_domain is None:
-            continue
         sensor_key = str(sensor.get("sensor_key") or sensor.get("folder"))
         folder = run_root / str(sensor.get("folder", ""))
         metadata_path = folder / FRAME_METADATA_JSONL
@@ -368,6 +368,14 @@ def _calibration_timestamp_preflight(
             continue
         if not records:
             errors.append(f"{sensor_key}: frame timestamp evidence is empty")
+            continue
+        if any(
+            item["sensor_id"] != sensor["device_id"]
+            or item["sensor_type"] != sensor["sensor_type"]
+            for item in records
+        ):
+            errors.append(f"{sensor_key}: frame metadata identity does not match the configured camera")
+        if required_domain is None:
             continue
         missing_sensor_timestamp = sum(
             item.get("sensor_timestamp_ns") is None for item in records
@@ -494,9 +502,6 @@ def discover_calibration_cameras(run_root: str | Path) -> list[dict[str, Any]]:
         for item in config.get("capture", {}).get("sensors", [])
         if isinstance(item, Mapping)
     ]
-    enabled_configured = [
-        item for item in configured if item.get("enabled", True) is True
-    ]
     manifest_records = _manifest_sensor_records(root)
     cameras: list[dict[str, Any]] = []
     for discovered in discover_sensor_records(root):
@@ -521,19 +526,12 @@ def discover_calibration_cameras(run_root: str | Path) -> list[dict[str, Any]]:
             and matching_config.get("enabled", True) is not True
         ):
             continue
-        if matching_config is None:
-            same_family = [
-                item
-                for item in enabled_configured
-                if str(item.get("sensor_type")) == sensor_type
-            ]
-            if len(same_family) == 1:
-                matching_config = same_family[0]
-                device_id = str(matching_config.get("device_id") or device_id)
         key = _sensor_key(sensor_type, device_id)
         errors = []
         if not sensor_type or not device_id:
             errors.append("missing stable sensor type/device identity")
+        if matching_config is None:
+            errors.append("captured camera identity is missing from the run configuration")
         if not contained:
             errors.append("captured sensor folder escapes the run root")
         rgb = folder_path / RGB_DIR
@@ -944,6 +942,7 @@ def list_calibration_attempts(run_root: str | Path) -> list[dict[str, Any]]:
                 "sensor_keys": request_value.get("sensor_keys", []),
                 "target_id": request_value.get("target_id"),
                 "status": progress.get("status"),
+                "job_id": progress.get("job_id"),
                 "recommended_camera_count": (
                     int(ranking.get("recommended_camera_count", 0)) if ranking else 0
                 ),
@@ -1363,20 +1362,21 @@ def record_attempt_job(
     *,
     job_id: str,
     kind: str,
+    requested_at: str | None = None,
 ) -> None:
-    attempt_root = calibration_attempt_root(run_root, attempt_id)
-    if kind == "calculation":
-        progress = _read_json(attempt_root / PROGRESS_FILE)
-        progress["job_id"] = job_id
-        progress["updated_at"] = utc_now_iso()
-        atomic_write_json(attempt_root / PROGRESS_FILE, progress)
-        return
-    if kind == "promotion":
-        promotion = _read_json(attempt_root / PROMOTION_FILE)
-        promotion["job_id"] = job_id
-        atomic_write_json(attempt_root / PROMOTION_FILE, promotion)
-        return
-    raise ValueError("Calibration attempt job kind must be calculation or promotion")
+    with run_config_lock(run_root) as root:
+        path = calibration_attempt_root(root, attempt_id) / (
+            PROGRESS_FILE if kind == "calculation" else PROMOTION_FILE
+        )
+        current = _read_json(path)
+        if (
+            current.get("status") != "queued"
+            or current.get("job_id") is not None
+            or (requested_at is not None and current.get("requested_at") != requested_at)
+        ):
+            raise ValueError("Calibration job request is no longer queued")
+        current["job_id"] = job_id
+        atomic_write_json(path, current)
 
 
 def record_attempt_job_submission_failure(
@@ -1384,37 +1384,51 @@ def record_attempt_job_submission_failure(
     attempt_id: str,
     *,
     kind: str,
-    error: Exception,
+    error: BaseException,
+    requested_at: str | None = None,
 ) -> None:
     """Make a synchronous queue failure visible without losing the attempt."""
 
-    attempt_root = calibration_attempt_root(run_root, attempt_id)
-    message = f"{type(error).__name__}: {error}"
-    if kind == "calculation":
-        progress = _read_json(attempt_root / PROGRESS_FILE)
-        progress.update(
-            {
-                "status": "failed",
-                "updated_at": utc_now_iso(),
-                "message": message,
-                "failure_stage": "job_submission",
-            }
-        )
-        atomic_write_json(attempt_root / PROGRESS_FILE, progress)
-        return
-    if kind == "promotion":
-        promotion = _read_json(attempt_root / PROMOTION_FILE)
-        promotion.update(
-            {
-                "status": "failed",
-                "ended_at": utc_now_iso(),
-                "error": message,
-                "failure_stage": "job_submission",
-            }
-        )
-        atomic_write_json(attempt_root / PROMOTION_FILE, promotion)
-        return
-    raise ValueError("Calibration attempt job kind must be calculation or promotion")
+    _record_attempt_failure(
+        run_root, attempt_id, kind=kind, message=f"{type(error).__name__}: {error}",
+        stage="job_submission", requested_at=requested_at,
+    )
+
+
+def reconcile_attempt_job_failure(
+    run_root: Path, attempt_id: str, *, kind: str, job_id: str, message: str,
+) -> None:
+    _record_attempt_failure(
+        run_root, attempt_id, kind=kind, message=message, stage="job_execution",
+        job_id=job_id,
+    )
+
+
+def _record_attempt_failure(
+    run_root: str | Path, attempt_id: str, *, kind: str, message: str, stage: str,
+    requested_at: str | None = None, job_id: str | None = None,
+) -> None:
+    with run_config_lock(run_root) as root:
+        if kind == "promotion":
+            recover_promotion_transaction(root)
+        attempt_root = calibration_attempt_root(root, attempt_id)
+        path = attempt_root / (PROGRESS_FILE if kind == "calculation" else PROMOTION_FILE)
+        current = _read_json(path)
+        if (
+            current.get("status") not in ACTIVE_ATTEMPT_STATES
+            or (job_id is not None and current.get("job_id") != job_id)
+            or (requested_at is not None and current.get("requested_at") != requested_at)
+        ):
+            return
+        current["failure_stage"] = stage
+        if kind == "promotion":
+            _fail_promotion(root, attempt_root, current, message)
+        else:
+            current.update(status="failed", updated_at=utc_now_iso(), message=message)
+            for phase in current.get("phases", []):
+                if phase.get("status") == "running":
+                    phase["status"] = "failed"
+            atomic_write_json(path, current)
 
 
 def _intrinsic_deltas(
@@ -2095,17 +2109,12 @@ def _intrinsic_projection_evidence(profile: Mapping[str, Any]) -> dict[str, Any]
 
 
 def _intrinsics_for_sensors(
-    run_root: Path,
     attempt_root: Path,
     synchronized: Mapping[str, Path],
     request_value: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-    existing_path = run_root / INTRINSIC_CALIBRATION_PROFILES
-    existing = (
-        load_intrinsic_profile_collection(existing_path)
-        if existing_path.is_file()
-        else []
-    )
+    if request_value["intrinsics_policy"] != DEFAULT_INTRINSICS_POLICY:
+        raise ValueError("Unsupported calibration intrinsics policy")
     profiles: list[dict[str, Any]] = []
     by_sensor: dict[str, dict[str, Any]] = {}
     unusable_sensor_keys: list[str] = []
@@ -2137,7 +2146,6 @@ def _intrinsics_for_sensors(
         factory_projection = _intrinsic_projection_evidence(factory)
         candidates = [factory]
         selected: dict[str, Any] | None = None
-        existing_projection: dict[str, Any] | None = None
         unusable_projection: dict[str, Any] | None = None
         manual: dict[str, Any] | None = None
         manual_failure: dict[str, Any] | None = None
@@ -2147,191 +2155,145 @@ def _intrinsics_for_sensors(
         manual_plausibility: dict[str, Any] | None = None
         selection_gates: dict[str, bool] | None = None
         improvement: dict[str, float] | None = None
-        if request_value["intrinsics_policy"] == "compare_factory_opencv":
-            detections = detect_sensor_folder(
-                folder,
-                request_value["target"],
-                output_path=folder / ARUCO_DETECTIONS,
+        detections = detect_sensor_folder(
+            folder,
+            request_value["target"],
+            output_path=folder / ARUCO_DETECTIONS,
+        )
+        try:
+            training_detections, holdout_detections, comparison_split = (
+                _intrinsic_detection_split(
+                    detections,
+                    request_value["target"],
+                )
             )
-            try:
-                training_detections, holdout_detections, comparison_split = (
-                    _intrinsic_detection_split(
-                        detections,
-                        request_value["target"],
-                    )
-                )
-                if (
-                    comparison_split["heldout_usable_view_count"]
-                    < ATTEMPT_INTRINSIC_MIN_HOLDOUT_VIEWS
-                    or comparison_split["training_usable_view_count"]
-                    < DEFAULT_MIN_ACCEPTED_VIEWS
-                ):
-                    raise ValueError(
-                        "Intrinsic comparison requires at least "
-                        f"{DEFAULT_MIN_ACCEPTED_VIEWS} training and "
-                        f"{ATTEMPT_INTRINSIC_MIN_HOLDOUT_VIEWS} held-out views"
-                    )
-                manual = calibrate_intrinsic_profile(
-                    folder,
-                    training_detections,
-                    request_value["target"],
-                )
-                candidates.append(manual)
-                factory_evaluation = _intrinsic_holdout_evaluation(
-                    factory,
-                    holdout_detections,
-                    request_value["target"],
-                )
-                manual_evaluation = _intrinsic_holdout_evaluation(
-                    manual,
-                    holdout_detections,
-                    request_value["target"],
-                )
-                manual_plausibility = _manual_intrinsic_plausibility(
-                    factory,
-                    manual,
-                )
-            except IntrinsicCalibrationError as exc:
-                manual_failure = {
-                    "error_type": type(exc).__name__,
-                    "message": str(exc),
-                    "quality": exc.report,
-                }
-            except (cv2.error, ValueError, TypeError) as exc:
-                manual_failure = {
-                    "error_type": type(exc).__name__,
-                    "message": str(exc),
-                }
             if (
-                factory_evaluation is not None
-                and manual_evaluation is not None
-                and factory_evaluation.get("comparable")
-                and manual_evaluation.get("comparable")
+                comparison_split["heldout_usable_view_count"]
+                < ATTEMPT_INTRINSIC_MIN_HOLDOUT_VIEWS
+                or comparison_split["training_usable_view_count"]
+                < DEFAULT_MIN_ACCEPTED_VIEWS
             ):
-                factory_rms = float(factory_evaluation["rms_reprojection_error_px"])
-                manual_rms = float(manual_evaluation["rms_reprojection_error_px"])
-                absolute_improvement = factory_rms - manual_rms
-                relative_improvement = (
-                    absolute_improvement / factory_rms if factory_rms > 0.0 else 0.0
+                raise ValueError(
+                    "Intrinsic comparison requires at least "
+                    f"{DEFAULT_MIN_ACCEPTED_VIEWS} training and "
+                    f"{ATTEMPT_INTRINSIC_MIN_HOLDOUT_VIEWS} held-out views"
                 )
-                improvement = {
-                    "absolute_rms_reprojection_error_px": float(absolute_improvement),
-                    "relative_rms_reprojection_error": float(relative_improvement),
-                }
-            factory_projection_unavailable = not bool(
-                factory_projection["opencv_projection_compatible"]
+            manual = calibrate_intrinsic_profile(
+                folder,
+                training_detections,
+                request_value["target"],
             )
-            selection_gates = {
-                "manual_training_quality": bool(
-                    manual is not None
-                    and manual.get("quality", {}).get("status") == "accepted"
-                ),
-                "manual_parameter_plausibility": bool(
-                    manual_plausibility is not None
-                    and manual_plausibility.get("status") == "accepted"
-                ),
-                "manual_heldout_absolute_quality": bool(
-                    manual_evaluation is not None
-                    and manual_evaluation.get("status") == "accepted"
-                ),
-                "factory_heldout_comparable": bool(
-                    factory_evaluation is not None
-                    and factory_evaluation.get("comparable")
-                ),
-                "minimum_absolute_improvement": bool(
-                    improvement is not None
-                    and improvement["absolute_rms_reprojection_error_px"]
-                    >= ATTEMPT_INTRINSIC_MIN_ABSOLUTE_IMPROVEMENT_PX
-                ),
-                "minimum_relative_improvement": bool(
-                    improvement is not None
-                    and improvement["relative_rms_reprojection_error"]
-                    >= ATTEMPT_INTRINSIC_MIN_RELATIVE_IMPROVEMENT
-                ),
-                "factory_projection_unavailable": factory_projection_unavailable,
+            candidates.append(manual)
+            factory_evaluation = _intrinsic_holdout_evaluation(
+                factory,
+                holdout_detections,
+                request_value["target"],
+            )
+            manual_evaluation = _intrinsic_holdout_evaluation(
+                manual,
+                holdout_detections,
+                request_value["target"],
+            )
+            manual_plausibility = _manual_intrinsic_plausibility(
+                factory,
+                manual,
+            )
+        except IntrinsicCalibrationError as exc:
+            manual_failure = {
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+                "quality": exc.report,
             }
-            manual_proven = (
-                selection_gates["manual_training_quality"]
-                and selection_gates["manual_parameter_plausibility"]
-                and selection_gates["manual_heldout_absolute_quality"]
-                and factory_projection_unavailable
+        except (cv2.error, ValueError, TypeError) as exc:
+            manual_failure = {
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            }
+        if (
+            factory_evaluation is not None
+            and manual_evaluation is not None
+            and factory_evaluation.get("comparable")
+            and manual_evaluation.get("comparable")
+        ):
+            factory_rms = float(factory_evaluation["rms_reprojection_error_px"])
+            manual_rms = float(manual_evaluation["rms_reprojection_error_px"])
+            absolute_improvement = factory_rms - manual_rms
+            relative_improvement = (
+                absolute_improvement / factory_rms if factory_rms > 0.0 else 0.0
             )
-            if manual is not None and manual_proven:
-                selected = {
-                    **manual,
-                    "attempt_intrinsics_source": (
-                        "opencv_manual_factory_projection_unavailable"
-                    ),
-                }
-                selection_reason = (
-                    "manual_opencv_passed_training_heldout_and_plausibility_"
-                    "gates_while_factory_projection_was_unavailable"
-                )
-            else:
-                selected = {
-                    **factory,
-                    "attempt_intrinsics_source": (
-                        "factory_unusable_manual_not_accepted"
-                        if factory_projection_unavailable
-                        else "factory_compatible_default_comparison_only"
-                    ),
-                }
-                selection_reason = (
-                    (
-                        "factory_projection_unusable_and_manual_opencv_did_"
-                        "not_pass_all_activation_gates"
-                    )
-                    if factory_projection_unavailable
-                    else (
-                        "compatible_factory_intrinsics_retained_by_policy;_"
-                        "manual_opencv_result_is_comparison_only"
-                    )
-                )
+            improvement = {
+                "absolute_rms_reprojection_error_px": float(absolute_improvement),
+                "relative_rms_reprojection_error": float(relative_improvement),
+            }
+        factory_projection_unavailable = not bool(
+            factory_projection["opencv_projection_compatible"]
+        )
+        selection_gates = {
+            "manual_training_quality": bool(
+                manual is not None
+                and manual.get("quality", {}).get("status") == "accepted"
+            ),
+            "manual_parameter_plausibility": bool(
+                manual_plausibility is not None
+                and manual_plausibility.get("status") == "accepted"
+            ),
+            "manual_heldout_absolute_quality": bool(
+                manual_evaluation is not None
+                and manual_evaluation.get("status") == "accepted"
+            ),
+            "factory_heldout_comparable": bool(
+                factory_evaluation is not None
+                and factory_evaluation.get("comparable")
+            ),
+            "minimum_absolute_improvement": bool(
+                improvement is not None
+                and improvement["absolute_rms_reprojection_error_px"]
+                >= ATTEMPT_INTRINSIC_MIN_ABSOLUTE_IMPROVEMENT_PX
+            ),
+            "minimum_relative_improvement": bool(
+                improvement is not None
+                and improvement["relative_rms_reprojection_error"]
+                >= ATTEMPT_INTRINSIC_MIN_RELATIVE_IMPROVEMENT
+            ),
+            "factory_projection_unavailable": factory_projection_unavailable,
+        }
+        manual_proven = (
+            selection_gates["manual_training_quality"]
+            and selection_gates["manual_parameter_plausibility"]
+            and selection_gates["manual_heldout_absolute_quality"]
+            and factory_projection_unavailable
+        )
+        if manual is not None and manual_proven:
+            selected = {
+                **manual,
+                "attempt_intrinsics_source": (
+                    "opencv_manual_factory_projection_unavailable"
+                ),
+            }
+            selection_reason = (
+                "manual_opencv_passed_training_heldout_and_plausibility_"
+                "gates_while_factory_projection_was_unavailable"
+            )
         else:
-            try:
-                existing_profile = select_intrinsic_profile(
-                    existing,
-                    sensor_id=sensor_id,
-                    orientation=orientation,
-                    resolution=resolution,
+            selected = {
+                **factory,
+                "attempt_intrinsics_source": (
+                    "factory_unusable_manual_not_accepted"
+                    if factory_projection_unavailable
+                    else "factory_compatible_default_comparison_only"
+                ),
+            }
+            selection_reason = (
+                (
+                    "factory_projection_unusable_and_manual_opencv_did_"
+                    "not_pass_all_activation_gates"
                 )
-            except ValueError:
-                existing_profile = None
-            if existing_profile is not None:
-                existing_projection = _intrinsic_projection_evidence(existing_profile)
-                existing_candidate = {
-                    **existing_profile,
-                    "attempt_intrinsics_source": (
-                        "compatible_existing"
-                        if existing_projection["opencv_projection_compatible"]
-                        else "existing_projection_unusable"
-                    ),
-                }
-                candidates.append(existing_candidate)
-                if existing_projection["opencv_projection_compatible"]:
-                    selected = existing_candidate
-                    selection_reason = "exact_compatible_existing_profile"
-            if selected is None and factory_projection["opencv_projection_compatible"]:
-                selected = {
-                    **factory,
-                    "attempt_intrinsics_source": (
-                        "factory_capture_sidecars_existing_projection_unusable"
-                        if existing_profile is not None
-                        else "factory_capture_sidecars"
-                    ),
-                }
-                selection_reason = (
-                    "exact_existing_profile_projection_unusable;_"
-                    "compatible_factory_capture_sidecars_selected"
-                    if existing_profile is not None
-                    else "no_exact_compatible_existing_profile"
+                if factory_projection_unavailable
+                else (
+                    "compatible_factory_intrinsics_retained_by_policy;_"
+                    "manual_opencv_result_is_comparison_only"
                 )
-            elif selected is None:
-                selection_reason = (
-                    "exact_existing_and_factory_projections_are_unusable"
-                    if existing_profile is not None
-                    else "no_exact_existing_profile_and_factory_projection_is_unusable"
-                )
+            )
 
         selected_projection = (
             _intrinsic_projection_evidence(selected) if selected is not None else None
@@ -2343,7 +2305,6 @@ def _intrinsics_for_sensors(
             unusable_projection = {
                 "reason": "no_opencv_compatible_intrinsic_projection",
                 "factory": factory_projection,
-                "existing": existing_projection,
                 "selected": selected_projection,
             }
             unusable_sensor_keys.append(sensor_key)
@@ -2361,17 +2322,7 @@ def _intrinsics_for_sensors(
         selection_status = (
             "unusable"
             if unusable_projection is not None
-            else (
-                "manual_selected"
-                if manual_selected
-                else (
-                    "existing_selected"
-                    if selected is not None
-                    and selected.get("attempt_intrinsics_source")
-                    == "compatible_existing"
-                    else "factory_selected"
-                )
-            )
+            else "manual_selected" if manual_selected else "factory_selected"
         )
         comparisons["sensors"].append(
             {
@@ -2386,7 +2337,6 @@ def _intrinsics_for_sensors(
                 "selection_reason": selection_reason,
                 "factory_profile_id": factory["profile_id"],
                 "factory_projection": factory_projection,
-                "existing_projection": existing_projection,
                 "unusable_projection": unusable_projection,
                 "manual_profile_id": manual.get("profile_id") if manual else None,
                 "manual_failure": manual_failure,
@@ -2735,7 +2685,6 @@ def _prepare_attempt_data(
             "eye-in-hand policy" + (f": {', '.join(names)}" if names else "")
         )
     profiles, by_sensor = _intrinsics_for_sensors(
-        run_root,
         attempt_root,
         synchronized,
         request_value,
@@ -4699,22 +4648,25 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
     # cannot be joined to itself when an absolute sensor path is required.
     root = Path(run_root).resolve()
     attempt_root = calibration_attempt_root(root, attempt_id)
-    request_value = _read_json(attempt_root / REQUEST_FILE)
-    initial_progress = _read_json(attempt_root / PROGRESS_FILE)
-    _validate_attempt_identity(root, attempt_id, request_value, initial_progress)
-    _require_current_attempt_request(request_value)
-    if initial_progress.get("status") != "queued":
-        raise ValueError(
-            "Calibration attempts are immutable and may only be calculated once"
-        )
+    started = False
     try:
-        _update_progress(
-            attempt_root,
-            status="running",
-            phase="prepare_data",
-            phase_status="running",
-            message="Synchronizing the selected camera subset.",
-        )
+        with run_config_lock(root):
+            request_value = _read_json(attempt_root / REQUEST_FILE)
+            initial_progress = _read_json(attempt_root / PROGRESS_FILE)
+            _validate_attempt_identity(root, attempt_id, request_value, initial_progress)
+            _require_current_attempt_request(request_value)
+            if initial_progress.get("status") != "queued":
+                raise ValueError(
+                    "Calibration attempts are immutable and may only be calculated once"
+                )
+            started = True
+            _update_progress(
+                attempt_root,
+                status="running",
+                phase="prepare_data",
+                phase_status="running",
+                message="Synchronizing the selected camera subset.",
+            )
         robot_pose_artifacts = _verify_robot_pose_artifact_bindings(root, request_value)
         synchronized, intrinsics = _prepare_attempt_data(
             root,
@@ -4854,16 +4806,12 @@ def run_calibration_attempt(run_root: str | Path, attempt_id: str) -> dict[str, 
             ),
         )
         return ranking
-    except Exception as exc:
-        progress = _read_json(attempt_root / PROGRESS_FILE)
-        current = progress.get("current_phase")
-        _update_progress(
-            attempt_root,
-            status="failed",
-            phase=str(current) if current else None,
-            phase_status="failed" if current else None,
-            message=f"{type(exc).__name__}: {exc}",
-        )
+    except BaseException as exc:
+        if started:
+            _record_attempt_failure(
+                root, attempt_id, kind="calculation", stage="calculation",
+                message=f"{type(exc).__name__}: {exc}",
+            )
         raise
 
 
@@ -5243,10 +5191,17 @@ def _validate_promotion_motion_consistency(
         abs_tol=1e-9,
     )
     if candidate_is_zero:
+        # In the degraded fallback the folds may disagree while their aggregate
+        # optimum is 0 ms. The estimator reports that as a converted fold-check
+        # error and keeps the recorded timing; refusing it here would leave a
+        # completed "kept zero with warnings" attempt permanently unpromotable.
+        permitted_fold_statuses = (
+            {"not_needed"} if require_passing else {"not_needed", "error"}
+        )
         if (
             status != "kept_zero"
             or evidence is not None
-            or effective_check_status(fold_check) != "not_needed"
+            or effective_check_status(fold_check) not in permitted_fold_statuses
             or effective_check_status(consistency_check) != "not_needed"
         ):
             raise ValueError(
@@ -6172,6 +6127,8 @@ def create_promotion_request(
     replace_promoted_refinement: bool = False,
 ) -> dict[str, Any]:
     with run_config_lock(run_root) as locked_root:
+        recover_promotion_transaction(locked_root)
+        clear_promotion_staging(locked_root)
         return _create_promotion_request_locked(
             locked_root,
             attempt_id,
@@ -6197,6 +6154,15 @@ def _create_promotion_request_locked(
     if attempt["progress"].get("status") != "complete":
         raise ValueError("Calibration attempt is not complete")
     prior_promotion = attempt.get("promotion")
+    if (
+        isinstance(prior_promotion, Mapping)
+        and prior_promotion.get("status") in ACTIVE_ATTEMPT_STATES
+        and not prior_promotion.get("job_id")
+    ):
+        prior_promotion = _fail_promotion(
+            root, calibration_attempt_root(root, attempt_id), dict(prior_promotion),
+            "Superseded promotion request without a live job.",
+        )
     replacing = (
         replace_promoted_refinement
         and reprojection_refinement_id is not None
@@ -6288,10 +6254,11 @@ def _create_promotion_request_locked(
             shutil.copy2(source, destination)
             history.append(_binding(root, destination))
         value["previous_promotion"] = history
-    atomic_write_json(attempt_root / PROMOTION_REQUEST_FILE, value)
-    atomic_write_json(
-        attempt_root / PROMOTION_FILE,
-        {
+    staging = root / f".calibration-promotion-{attempt_id}-{uuid.uuid4().hex}"
+    staging.mkdir()
+    try:
+        atomic_write_json(staging / PROMOTION_REQUEST_FILE, value)
+        atomic_write_json(staging / PROMOTION_FILE, {
             "schema_version": PROMOTION_SCHEMA_VERSION,
             "attempt_id": attempt_id,
             "status": "queued",
@@ -6313,13 +6280,38 @@ def _create_promotion_request_locked(
             **(
                 {"previous_promotion": value["previous_promotion"]} if replacing else {}
             ),
-        },
-    )
+        })
+        _transactional_replace(root, [
+            (staging / name, attempt_root / name)
+            for name in (PROMOTION_REQUEST_FILE, PROMOTION_FILE)
+        ])
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     return value
 
 
 def _profile_slot(profile: CalibrationProfile) -> tuple[str, str]:
     return profile.sensor_type.value, profile.sensor_id
+
+
+def _capture_interval(root: Path, sensor: Mapping[str, Any]) -> dict[str, str]:
+    folder = root / str(sensor["folder"])
+    if not _is_contained(folder, root):
+        raise ValueError("Calibration capture evidence escapes the run root")
+    frames = load_frame_metadata(folder)
+    if not frames or any(
+        item["sensor_id"] != sensor["device_id"]
+        or item["sensor_type"] != sensor["sensor_type"]
+        for item in frames
+    ):
+        raise ValueError("Calibration capture evidence does not match the selected camera")
+    timestamps = [item["host_wall_timestamp_ns"] for item in frames]
+
+    def timestamp(ns: int) -> str:
+        seconds, fraction = divmod(ns, 1_000_000_000)
+        return (datetime.fromtimestamp(seconds, UTC) + timedelta(microseconds=fraction // 1000)).isoformat()
+
+    return {"first_frame_at": timestamp(min(timestamps)), "last_frame_at": timestamp(max(timestamps))}
 
 
 def _validate_promotion_request_identity(
@@ -6699,6 +6691,7 @@ def _selected_profiles(
         str(profile.metadata.get("candidate_id")): profile for profile in profiles
     }
     timestamp = utc_now_iso()
+    captured_sensors = {item["sensor_key"]: item for item in request_value["sensors"]}
     selected = []
     for sensor_key, candidate_id in promotion_request["selections"].items():
         profile = by_candidate.get(str(candidate_id))
@@ -6845,11 +6838,13 @@ def _selected_profiles(
                 "promoted_by": promotion_request.get("operator"),
             }
         )
+        capture_interval = _capture_interval(attempt_root.parents[2], captured_sensors[sensor_key])
+        metadata["capture_interval"] = capture_interval
         selected.append(
             replace(
                 profile,
                 status=CalibrationStatus.VALID,
-                calibrated_at=timestamp,
+                calibrated_at=capture_interval["last_frame_at"],
                 operator=promotion_request.get("operator") or profile.operator,
                 metadata=metadata,
             )
@@ -6872,85 +6867,92 @@ def _selected_profiles(
     return selected
 
 
-def _transactional_replace(
-    run_root: Path,
-    promotions: Sequence[tuple[Path, Path]],
-) -> None:
-    backup_root = run_root / f".calibration-promotion-backup-{uuid.uuid4().hex}"
-    backup_root.mkdir(parents=False, exist_ok=False)
-    installed: list[Path] = []
-    backups: list[tuple[Path, Path]] = []
-    try:
-        for index, (source, destination) in enumerate(promotions):
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if destination.exists():
-                backup = backup_root / str(index)
-                backups.append((backup, destination))
-                os.replace(destination, backup)
-            # Record intent before rename so an asynchronous interruption after
-            # the rename cannot leave an untracked original in the backup tree.
-            installed.append(destination)
-            os.replace(source, destination)
-    except BaseException:
+def _fail_promotion(
+    root: Path, attempt_root: Path, current: dict[str, Any], message: str,
+) -> dict[str, Any]:
+    failure = {**current, "status": "failed", "ended_at": utc_now_iso(), "error": message}
+    history = current.get("previous_promotion")
+    if history is not None:
+        from posetestbot.calibration.reprojection_refinement import _binding
+
         try:
-            for destination in reversed(installed):
-                if destination.is_dir():
-                    shutil.rmtree(destination)
-                elif destination.exists():
-                    destination.unlink()
-            for backup, destination in reversed(backups):
-                if backup.exists():
-                    os.replace(backup, destination)
-        except BaseException as recovery_error:
-            raise RuntimeError(
-                "Calibration promotion rollback failed; retained originals at "
-                f"{backup_root}"
-            ) from recovery_error
-        shutil.rmtree(backup_root)
-        raise
-    else:
-        shutil.rmtree(backup_root)
+            saved = {}
+            for name in (PROMOTION_REQUEST_FILE, PROMOTION_FILE):
+                matches = [item for item in history if Path(item["path"]).name == name]
+                if len(matches) != 1:
+                    raise ValueError("Prior promotion pointer is missing")
+                path = root / matches[0]["path"]
+                if (
+                    not path.resolve().is_relative_to(attempt_root / "promotion_history")
+                    or _binding(root, path) != matches[0]
+                ):
+                    raise ValueError("Prior promotion pointer changed")
+                saved[name] = path
+            restored = _read_json(saved[PROMOTION_FILE])
+            if restored.get("status") != "promoted" or restored.get("attempt_id") != attempt_root.name:
+                raise ValueError("Prior promotion pointer is invalid")
+            restored["last_replacement_failure"] = failure
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            failure["error"] += f" Prior promotion could not be restored: {exc}"
+        else:
+            staging = root / f".calibration-promotion-{attempt_root.name}-{uuid.uuid4().hex}"
+            staging.mkdir()
+            try:
+                atomic_write_bytes(staging / PROMOTION_REQUEST_FILE, saved[PROMOTION_REQUEST_FILE].read_bytes())
+                atomic_write_json(staging / PROMOTION_FILE, restored)
+                _transactional_replace(root, [
+                    (staging / name, attempt_root / name)
+                    for name in (PROMOTION_REQUEST_FILE, PROMOTION_FILE)
+                ])
+            finally:
+                shutil.rmtree(staging, ignore_errors=True)
+            return restored
+    atomic_write_json(attempt_root / PROMOTION_FILE, failure)
+    return failure
 
 
 def promote_calibration_attempt(
-    run_root: str | Path, attempt_id: str
+    run_root: str | Path, attempt_id: str, *, requested_at: str | None = None,
 ) -> dict[str, Any]:
     root = Path(run_root).resolve()
     with run_config_lock(root):
-        return _promote_calibration_attempt_locked(root, attempt_id)
+        recover_promotion_transaction(root)
+        clear_promotion_staging(root)
+        return _promote_calibration_attempt_locked(root, attempt_id, requested_at=requested_at)
 
 
 def _promote_calibration_attempt_locked(
-    run_root: str | Path, attempt_id: str
+    run_root: str | Path, attempt_id: str, *, requested_at: str | None = None,
 ) -> dict[str, Any]:
     root = Path(run_root)
     attempt_root = calibration_attempt_root(root, attempt_id)
-    attempt = load_calibration_attempt(root, attempt_id)
-    request_value = attempt["request"]
-    _require_current_attempt_request(request_value)
-    if request_value.get("mode") == "eye_to_hand":
-        reference_evidence = request_value.get("robot_pose_reference")
-        if not isinstance(reference_evidence, Mapping):
-            raise ValueError(
-                "Static calibration promotion requires robot-pose reference "
-                "evidence from the immutable attempt request"
-            )
-        _require_static_pose_template_base_reference(root, reference_evidence)
-    _verify_robot_pose_artifact_bindings(root, request_value)
-    promotion_request = _read_json(attempt_root / PROMOTION_REQUEST_FILE)
     promotion_path = attempt_root / PROMOTION_FILE
-    current = _read_json(promotion_path)
-    _validate_promotion_request_identity(
-        root,
-        attempt_id,
-        promotion_request,
-        current,
-    )
-    current.update({"status": "running", "started_at": utc_now_iso()})
-    atomic_write_json(promotion_path, current)
     staging = root / f".calibration-promotion-{attempt_id}-{uuid.uuid4().hex}"
-    staging.mkdir(parents=False, exist_ok=False)
+    if not promotion_path.is_file():
+        _require_current_attempt_request(_read_json(attempt_root / REQUEST_FILE))
+    current = _read_json(promotion_path)
+    if current.get("status") != "queued" or (
+        requested_at is not None and current.get("requested_at") != requested_at
+    ):
+        raise ValueError("Calibration promotion request is no longer queued")
     try:
+        attempt = load_calibration_attempt(root, attempt_id)
+        request_value = attempt["request"]
+        _require_current_attempt_request(request_value)
+        if request_value.get("mode") == "eye_to_hand":
+            reference_evidence = request_value.get("robot_pose_reference")
+            if not isinstance(reference_evidence, Mapping):
+                raise ValueError(
+                    "Static calibration promotion requires robot-pose reference "
+                    "evidence from the immutable attempt request"
+                )
+            _require_static_pose_template_base_reference(root, reference_evidence)
+        _verify_robot_pose_artifact_bindings(root, request_value)
+        promotion_request = _read_json(attempt_root / PROMOTION_REQUEST_FILE)
+        _validate_promotion_request_identity(root, attempt_id, promotion_request, current)
+        current.update(status="running", started_at=utc_now_iso())
+        atomic_write_json(promotion_path, current)
+        staging.mkdir()
         current_config = load_run_config_for_run_root(root)
         requested_target = request_value.get("target_bundle", {}).get("selection")
         try:
@@ -7001,12 +7003,26 @@ def _promote_calibration_attempt_locked(
             if existing_intrinsics_path.is_file()
             else []
         )
-        selected_sensor_ids = {profile.sensor_id for profile in selected_profiles}
-        promoted_intrinsics = [
-            item
-            for item in attempt_intrinsics
-            if str(item.get("sensor_id")) in selected_sensor_ids
-        ]
+        configured_sensors = {
+            (sensor["sensor_type"], sensor["device_id"]): sensor
+            for sensor in current_config["capture"]["sensors"] if sensor.get("enabled", True)
+        }
+        promoted_intrinsics = []
+        for profile in selected_profiles:
+            sensor = configured_sensors.get(_profile_slot(profile))
+            if sensor is None:
+                raise ValueError(f"Candidate {profile.profile_id} camera is no longer enabled in the run configuration")
+            orientation = "inverted" if sensor.get("inverted") is True else "normal"
+            matching_intrinsics = [
+                item for item in attempt_intrinsics
+                if item.get("profile_id") == profile.metadata.get("intrinsic_profile_id")
+                and item.get("sensor_id") == profile.sensor_id
+                and tuple(item["resolution"]) == (profile.intrinsics.width, profile.intrinsics.height)
+                and item.get("orientation") == orientation
+            ]
+            if len(matching_intrinsics) != 1:
+                raise ValueError(f"Candidate {profile.profile_id} has no unique matching intrinsic profile")
+            promoted_intrinsics.extend(matching_intrinsics)
         promoted_intrinsic_keys = {
             (
                 str(item["sensor_id"]),
@@ -7092,7 +7108,6 @@ def _promote_calibration_attempt_locked(
                 root / LIBRARY_DIRECTORY / str(request_value["target_id"]),
             )
         )
-        _transactional_replace(root, promotions)
         promoted = {
             "schema_version": PROMOTION_SCHEMA_VERSION,
             "attempt_id": attempt_id,
@@ -7122,19 +7137,22 @@ def _promote_calibration_attempt_locked(
             "preserved_profile_ids": [profile.profile_id for profile in preserved],
             "canonical_artifacts": sorted(canonical_artifacts),
         }
+        atomic_write_json(staging / PROMOTION_FILE, promoted)
+        promotions.append((staging / PROMOTION_FILE, promotion_path))
+        _transactional_replace(root, promotions)
+        from posetestbot.calibration.retained_library import retain_run_calibration
+
+        try:
+            retained = retain_run_calibration(root, reason="promotion")
+            promoted["library_retention"] = {"status": "retained", "bundle_sha256": retained["bundle_sha256"]}
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            promoted["library_retention"] = {"status": "failed", "error": str(exc)}
         atomic_write_json(promotion_path, promoted)
         return promoted
-    except Exception as exc:
-        failed = _read_json(promotion_path)
-        failed.update(
-            {
-                "status": "failed",
-                "ended_at": utc_now_iso(),
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        )
-        atomic_write_json(promotion_path, failed)
+    except BaseException as exc:
+        recover_promotion_transaction(root)
+        if _read_json(promotion_path).get("status") != "promoted":
+            _fail_promotion(root, attempt_root, current, f"{type(exc).__name__}: {exc}")
         raise
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+        shutil.rmtree(staging, ignore_errors=True)

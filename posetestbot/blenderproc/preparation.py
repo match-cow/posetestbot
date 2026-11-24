@@ -18,6 +18,7 @@ from pytransform3d import rotations as pr
 from pytransform3d import transformations as pt
 from pytransform3d.transform_manager import TransformManager
 
+from posetestbot.calibration.rectification import sensor_input_projection
 from posetestbot.io.atomic import atomic_write_json, replace_directories
 from posetestbot.io.artifacts import (
     CAM_K,
@@ -25,6 +26,7 @@ from posetestbot.io.artifacts import (
     MATCH_ROBOT_EE_POSES,
     RGB_DIR,
 )
+from posetestbot.pipeline.derived_work import sweep_staging
 
 SAFE_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 ANNOTATION_MODES = frozenset({"pose", "pose_and_masks"})
@@ -190,6 +192,7 @@ def _input_frame_contract(
     robot_pose_records: Sequence[tuple[str, int, Mapping[str, object]]],
     *,
     annotation_mode: str,
+    projection: str,
 ) -> tuple[dict[str, object], tuple[int, int]]:
     """Bind camera poses to exact RGB-D frame names and their real dimensions."""
 
@@ -274,11 +277,7 @@ def _input_frame_contract(
         {
             "schema_version": "blenderproc_frame_contract.v1",
             "annotation_mode": annotation_mode,
-            "projection": (
-                "rectified"
-                if (sensor_folder / "rectification_provenance.json").is_file()
-                else "native"
-            ),
+            "projection": projection,
             "resolution": {"width": resolution[0], "height": resolution[1]},
             "source_artifact_sha256": {
                 MATCH_ROBOT_EE_POSES: hashlib.sha256(
@@ -333,12 +332,14 @@ def _prepare_sensor(
     run_root: Path | None = None,
     annotation_mode: str,
 ) -> PreparedSensor:
-    camera_matrix, distortion = read_camera_parameters(sensor_folder)
+    projection = sensor_input_projection(sensor_folder, run_root=run_root)
+    camera_matrix, _ = read_camera_parameters(sensor_folder)
     robot_pose_records = _ordered_robot_poses(sensor_folder)
     frame_contract, resolution = _input_frame_contract(
         sensor_folder,
         robot_pose_records,
         annotation_mode=annotation_mode,
+        projection=projection,
     )
     robot_poses = [pose for _filename, _frame_id, pose in robot_pose_records]
     camera_poses = _camera_poses(robot_poses, camera_transform)
@@ -408,7 +409,6 @@ def _prepare_sensor(
             },
         )
     np.save(staging / "camera_matrix.npy", camera_matrix)
-    np.save(staging / "dist_coefficients.npy", distortion)
     np.save(staging / "camera_poses.npy", camera_poses)
     atomic_write_json(staging / FRAME_CONTRACT, frame_contract)
     if np.load(staging / "camera_poses.npy").shape != (len(robot_poses), 4, 4):
@@ -458,6 +458,7 @@ def prepare_sensor_folders(
     try:
         for sensor_folder in sensors:
             destination = sensor_folder / subdir
+            sweep_staging(sensor_folder, subdir, "staging")
             staging = sensor_folder / f".{subdir}.{uuid.uuid4().hex}.staging"
             staged.append((staging, destination))
             prepared.append(
@@ -473,7 +474,7 @@ def prepare_sensor_folders(
                 )
             )
         replace_directories(staged)
-    except Exception:
+    except BaseException:
         for staging, _destination in staged:
             shutil.rmtree(staging, ignore_errors=True)
         raise

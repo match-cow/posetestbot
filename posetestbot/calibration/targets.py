@@ -10,12 +10,10 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from posetestbot.io.atomic import atomic_write_json
 
 
 SCHEMA_VERSION = "calibration_target.v3"
 POSEGRIDGEN_SCHEMA_VERSION = "2.0"
-SUPPORTED_TARGET_TYPES = ("aruco_grid",)
 SUPPORTED_ARUCO_DICTIONARIES = frozenset(
     [
         *(
@@ -519,9 +517,7 @@ def load_calibration_target_spec(path: str | Path) -> dict[str, Any]:
     return normalize_calibration_target_spec(value)
 
 
-def write_calibration_target(target: Mapping[str, Any], path: str | Path) -> Path:
-    normalized = normalize_calibration_target_spec(target)
-    return atomic_write_json(Path(path), normalized)
+
 
 
 def opencv_grid_board(target: Mapping[str, Any]):

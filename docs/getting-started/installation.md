@@ -5,6 +5,12 @@ the existing NumPy, SciPy, pytransform3d, and trimesh dependencies; no additiona
 IPD runtime is installed. The installer smoke-checks its module, and the shared
 BOP evaluation job requires the pinned official toolkit.
 
+**Inspect → Depth Evaluation** instead uses pinned BlenderProc 2.8.0 and its
+Blender installation for CPU geometric references. Provision these with
+`bash scripts/install.sh --with-blenderproc` before starting studies. Depth-only
+evaluation uses existing NumPy/OpenCV/Pillow/Matplotlib dependencies and needs
+neither BOP Toolkit nor result CSVs. See [depth quality](../concepts/depth-evaluation.md).
+
 Start here to install PoseTestBot, launch the console, and enable MP4 downloads.
 Run the commands below from the repository root. These setup commands do not
 command the robot or start physical capture. Optional camera SDKs, BlenderProc,
@@ -65,6 +71,12 @@ POSETESTBOT_WEB_HOST=127.0.0.1 uv run posetestbot-web
 
 Open <http://127.0.0.1:5000/>. The default port is `5000`.
 
+To display a calibration age advisory, set
+`POSETESTBOT_CALIBRATION_AGE_WARNING_DAYS` to the lab's threshold in whole days
+in the backend environment. The warning uses the per-camera capture date and
+leaves the profile selectable. See [the retained calibration library](../reference/api/calibration.md#sources-and-the-retained-library)
+for backup and restore.
+
 ## Pose Results MP4 exports
 
 **Inspect → Pose Results → Create & download MP4** requires FFmpeg with the
@@ -78,7 +90,9 @@ bash scripts/install.sh --check-only
 
 The system-package step uses `sudo` and installs the project's lab prerequisites,
 including `ffmpeg` and `ffprobe`. The check reports whether `libx264` is available.
-Return to Pose Results after installation to enable MP4 exports.
+Return to Pose Results or **Depth Evaluation → Results & videos → Videos**
+after installation to enable MP4 exports. Depth quality videos reuse completed
+study media and require no new rendering runtime.
 
 Missing FFmpeg disables MP4 with a visible explanation. **Download images (.zip)**
 works with the project's Python environment. This optional renderer does not

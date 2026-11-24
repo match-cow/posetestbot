@@ -4,13 +4,18 @@ These notes are for Codex and other coding agents working in this repository.
 PoseTestBot is now acquisition-first: capture, calibration, synchronization,
 optional GT/mask generation, and BOP dataset export are the repo boundary.
 Downstream pose-estimator execution and BOP result conversion belong in a
-separate consumer repo. The sole evaluation exception is the **Inspect** page's
+separate consumer repo. One evaluation exception is the **Inspect** page's
 run-scoped dataset-validation path: it consumes an already exported,
 annotation-bearing BOP dataset plus an immutable standard BOP19 result CSV (or
 a deterministic test-only GT perturbation), invokes the pinned official BOP
 Toolkit, adds IPD robot consistency from hash-bound recorded robot/calibration
 evidence, and writes derived evidence only below `processed/bop_evaluation/`.
-It is not an estimator, converter, or acquisition stage.
+Inspect also owns depth-quality studies of completed pose-bearing BOP exports:
+pinned BlenderProc 2.8.0 CPU reference rendering, reference-defined depth
+metrics, and comparisons by frozen canonical geometry and common
+distance/incidence bins. It needs no result CSV or BOP19 visibility data.
+Both paths write only below `processed/bop_evaluation/` and are never
+estimators, converters, or acquisition stages.
 The separate `match-cow/posetestbot-cluster` companion may own SSH transfer,
 durable SLURM orchestration, an estimator-driver registry with pinned runtimes
 (FoundationPose first), and canonical BOP19 CSV generation. PoseTestBot may
@@ -68,6 +73,11 @@ arguments must never enter this repository or a browser response.
 - During repeated calibration, never send the iiwa UDP `STOP` command. It
   cannot interrupt active motion and exits the waiting calibration program,
   requiring a manual Sunrise application restart.
+- A worker that records a terminal state on cancellation must install its
+  handler with `posetestbot.jobs.cancellation.raise_on_first_cancel_signal`.
+  `LocalJobRunner` signals the whole process group and `uv run` forwards the
+  same signal, so a handler that raises on every delivery interrupts its own
+  terminal-state write.
 - Do not add blocking request handlers for long-running or hardware-touching
   work. Queue them through `posetestbot.jobs.runner.LocalJobRunner` and declare
   resources.
@@ -127,6 +137,11 @@ arguments must never enter this repository or a browser response.
   must not be presented as hardware readiness: use labels such as
   `configured`, `connected`, `verified`, and `ready` only for their actual
   contracts.
+- Do not preselect a consequential outcome. A choice that changes what a run
+  produces or what a destructive action keeps (the BOP annotation outcome,
+  keeping a calibration when its run is deleted, a measured placement) starts
+  blank, shows a visible "required" reason, and disables its action until the
+  operator chooses. Auto-select only when exactly one option exists.
 - Keep required instructions and disabled-action reasons visible near the
   affected control. Use `HelpTip` for supplemental definitions and technical
   context, not as the only location for prerequisites, safety state, or the
@@ -216,11 +231,29 @@ Do not expand the Inspect-only exception into downstream behavior:
   SSH/SLURM wrappers in PoseTestBot. The typed external-controller client is
   the only estimator-orchestration boundary.
 - No BOP19 result CSV conversion stage.
-- No general evaluator bridge or evaluation stage beyond the
-  run-scoped official BOP19 and IPD robot-consistency metrics described above.
+- No general evaluator bridge or evaluation stage beyond the run-scoped
+  official BOP19, IPD robot-consistency, and Inspect depth metrics described above.
 - No accuracy or metric-report export stage outside the Inspect adapter.
 
 ## Important Artifacts
+
+Inspect depth studies use `posetestbot.bop.depth_evaluation`, `.depth_sources`,
+`.depth_metrics`, and `scripts/blenderproc_depth_reference.py`. Render all known
+objects together with opaque geometry and flat normals. Eligibility must never
+depend on measured depth or visible masks. Queue cancelable CPU/disk jobs;
+freeze sources and reject changes before atomic publication below
+`processed/bop_evaluation/depth/{evaluations,comparisons}/<id>/`. Immutable
+`request.json`, `progress.json`, and job identity remain outside `complete/`.
+Only atomically published `complete/` provides reports, exact metrics, numeric
+maps, frame media, research ZIP, and hash manifests. Failed/canceled `.work/`
+trees remain diagnostic evidence, never downloads.
+
+Depth quality MP4s reuse completed study publications through
+`posetestbot.bop.depth_videos` and `scripts/run_depth_video.py`. Freeze one
+camera/input series, source publication/media hashes and encoding settings;
+queue cancelable CPU/disk jobs below `processed/bop_evaluation/depth/videos/`.
+Publish the hash-bound MP4 and manifest atomically in `complete/`, never mutate
+the source study or research ZIP. FFmpeg/libx264 is optional for these exports.
 
 - Raw robot pose artifact: `raw_robot_ee_poses.json`.
 - Optional derived robot-pose cadence evidence:
@@ -249,6 +282,19 @@ Do not expand the Inspect-only exception into downstream behavior:
   selection manifest binds their hashes, every source bundle, and the
   per-sensor profile mapping so a later source-run change cannot alter the
   dataset run. Only `calibration_profile_selection.v2` is accepted.
+- A promoted calibration lives at its calibration run root. The retained
+  calibration library `working_data/calibration_library/<bundle_sha256>/`
+  (`posetestbot.calibration.retained_library`) holds content-addressed copies
+  of both profile collections plus `retained_calibration.json`
+  (`retained_calibration.v1`) so a calibration stays selectable after its run
+  folder is deleted. Entries are read-only, verified against their directory
+  name on every read, and never rewritten; a damaged entry is reported as
+  unusable, never offered. Publishing a calibration also retains a library
+  copy and reports copy failures in the promotion evidence. Deleting a run
+  that publishes calibration or holds its last verified snapshot requires an
+  explicit `retain_calibration` decision. A requested library copy must be
+  durable before anything is removed. A dataset run keeps its own snapshot
+  if a library entry is deleted.
 - Intent-level calibration attempts live under
   `processed/calibration/<attempt_id>/` and retain `request.json`,
   `progress.json`, `intrinsic_comparison.json`, `time_offset_search.json`,

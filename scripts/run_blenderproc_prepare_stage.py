@@ -7,6 +7,8 @@ import argparse
 from collections.abc import Mapping
 from pathlib import Path
 
+from posetestbot.jobs.cancellation import raise_on_first_cancel_signal
+from posetestbot.pipeline.derived_work import derived_stage_lock
 from posetestbot.blenderproc.preparation import (
     load_camera_transformations,
     prepare_sensor_folders,
@@ -66,8 +68,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--camera-transformations",
-        default="scripts/default_data/camera_ee_transform.json",
-        help="Camera transform JSON used by BlenderProc preparation.",
+        default=None,
+        help=(
+            "Camera transform JSON keyed by synchronized sensor folder name. "
+            "Required unless --calibration-profiles is supplied."
+        ),
     )
     parser.add_argument(
         "--calibration-profiles",
@@ -200,12 +205,16 @@ def run_prepare(
 
 def main() -> None:
     args = parse_args()
+    with derived_stage_lock(Path(args.run_root), "blenderproc-prepare"):
+        _run(args)
+
+
+def _run(args: argparse.Namespace) -> None:
     run_root = Path(args.run_root)
     input_folder = synchronized_input_folder(run_root, args.input_folder)
     sensor_names = (
         enabled_sensor_folder_names(run_root) if args.input_folder is None else None
     )
-    camera_transformations_path = Path(args.camera_transformations)
     calibration_profiles = (
         _run_input_path(run_root, args.calibration_profiles)
         if args.calibration_profiles
@@ -263,9 +272,14 @@ def main() -> None:
                 run_config=run_config,
             )
             stage_artifacts[CALIBRATION_PROFILES] = calibration_profiles
-        else:
+        elif args.camera_transformations:
             camera_transformations = dict(
-                load_camera_transformations(camera_transformations_path)
+                load_camera_transformations(Path(args.camera_transformations))
+            )
+        else:
+            raise ValueError(
+                "Pass --calibration-profiles or an explicit "
+                "--camera-transformations file; there is no built-in transform"
             )
 
         prepared_artifacts = run_prepare(
@@ -282,11 +296,11 @@ def main() -> None:
                 derived_camera_transform_path(run_root), camera_transformations
             )
             stage_artifacts[DERIVED_CAMERA_EE_TRANSFORM] = transform_path
-    except Exception as exc:
+    except BaseException as exc:
         upsert_stage(
             manifest,
             name="blenderproc_prepare",
-            status="failed",
+            status="canceled" if isinstance(exc, (KeyboardInterrupt, InterruptedError)) else "failed",
             message=str(exc),
         )
         write_run_manifest(manifest, run_root)
@@ -306,4 +320,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    raise_on_first_cancel_signal(KeyboardInterrupt("Derived job canceled"))
     main()

@@ -132,10 +132,13 @@ def calibration_target_preview():
 @calibration_targets_bp.get("/calibration-targets/bundles")
 def calibration_target_bundles():
     run_root = request.args.get("run_root") or None
-    bundles = list_target_bundles(
-        library_root=default_target_library_root(), run_root=run_root
-    )
-    blockers = replacement_blockers(run_root) if run_root else []
+    try:
+        bundles = list_target_bundles(
+            library_root=default_target_library_root(), run_root=run_root
+        )
+        blockers = replacement_blockers(run_root) if run_root else []
+    except (OSError, ValueError) as exc:
+        return jsonify({"output": str(exc)}), 400
     return jsonify(
         {
             "schema_version": "calibration_target_library.v1",
