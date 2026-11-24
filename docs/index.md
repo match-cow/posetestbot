@@ -7,6 +7,9 @@ ready-to-use [BOP](https://bop.felk.cvut.cz/) dataset. You can then run a pose
 estimator on that dataset and measure its accuracy, all from one web page,
 the **operator console**.
 
+The main camera is currently the **Intel RealSense D435**. The console also
+supports other RGB-D cameras, but this guide assumes RealSense D435 cameras.
+
 This documentation is written for students and researchers who *use* the
 console for a project. You do not need to read the code or the API to get
 your data.

@@ -68,9 +68,8 @@ evidence.
 
 ## Current hardware profile
 
-- 3 Intel RealSense D435-class cameras
-- 1 Luxonis OAK-D Pro
-- 1 Stereolabs ZED 2i
+- RGB-D cameras: Intel RealSense D435 is the current main camera. Adapters
+  for the Luxonis OAK-D Pro and Stereolabs ZED 2i are also supported.
 - KUKA LBR iiwa at `172.31.1.147:30300`
 - lab receiver at `172.31.1.169`
 

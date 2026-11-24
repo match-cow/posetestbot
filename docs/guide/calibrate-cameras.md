@@ -76,8 +76,9 @@ Watch the cell the entire time. When it finishes, continue to step 5.
 
 1. Under **Auto time alignment**, keep **Estimate robot-pose time offset
    (recommended)** unless your supervisor tells you otherwise.
-2. Click **Analyze recording · estimate time offset**. A three-camera analysis
-   usually takes 10–20 minutes and continues in the background.
+2. Click **Analyze recording · estimate time offset**. The analysis usually
+   takes 10–20 minutes, longer with more cameras, and continues in the
+   background.
 3. Review the results for each camera: reprojection error, lens model
    decision, time offset, and any quality warnings.
 4. Click **Publish selected camera calibrations**.

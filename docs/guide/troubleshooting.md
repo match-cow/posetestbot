@@ -13,8 +13,8 @@ When something does not work, check these three places first:
 ## Cameras
 
 **A camera is missing on the Dashboard or Devices page.**
-Check its USB cable and click **Refresh discovery** on **Devices**. USB 3 ports
-and cables are required for the RealSense cameras.
+Check its USB cable and click **Refresh discovery** on **Devices**. RealSense D435
+cameras need USB 3 ports and cables.
 
 **Readiness says a camera is blocked although it is listed.**
 Another process holds the camera: a preview on **Devices**, a still-running

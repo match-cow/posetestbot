@@ -40,8 +40,9 @@ static calibration](IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md), and
 
 ## 2. Camera-service acceptance
 
-- On the operator-ready host, exercise the room monitor, all three RealSense
-  cameras, the OAK-D Pro, and the ZED 2i through the console.
+- On the operator-ready host, exercise the room monitor and every configured
+  camera (RealSense D435, plus any OAK-D Pro or ZED 2i in use) through the
+  console.
 - Confirm the fixed UGREEN room-monitor view is upright after its 180° stream
   correction.
 - Verify previews and RGB/depth snapshots from each selected device through
@@ -54,9 +55,9 @@ static calibration](IIWA_SINGLE_FRAME_STATIC_CAMERA_CALIBRATION.md), and
   failures or blocks, and check the five-second stalled-frame path and worker
   shutdown against that result.
 
-## 3. Five-sensor capture
+## 3. Multi-sensor capture
 
-- Verify the ZED SDK and all five configured sensors with the read-only status
+- Verify the ZED SDK and every configured sensor with the read-only status
   commands, then create a fresh `run_config.v4` dataset run.
 - Run `uv run python scripts/plan_capture.py <run> --json` and review the fixed
   plan and preflight evidence.
