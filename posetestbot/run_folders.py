@@ -11,14 +11,22 @@ import shutil
 import stat
 import sys
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from posetestbot.calibration.retained_library import (
+    calibration_library_lock,
+    retain_run_calibration,
+    retain_run_snapshot,
+    run_calibration_retention_targets,
+    run_has_promoted_calibration,
+)
 from posetestbot.io.artifacts import (
     BOP_DIR,
     BOP_EXPORT_MANIFEST,
+    CALIBRATION_PROFILE_SELECTION,
     CALIBRATION_PROFILES,
     CAPTURE_EXECUTION_LOGS_DIR,
     CAPTURE_EXECUTION_REPORT,
@@ -307,11 +315,18 @@ def run_folder_transaction_fingerprint(
         if not _real_directory(root):
             digest.update(b"missing\n")
             continue
-        candidates = sorted(root.iterdir(), key=lambda item: item.name)
+        try:
+            candidates = sorted(root.iterdir(), key=lambda item: item.name)
+        except OSError:
+            digest.update(b"unavailable\n")
+            continue
         for candidate in candidates:
             if TRANSACTION_PATTERN.fullmatch(candidate.name) is None:
                 continue
-            metadata = candidate.lstat()
+            try:
+                metadata = candidate.lstat()
+            except FileNotFoundError:
+                continue
             encoded_name = candidate.name.encode(
                 "utf-8",
                 errors="surrogateescape",
@@ -750,9 +765,11 @@ def build_run_folder_inventory(
     roots = _normalized_roots(allowed_roots)
     root_identities = run_root_identity_snapshot(roots)
     runs = []
-    for storage_root, run in discover_run_folders(roots):
+    discovered = discover_run_folders(roots)
+    retention = run_calibration_retention_targets([run for _, run in discovered])
+    for storage_root, run in discovered:
         try:
-            runs.append(inspect_run_folder(storage_root, run))
+            runs.append({**inspect_run_folder(storage_root, run), "calibration_retention": retention.get(run.as_posix())})
         except (OSError, ValueError):
             # A run may be relocated or removed between discovery and scan.
             # Never follow its replacement, and let the next refresh discover
@@ -928,7 +945,7 @@ def _quarantine_run(
     run: Path,
     *,
     expected_identity: Mapping[str, Any],
-    quarantine: Path | None = None,
+    quarantine: Path,
 ) -> Path:
     """Atomically isolate a run, then prove the renamed inode is the selected one."""
 
@@ -938,9 +955,6 @@ def _quarantine_run(
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(run, flags)
-    quarantine = quarantine or (
-        run.parent / f"{MOVE_STAGING_PREFIX}source_{uuid.uuid4().hex}"
-    )
     renamed = False
     try:
         opened = os.fstat(descriptor)
@@ -1025,6 +1039,11 @@ def preflight_move_run_folder(
     destination = target_root / run.name
     if os.path.lexists(destination):
         raise FileExistsError(f"Destination run folder already exists: {destination}")
+    # The move rewrites run_config.json's location after isolating the run, and
+    # rollback rewrites it back. A config that cannot be rebound has to stop
+    # the move here: once isolated, neither direction could complete and the
+    # run would sit in a hidden quarantine that blocks every later operation.
+    _rebindable_run_config(run, permitted_current_roots=(run,))
     return {
         "source": run,
         "destination_root": target_root,
@@ -1337,16 +1356,11 @@ def _new_transaction(
 ) -> tuple[Path, dict[str, Any]]:
     if operation not in {"move", "delete"}:
         raise ValueError("Run-folder transaction operation is invalid")
-    if operation == "move" and source_tree_signature is None:
-        source_tree_signature = _stable_tree_signature(_signature(source))
     if destination_root is not None:
-        if destination_root_identity is None:
-            destination_root_identity = run_identity(destination_root)
-        else:
-            destination_root_identity = _validated_identity_value(
-                destination_root_identity,
-                label="destination_root_identity",
-            )
+        destination_root_identity = _validated_identity_value(
+            destination_root_identity,
+            label="destination_root_identity",
+        )
     transaction_id = uuid.uuid4().hex
     journal_path = source.parent / f"{TRANSACTION_PREFIX}{transaction_id}.json"
     quarantine = source.parent / f"{MOVE_STAGING_PREFIX}source_{transaction_id}"
@@ -1687,6 +1701,32 @@ def _remove_transaction_staging(transaction: Mapping[str, Any]) -> None:
     _remove_validated_tree(staging, expected_identity=identity)
 
 
+def _rebindable_run_config(
+    tree_root: Path,
+    *,
+    permitted_current_roots: tuple[Path, ...],
+) -> dict[str, Any]:
+    """Load a run config whose recorded location is one the move may rewrite."""
+
+    path = tree_root / RUN_CONFIG
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("Moved run must contain a regular current run_config.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Moved run config must be valid JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("Moved run config must be a JSON object")
+    recorded = Path(str(value.get("run_root", ""))).resolve()
+    permitted = {candidate.resolve() for candidate in permitted_current_roots}
+    if recorded not in permitted:
+        raise ValueError(
+            "Moved run config path does not match the durable transaction endpoints"
+        )
+    return value
+
+
 def _rebind_current_run_config(
     tree_root: Path,
     *,
@@ -1696,18 +1736,9 @@ def _rebind_current_run_config(
     """Rebind one current run config while its tree is transaction-isolated."""
 
     path = tree_root / RUN_CONFIG
-    if path.is_symlink() or not path.is_file():
-        raise ValueError("Moved run must contain a regular current run_config.json")
-    with open(path, "r", encoding="utf-8") as handle:
-        value = json.load(handle)
-    if not isinstance(value, dict):
-        raise ValueError("Moved run config must be a JSON object")
-    recorded = Path(str(value.get("run_root", ""))).resolve()
-    permitted = {candidate.resolve() for candidate in permitted_current_roots}
-    if recorded not in permitted:
-        raise ValueError(
-            "Moved run config path does not match the durable transaction endpoints"
-        )
+    value = _rebindable_run_config(
+        tree_root, permitted_current_roots=permitted_current_roots
+    )
     canonical_new_root = new_root.resolve().as_posix()
     if value.get("run_root") == canonical_new_root:
         return
@@ -1790,13 +1821,18 @@ def _recover_move_transaction(transaction: dict[str, Any]) -> str:
 
     if source.is_symlink():
         raise RuntimeError("Run-folder transaction source became a symbolic link")
+
+    def restore_config(tree: Path) -> None:
+        try:
+            _rebind_current_run_config(tree, permitted_current_roots=(source, destination), new_root=source)
+        except ValueError:
+            # A config rejected before rebinding must be restored with the
+            # original tree so the operator can repair it in place.
+            pass
+
     if os.path.lexists(source):
         validate_expected_identity(source, expected_identity)
-        _rebind_current_run_config(
-            source,
-            permitted_current_roots=(source, destination),
-            new_root=source,
-        )
+        restore_config(source)
 
     quarantine_exists = os.path.lexists(quarantine)
     destination_is_real = _real_directory(destination)
@@ -1806,11 +1842,7 @@ def _recover_move_transaction(transaction: dict[str, Any]) -> str:
             raise RuntimeError(
                 "Run-folder transaction cannot restore an occupied source path"
             )
-        _rebind_current_run_config(
-            quarantine,
-            permitted_current_roots=(source, destination),
-            new_root=source,
-        )
+        restore_config(quarantine)
         _restore_quarantined_run(quarantine, source)
         if destination_is_real:
             identity = destination_identity or staging_identity
@@ -1826,11 +1858,7 @@ def _recover_move_transaction(transaction: dict[str, Any]) -> str:
                 raise RuntimeError(
                     "Run-folder transaction cannot restore an occupied source path"
                 )
-            _rebind_current_run_config(
-                destination,
-                permitted_current_roots=(source, destination),
-                new_root=source,
-            )
+            restore_config(destination)
             _durable_rename(destination, source)
         else:
             identity = destination_identity or staging_identity
@@ -1858,6 +1886,10 @@ def _recover_delete_transaction(transaction: dict[str, Any]) -> str:
     expected_identity: dict[str, int] = transaction["expected_identity"]
     journal_path: Path = transaction["journal_path"]
     raw: dict[str, Any] = transaction["raw"]
+
+    if transaction["phase"] == "committed":
+        _finish_transaction(journal_path)
+        return "resumed_delete"
 
     source_exists = os.path.lexists(source)
     quarantine_exists = os.path.lexists(quarantine)
@@ -1893,97 +1925,98 @@ def recover_run_folder_transactions(
     """Recover only durable, validated run-folder transaction journals."""
 
     roots = _normalized_roots(allowed_roots)
-    existing_roots = tuple(root for root in roots if _real_directory(root))
     recovered: list[dict[str, str]] = []
     unresolved: list[dict[str, Any]] = []
-    if not existing_roots:
-        return {
-            "schema_version": MAINTENANCE_SCHEMA_VERSION,
-            "journal_fingerprint": run_folder_transaction_fingerprint(roots),
-            "recovered_count": 0,
-            "transactions": [],
-            "unresolved_count": 0,
-            "unresolved": [],
-        }
-    with _storage_locks(existing_roots):
-        journal_paths: list[Path] = []
-        for root in existing_roots:
-            try:
-                candidates = list(root.iterdir())
-            except OSError as exc:
-                raise RuntimeError(
-                    f"Cannot inspect run-folder transactions below {root}"
-                ) from exc
-            for candidate in candidates:
-                if TRANSACTION_PATTERN.fullmatch(candidate.name):
-                    journal_paths.append(candidate)
-        for journal_path in sorted(
-            journal_paths,
-            key=lambda item: item.as_posix(),
-        ):
-            transaction: dict[str, Any] | None = None
-            try:
-                transaction = _load_transaction(
-                    journal_path,
-                    allowed_roots=roots,
-                )
+    unavailable: dict[str, str] = {}
+    journal_paths: list[Path] = []
+    for root in roots:
+        if not _real_directory(root) or not os.access(root, os.W_OK):
+            unavailable[root.as_posix()] = "Storage root is missing or not writable"
+        try:
+            candidates = list(root.iterdir()) if _real_directory(root) else []
+        except OSError:
+            unavailable[root.as_posix()] = "Storage root could not be read"
+            continue
+        journal_paths.extend(
+            candidate for candidate in candidates
+            if TRANSACTION_PATTERN.fullmatch(candidate.name)
+        )
+    for journal_path in sorted(
+        journal_paths,
+        key=lambda item: item.as_posix(),
+    ):
+        transaction: dict[str, Any] | None = None
+        try:
+            transaction = _load_transaction(
+                journal_path,
+                allowed_roots=roots,
+            )
+            involved_roots = {journal_path.parent}
+            if transaction["operation"] == "move":
+                involved_roots.add(transaction["destination_root"])
+            with _storage_locks(involved_roots):
+                if not os.path.lexists(journal_path):
+                    continue
+                transaction = _load_transaction(journal_path, allowed_roots=roots)
                 if transaction["operation"] == "move":
+                    if transaction["destination_root"] not in involved_roots:
+                        raise ValueError("Run-folder transaction destination changed during recovery")
                     action = _recover_move_transaction(transaction)
                 else:
                     action = _recover_delete_transaction(transaction)
-            except Exception as exc:
-                remnant_bytes: int | None = None
-                if transaction is not None:
-                    try:
-                        measured = 0
-                        for path, identity in (
-                            (
-                                transaction["quarantine"],
-                                transaction["expected_identity"],
-                            ),
-                            (
-                                transaction.get("staging"),
-                                transaction.get("staging_identity"),
-                            ),
+        except Exception as exc:
+            remnant_bytes: int | None = None
+            if transaction is not None:
+                try:
+                    measured = 0
+                    for path, identity in (
+                        (
+                            transaction["quarantine"],
+                            transaction["expected_identity"],
+                        ),
+                        (
+                            transaction.get("staging"),
+                            transaction.get("staging_identity"),
+                        ),
+                    ):
+                        if (
+                            isinstance(path, Path)
+                            and identity is not None
+                            and os.path.lexists(path)
                         ):
-                            if (
-                                isinstance(path, Path)
-                                and identity is not None
-                                and os.path.lexists(path)
-                            ):
-                                validate_expected_identity(path, identity)
-                                measured += int(_signature(path)["size_bytes"])
-                        remnant_bytes = measured
-                    except Exception:
-                        remnant_bytes = None
-                match = TRANSACTION_PATTERN.fullmatch(journal_path.name)
-                unresolved.append(
-                    {
-                        "transaction_id": (
-                            transaction["transaction_id"]
-                            if transaction is not None
-                            else match.group("id")
-                            if match is not None
-                            else None
-                        ),
-                        "operation": (
-                            transaction["operation"]
-                            if transaction is not None
-                            else None
-                        ),
-                        "error": f"{type(exc).__name__}: {exc}",
-                        "remnant_bytes": remnant_bytes,
-                    }
-                )
-                continue
-            recovered.append(
+                            validate_expected_identity(path, identity)
+                            measured += int(_signature(path)["size_bytes"])
+                    remnant_bytes = measured
+                except Exception:
+                    remnant_bytes = None
+            match = TRANSACTION_PATTERN.fullmatch(journal_path.name)
+            unresolved.append(
                 {
-                    "transaction_id": transaction["transaction_id"],
-                    "operation": transaction["operation"],
-                    "action": action,
+                    "transaction_id": (
+                        transaction["transaction_id"]
+                        if transaction is not None
+                        else match.group("id")
+                        if match is not None
+                        else None
+                    ),
+                    "operation": (
+                        transaction["operation"]
+                        if transaction is not None
+                        else None
+                    ),
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "remnant_bytes": remnant_bytes,
                 }
             )
-        journal_fingerprint = run_folder_transaction_fingerprint(roots)
+            continue
+        recovered.append(
+            {
+                "transaction_id": transaction["transaction_id"],
+                "operation": transaction["operation"],
+                "action": action,
+            }
+        )
+    journal_fingerprint = run_folder_transaction_fingerprint(roots)
     return {
         "schema_version": MAINTENANCE_SCHEMA_VERSION,
         "journal_fingerprint": journal_fingerprint,
@@ -1991,6 +2024,7 @@ def recover_run_folder_transactions(
         "transactions": recovered,
         "unresolved_count": len(unresolved),
         "unresolved": unresolved,
+        "unavailable_roots": unavailable,
     }
 
 
@@ -2034,7 +2068,6 @@ def move_run_folder(
         quarantine: Path | None = None
         staging: Path | None = None
         cleanup_warning: str | None = None
-        cleanup_remaining_path: str | None = None
         try:
             # This full no-follow preflight happens under both root locks and
             # before any journal or quarantine path is created.
@@ -2155,7 +2188,6 @@ def move_run_folder(
         "destination_run_root": destination.as_posix(),
         "source_cleanup_complete": cleanup_warning is None,
         "source_cleanup_warning": cleanup_warning,
-        "source_cleanup_remaining_path": cleanup_remaining_path,
     }
 
 
@@ -2164,9 +2196,19 @@ def delete_run_folder(
     *,
     expected_identity: Mapping[str, Any],
     allowed_roots: Iterable[str | Path],
+    retain_calibration: bool | None = None,
 ) -> dict[str, Any]:
-    """Permanently remove one current run folder."""
+    """Permanently remove one current run folder.
 
+    A run that publishes a promoted calibration needs an explicit
+    ``retain_calibration`` decision: the calibration is the one small result
+    worth keeping from gigabytes of capture, and nothing else holds a
+    selectable copy. Retention is durable before anything is removed, and a
+    calibration that cannot be retained stops the deletion.
+    """
+
+    if retain_calibration is not None and not isinstance(retain_calibration, bool):
+        raise ValueError("retain_calibration must be a literal boolean")
     roots = _normalized_roots(allowed_roots)
     maintenance = recover_run_folder_transactions(roots)
     if maintenance["unresolved_count"]:
@@ -2185,17 +2227,34 @@ def delete_run_folder(
         # Fail while the selected run is still visible if traversal would
         # cross a device or a same-device bind mount.
         _signature(run)
-        journal_path, transaction = _new_transaction(
-            operation="delete",
-            source=run,
-            expected_identity=expected_identity,
-        )
-        quarantine = Path(transaction["quarantine"])
-        quarantine = _quarantine_run(
-            run,
-            expected_identity=expected_identity,
-            quarantine=quarantine,
-        )
+        retained_calibration: dict[str, Any] | None = None
+        has_promoted = run_has_promoted_calibration(run)
+        has_selection = os.path.lexists(run / CALIBRATION_PROFILE_SELECTION)
+        lock = calibration_library_lock() if has_promoted or has_selection else nullcontext()
+        with lock:
+            if has_promoted:
+                decision = "promoted calibration"
+            elif has_selection and run.as_posix() in run_calibration_retention_targets(
+                [candidate for _, candidate in discover_run_folders(roots)]
+            ):
+                decision = "last verified calibration snapshot"
+            else:
+                decision = None
+            if decision and retain_calibration is None:
+                raise ValueError(f"This run holds a {decision}. Choose whether to keep it before deleting the run.")
+            if retain_calibration:
+                retain = retain_run_calibration if has_promoted else retain_run_snapshot
+                try:
+                    retained_calibration = retain(run, reason="run_deleted")
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    raise ValueError(f"The calibration could not be kept, so nothing was deleted: {exc}") from exc
+            journal_path, transaction = _new_transaction(
+                operation="delete", source=run, expected_identity=expected_identity,
+            )
+            quarantine = _quarantine_run(
+                run, expected_identity=expected_identity,
+                quarantine=Path(transaction["quarantine"]),
+            )
         _update_transaction(
             journal_path,
             transaction,
@@ -2214,4 +2273,5 @@ def delete_run_folder(
     return {
         "status": "deleted",
         "source_run_root": run.as_posix(),
+        "retained_calibration": retained_calibration,
     }

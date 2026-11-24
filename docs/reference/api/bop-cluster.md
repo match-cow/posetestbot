@@ -1,5 +1,8 @@
 # BOP and cluster-boundary API
 
+Inspect depth studies have a separate [depth API](depth-evaluation.md),
+independent of BOP19 result and visibility requirements.
+
 These APIs operate after or beside acquisition. BOP annotation and evaluation
 remain run-scoped. Cluster routes proxy a separate loopback controller and do
 not import estimator code, credentials, or scheduler arguments into
@@ -54,8 +57,8 @@ its exported GT hash; it does not modify the original BOP scene files.
 | `POST /bop/evaluations` | Queue official toolkit evaluation of a registered result or deterministic test-only GT perturbation |
 | `GET /bop/evaluations/<evaluation_id>/report?run_root=…` | Download the completed derived report |
 
-Result upload requires form fields `run_root`, file field `file` (or `result`),
-and optional `display_name`/`method_name`. The filename must be a basename with
+Result upload requires form fields `run_root`, file field `file`,
+and optional `display_name`. The filename must be a basename with
 `.csv`; the bounded upload is validated again after staging.
 
 Registered-result evaluation request:
@@ -74,6 +77,9 @@ The only alternative source is `gt_simulation`, intended for deterministic
 test validation and explicitly labelled as such. This API is not a pose
 estimator, result converter, or acquisition stage. All result and
 evaluation evidence stays below `processed/bop_evaluation/`.
+Evaluation history reconciles an interrupted worker with its terminal local
+job record. Robot consistency considers the highest-scoring hypotheses up to
+the frozen BOP19 target's `inst_count` before matching instances.
 
 Every CSV, provenance, and package download rechecks the retained file against
 its recorded hash. A package is produced on demand with fixed ZIP metadata; it
@@ -153,8 +159,10 @@ Artifacts stay under `processed/bop_evaluation/visualizations/<export_id>/`.
 Requests retain source identities at submission; changes before/during
 rendering fail the job. Completed files are atomically published and bound to
 request/manifest/output SHA-256. Failed or canceled jobs never expose partials.
-Downloads remain recoverable after source drift. The page retains `export_id`
-alongside `run_root`; Jobs links also include result and scene IDs.
+Downloads remain recoverable after source drift. After a run move, pass the
+new approved `run_root` when opening an `export_id`. The original job binding
+and publication hashes continue to validate the output. Jobs links include
+result and scene IDs.
 If the operator leaves the submitted view before its response arrives, the
 response does not redirect them. The export remains accessible from Jobs.
 
@@ -202,6 +210,10 @@ omission counts retained when source evidence is larger. Free-form failure
 messages, remote paths, controller secrets, commands, and scheduler arguments
 are discarded rather than exposed.
 
+Filtered controller history sets `truncated: true` when the controller's scan
+bound was reached. Older jobs for the run may then be missing from the result.
+`include_log`, when supplied, must be a valid boolean.
+
 FoundationPose v2 submission example:
 
 ```json
@@ -231,5 +243,19 @@ no qualified estimator is advertised. Archive deletion removes only the
 controller-owned cluster copy; it neither deletes nor accepts a path to the
 local acquisition folder. The request body is closed to `confirm: true` and a
 non-empty `operator`, while the proxy supplies its own idempotency key.
+The companion must implement `DELETE /v1/archives/{archive_id}`. A controller
+that returns the router's bare `Not Found` is reported as an unsupported
+operation (409), with an instruction to update and restart the companion;
+an unknown archive retains its resource-specific 404.
+Deletion queues an `archive-delete` job without remote I/O in the handler.
+The worker revalidates the retained receipt and remote hashes before committing
+removal. Restore and deletion for the same archive are mutually exclusive.
+Jobs identifies storage jobs by operation and disables deletion cancellation
+with a visible reason after removal begins.
+Cancellation is allowed before that commit; once removal begins, the archive
+is `deleting`, restore and cancellation are unavailable, and restart resumes
+cleanup. A failed cleanup keeps the receipt and offers **Retry deletion** with
+a fresh confirmation. Successful deletion retains a controller tombstone and
+job history while removing the archive from inventory. No local run is removed.
 Controllers without the current domains-and-estimators status shape fail closed;
 PoseTestBot never fabricates a default estimator or resource profile.

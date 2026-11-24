@@ -1,4 +1,4 @@
-"""Dataset/run manifest helpers for the PoseTestBot rewrite."""
+"""Read and write run manifests and artifact evidence."""
 
 from __future__ import annotations
 

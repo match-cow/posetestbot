@@ -269,6 +269,42 @@ def _load_bundle(source_run_root: Path) -> _LoadedBundle:
     )
 
 
+def _timestamp_sort_value(value: str) -> float:
+    """Order ISO timestamps chronologically; an unparseable one sorts first."""
+
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return float("-inf")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
+
+
+def _latest_calibrated_at(bundle: _LoadedBundle) -> str | None:
+    """The newest known evidence date among a bundle's valid profiles."""
+
+    return max(
+        (
+            date
+            for profile in bundle.profiles
+            if profile.status == CalibrationStatus.VALID
+            if (date := _calibration_evidence_date(profile)) is not None
+        ),
+        key=_timestamp_sort_value,
+        default=None,
+    )
+
+
+def _calibration_evidence_date(profile: CalibrationProfile) -> str | None:
+    interval = profile.metadata.get("capture_interval")
+    if isinstance(interval, Mapping) and isinstance(interval.get("last_frame_at"), str):
+        return interval["last_frame_at"]
+    if profile.calibrated_at == profile.metadata.get("promoted_at"):
+        return None
+    return profile.calibrated_at
+
+
 def _source_run_name(source_run_root: Path) -> str:
     try:
         value = _json_object(
@@ -296,6 +332,22 @@ def _profile_summary(profile: CalibrationProfile) -> dict[str, Any]:
             else None
         ),
         "created_at": profile.calibrated_at,
+        "calibrated_at": _calibration_evidence_date(profile),
+        "capture_interval": profile.metadata.get("capture_interval"),
+        "promoted_at": profile.metadata.get("promoted_at"),
+        "sensor_name": (
+            str(profile.metadata["sensor_name"])
+            if profile.metadata.get("sensor_name")
+            else None
+        ),
+        "method": profile.method,
+        "quality": {
+            "num_observations": profile.quality.num_observations,
+            "num_inliers": profile.quality.num_inliers,
+            "mean_reprojection_error_px": profile.quality.mean_reprojection_error_px,
+            "residual_translation_mm": profile.quality.residual_translation_mm,
+            "residual_rotation_deg": profile.quality.residual_rotation_deg,
+        },
     }
 
 
@@ -838,7 +890,7 @@ def _selection_matches_intent(
     setup: Mapping[str, Any],
     mapping: Sequence[Mapping[str, Any]],
     source: Mapping[str, Any],
-    sources: Sequence[Mapping[str, Any]] | None = None,
+    sources: Sequence[Mapping[str, Any]],
 ) -> bool:
     """Decide idempotence from the complete selection intent, not just bytes."""
 
@@ -853,8 +905,6 @@ def _selection_matches_intent(
         or selection.get("source") != dict(source)
     ):
         return False
-    if sources is None:
-        return "sources" not in selection
     return selection.get("sources") == [dict(item) for item in sources]
 
 
@@ -867,17 +917,25 @@ def _empty_artifact_summary(filename: str) -> dict[str, Any]:
     }
 
 
-def _inspect_source(
-    source_run_root: Path,
-    setup: Mapping[str, Any] | None,
-) -> tuple[dict[str, Any], _LoadedBundle | None]:
+def _source_record(
+    source: Path,
+    *,
+    name: str,
+    origin: str,
+    retained_at: str | None = None,
+) -> dict[str, Any]:
+    """An unverified listing record; inspection fills in what it can prove."""
+
     calibration_summary = _empty_artifact_summary(CALIBRATION_PROFILES)
     calibration_summary.update({"valid_profile_count": 0, "profiles": []})
     intrinsic_summary = _empty_artifact_summary(INTRINSIC_CALIBRATION_PROFILES)
     intrinsic_summary.update({"profile_count": 0, "profiles": []})
-    record: dict[str, Any] = {
-        "source_run_root": source_run_root.as_posix(),
-        "source_run_name": _source_run_name(source_run_root),
+    return {
+        "source_run_root": source.as_posix(),
+        "source_run_name": name,
+        "origin": origin,
+        "retained_at": retained_at,
+        "calibrated_at": None,
         "bundle_sha256": None,
         "valid": False,
         "compatible": False,
@@ -887,6 +945,34 @@ def _inspect_source(
         "sensor_profile_mapping": [],
         "sensor_profiles": {},
     }
+
+
+def _inspect_source(
+    source_run_root: Path,
+    setup: Mapping[str, Any] | None,
+    *,
+    retained: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], _LoadedBundle | None]:
+    """Summarize one source: a promoted run, or a retained library entry.
+
+    ``retained`` is the entry's verified record. Its directory then stands in
+    for ``source_run_root`` and its recorded name for the run name.
+    """
+
+    record = (
+        _source_record(
+            source_run_root,
+            name=str(retained["name"]),
+            origin="library",
+            retained_at=str(retained["retained_at"]),
+        )
+        if retained is not None
+        else _source_record(
+            source_run_root, name=_source_run_name(source_run_root), origin="run"
+        )
+    )
+    calibration_summary = record["calibration_profiles"]
+    intrinsic_summary = record["intrinsic_calibration_profiles"]
     try:
         bundle = _load_bundle(source_run_root)
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -924,6 +1010,15 @@ def _inspect_source(
         }
     )
     record["bundle_sha256"] = bundle.bundle_sha256
+    if retained is not None and bundle.bundle_sha256 != source_run_root.name:
+        record["issues"].append(
+            _issue(
+                "invalid_calibration_bundle",
+                "Retained calibration bytes do not match their identity.",
+            )
+        )
+        return record, None
+    record["calibrated_at"] = _latest_calibrated_at(bundle)
     if not valid_profiles:
         record["issues"].append(
             _issue(
@@ -1037,6 +1132,12 @@ def _validate_composite_selection_provenance(value: Mapping[str, Any]) -> None:
         if run_root in seen_roots:
             raise ValueError("Composite calibration source run roots must be unique")
         seen_roots.add(run_root)
+        # Present only when the source was a retained library entry, whose
+        # directory then stands in for run_root.
+        if "retained" in item and not isinstance(item["retained"], Mapping):
+            raise ValueError(
+                f"Composite calibration source {index} retained record is invalid"
+            )
         run_name = item.get("run_name")
         if (
             not isinstance(run_name, str)
@@ -1146,8 +1247,6 @@ def _validate_composite_selection_provenance(value: Mapping[str, Any]) -> None:
 
 def load_calibration_profile_selection(
     run_root: str | Path,
-    *,
-    verify_snapshots: bool = True,
 ) -> dict[str, Any]:
     root = Path(run_root).resolve()
     value = _json_object(
@@ -1171,9 +1270,6 @@ def load_calibration_profile_selection(
         raise ValueError("Calibration selection bundle_sha256 is invalid")
     if schema_version == COMPOSITE_SELECTION_SCHEMA_VERSION:
         _validate_composite_selection_provenance(value)
-    if not verify_snapshots:
-        return dict(value)
-
     expected_directory = SNAPSHOT_PARENT / bundle_digest
     if snapshot.get("directory") != expected_directory.as_posix():
         raise ValueError(
@@ -1554,9 +1650,29 @@ def _selected_for_library(run_root: Path) -> dict[str, Any] | None:
     return {**selected, "valid": True, "issues": []}
 
 
-def list_calibration_library(run_root: str | Path) -> dict[str, Any]:
-    """List promoted calibration artifacts and compatibility for one destination."""
+def _resolve_calibration_source(
+    value: str | Path,
+) -> tuple[Path, Mapping[str, Any] | None]:
+    """Resolve a promoted run, or a retained library entry and its record."""
 
+    from posetestbot.calibration.retained_library import resolve_retained_entry
+
+    retained = resolve_retained_entry(value)
+    if retained is not None:
+        return retained.path, retained.record
+    return _resolve_direct_run(value, must_exist=True), None
+
+
+def list_calibration_library(run_root: str | Path) -> dict[str, Any]:
+    from posetestbot.calibration.retained_library import calibration_age_warning_days
+
+    """List promoted calibration artifacts and compatibility for one destination.
+
+    Sources are promoted calibration runs plus retained library entries. An
+    entry whose bundle a present run still publishes is listed once, as the run.
+    """
+
+    from posetestbot.calibration.retained_library import list_retained_calibrations
     from posetestbot.web.security import web_run_roots
 
     destination = _resolve_direct_run(run_root, must_exist=False)
@@ -1588,10 +1704,34 @@ def list_calibration_library(run_root: str | Path) -> dict[str, Any]:
                 records.append(record)
             except OSError:
                 continue
-    records.sort(key=lambda item: (item["source_run_name"], item["source_run_root"]))
+    published = {record["bundle_sha256"] for record in records}
+    for path, entry, error in list_retained_calibrations():
+        if entry is None:
+            # Listed as unusable rather than hidden, so the operator can see
+            # and delete a damaged entry. Never inspected as if it were a run.
+            record = _source_record(
+                path, name=f"Retained calibration {path.name[:12]}", origin="library"
+            )
+            record["issues"].append(_issue("invalid_calibration_bundle", str(error)))
+            records.append(record)
+        elif entry.bundle.bundle_sha256 not in published:
+            record, _bundle = _inspect_source(path, setup, retained=entry.record)
+            records.append(record)
+    # Newest calibration first: camera geometry drifts, so age is the first
+    # thing an operator needs when choosing a source.
+    records.sort(
+        key=lambda item: (
+            -_timestamp_sort_value(item["calibrated_at"])
+            if item["calibrated_at"]
+            else float("inf"),
+            item["source_run_name"],
+            item["source_run_root"],
+        )
+    )
     return {
         "schema_version": LIBRARY_SCHEMA_VERSION,
         "run_root": destination.as_posix(),
+        "age_warning_days": calibration_age_warning_days(),
         "selected": _selected_for_library(destination),
         "replacement_blockers": calibration_selection_replacement_blockers(destination),
         "calibrations": records,
@@ -1851,7 +1991,7 @@ def select_calibration_profile_composite_snapshot(
         source_run_root = raw.get("source_run_root")
         if not isinstance(source_run_root, str) or not source_run_root.strip():
             raise ValueError(f"source_selections[{index}].source_run_root is required")
-        source = _resolve_direct_run(source_run_root, must_exist=True)
+        source, retained = _resolve_calibration_source(source_run_root)
         if source == destination:
             raise ValueError("Calibration sources must be different from run_root")
         if source in sources_seen:
@@ -1892,6 +2032,7 @@ def select_calibration_profile_composite_snapshot(
         specifications.append(
             {
                 "source": source,
+                "retained": retained,
                 "expected_bundle_sha256": expected_digest,
                 "sensor_keys": list(sensor_keys),
             }
@@ -1916,8 +2057,15 @@ def select_calibration_profile_composite_snapshot(
         specifications, key=lambda item: item["source"].as_posix()
     ):
         source = specification["source"]
-        with run_config_lock(source):
-            record, bundle = _inspect_source(source, setup)
+        if specification["retained"] is None:
+            with run_config_lock(source):
+                record, bundle = _inspect_source(source, setup)
+        else:
+            # A retained entry is immutable and content-addressed, so there is
+            # no run config to hold steady while it is read.
+            record, bundle = _inspect_source(
+                source, setup, retained=specification["retained"]
+            )
         if bundle is None or not record["valid"]:
             raise CalibrationSelectionConflict(
                 "A selected calibration source is invalid",
@@ -2038,6 +2186,19 @@ def select_calibration_profile_composite_snapshot(
                     "size_bytes": len(source_bundle.intrinsic_bytes),
                     "schema_version": source_bundle.intrinsic_schema_version,
                 },
+                **(
+                    {
+                        "retained": {
+                            "schema_version": specification["retained"][
+                                "schema_version"
+                            ],
+                            "retained_at": specification["retained"]["retained_at"],
+                            "origin": dict(specification["retained"]["origin"]),
+                        }
+                    }
+                    if specification["retained"] is not None
+                    else {}
+                ),
             }
         )
 

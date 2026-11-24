@@ -17,3 +17,8 @@ def resolve_app_root() -> Path:
 
 
 APP_ROOT = resolve_app_root()
+
+
+def working_data_root() -> Path:
+    configured = os.environ.get("POSETESTBOT_WORKING_DATA_ROOT")
+    return Path(configured).expanduser().resolve() if configured else APP_ROOT / "working_data"

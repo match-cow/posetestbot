@@ -97,6 +97,13 @@ compatible result CSV, or to a clearly labelled deterministic test result
 derived from ground truth. Evaluation evidence remains run-scoped and is never
 an acquisition stage.
 
+**Inspect → Depth Evaluation** compares captured depth with pinned BlenderProc
+2.8.0 CPU geometric references from existing GT, including pose-only exports.
+It retains full/interior/boundary metrics and maps, compares finishes within
+common distance/incidence bins using canonical geometry hashes, and publishes
+research bundles below `processed/bop_evaluation/depth/`. It needs no estimator
+result or BOP19 masks. See [depth quality](docs/concepts/depth-evaluation.md).
+
 The optional **Inspect → Pose Estimation** page is a thin integration with the
 separate [`match-cow/posetestbot-cluster`](https://github.com/match-cow/posetestbot-cluster)
 companion. That loopback-only controller owns SSH credentials,

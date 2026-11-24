@@ -1,6 +1,7 @@
+import { useInspectionSearch } from "@/lib/use-inspection-search"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Link, useSearchParams } from "react-router-dom"
+import { Link } from "react-router-dom"
 import {
   AlertTriangle,
   ArrowRight,
@@ -270,7 +271,7 @@ function MetricsReport({ evaluation }: { evaluation: BopEvaluationSummary }) {
 
 export function BopEvaluationPage() {
   const { selectedRun: activeRun, selectRun } = useOperator()
-  const [searchParams, setSearchParams] = useSearchParams()
+  const { params: searchParams, setParams: setSearchParams } = useInspectionSearch()
   const selectedRun = searchParams.get("run_root") || activeRun
   const queryClient = useQueryClient()
   const terminalRefresh = useRef<string | null>(null)
@@ -294,8 +295,8 @@ export function BopEvaluationPage() {
     retry: false,
   })
   const jobs = useQuery({
-    queryKey: ["jobs"],
-    queryFn: () => api<{ jobs: Job[]; resources: Record<string, string> }>("/jobs"),
+    queryKey: ["jobs", selectedRun, "bop_evaluation"],
+    queryFn: () => api<{ jobs: Job[]; resources: Record<string, string> }>(query("/jobs", { run_root: selectedRun, search: "bop_evaluation" })),
     refetchInterval: (state) => state.state.data?.jobs.some((job) => evaluationJob(job, selectedRun) && ACTIVE_JOB_STATUSES.has(job.status)) ? 1_000 : 5_000,
   })
 
@@ -305,11 +306,10 @@ export function BopEvaluationPage() {
   )
   const requestedResultId = searchParams.get("result_id") ?? ""
   const savedResultId = resultSelection?.runRoot === selectedRun ? resultSelection.resultId : ""
+  const compatibleResults = realResults.filter((result) => result.compatible)
   const selectedResultId = requestedResultId
-    ? requestedResultId
-    : realResults.some((result) => result.result_id === savedResultId)
-      ? savedResultId
-    : realResults.find((result) => result.compatible)?.result_id ?? realResults[0]?.result_id ?? ""
+    || (realResults.some((result) => result.result_id === savedResultId) ? savedResultId : "")
+    || (compatibleResults.length === 1 ? compatibleResults[0].result_id : "")
   const selectedResult = realResults.find((result) => result.result_id === selectedResultId) ?? null
 
   const orderedEvaluations = useMemo(
@@ -389,7 +389,11 @@ export function BopEvaluationPage() {
       if (resultId) {
         setSourceKind("registered_result")
         setResultSelection({ runRoot: selectedRun, resultId })
-        setSearchParams({ result_id: resultId, run_root: selectedRun })
+        setSearchParams((previous) => {
+          const next = new URLSearchParams(previous)
+          next.set("result_id", resultId)
+          return next
+        })
       }
       setUploadSelection(null)
       setUploadName(null)
@@ -510,14 +514,14 @@ export function BopEvaluationPage() {
               <CardContent className="space-y-5">
                 {sourceKind === "gt_simulation" && <div role="status" className="flex items-center justify-between gap-3 rounded-lg border border-warning/45 bg-warning/10 p-3 text-xs"><span><strong>Test-only simulation is selected.</strong> Its history and report are isolated from retained estimator results.</span>{selectedResult && <Button size="sm" variant="outline" onClick={() => setSourceKind("registered_result")}>Use retained result</Button>}</div>}
                 {realResults.length > 0 ? <div className="space-y-3">
-                  <div className="space-y-1.5"><Label htmlFor="bop-result-selection">Retained pose result</Label><Select value={selectedResultId} onValueChange={(resultId) => { setSourceKind("registered_result"); setResultSelection({ runRoot: selectedRun, resultId }); setSearchParams({ result_id: resultId, run_root: selectedRun }) }}><SelectTrigger id="bop-result-selection" aria-label="Retained pose result"><SelectValue /></SelectTrigger><SelectContent>{realResults.map((result) => <SelectItem key={result.result_id} value={result.result_id}>{result.display_name} · {result.method} · {result.compatible ? "compatible" : "incompatible"}</SelectItem>)}</SelectContent></Select></div>
+                  <div className="space-y-1.5"><Label htmlFor="bop-result-selection">Choose a pose result</Label><Select value={selectedResultId} onValueChange={(resultId) => { setSourceKind("registered_result"); setResultSelection({ runRoot: selectedRun, resultId }); setSearchParams((previous) => { const next = new URLSearchParams(previous); next.set("result_id", resultId); return next }) }}><SelectTrigger id="bop-result-selection" aria-label="Retained pose result"><SelectValue /></SelectTrigger><SelectContent>{realResults.map((result) => <SelectItem key={result.result_id} value={result.result_id}>{result.display_name} · {result.method} · {result.compatible ? "compatible" : "incompatible"}</SelectItem>)}</SelectContent></Select></div>
                   {selectedResult && <ResultDetails result={selectedResult} runRoot={selectedRun} />}
                 </div> : <div className="rounded-lg border border-dashed p-6 text-center"><ScanSearch className="mx-auto size-6 text-muted-foreground" /><div className="mt-2 text-sm font-semibold">No retained estimator result</div><p className="mt-1 text-xs text-muted-foreground">Submit and collect a compatible external estimator result first, or expand manual import below.</p><Button asChild className="mt-4" size="sm"><Link to="/pose-estimation">Open Pose Estimation<ArrowRight /></Link></Button></div>}
 
                 <details className="rounded-lg border" data-testid="bop-manual-import">
                   <summary className="cursor-pointer px-4 py-3 text-sm font-semibold">Manual BOP19 CSV import · secondary</summary>
                   <form className="space-y-4 border-t bg-muted/15 p-4" onSubmit={(event) => { event.preventDefault(); importResult.mutate() }}>
-                    <div><div className="flex items-center gap-2 text-sm font-semibold"><FileUp aria-hidden="true" className="size-4" />Import standard BOP result CSV</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">The server validates the official columns, dataset/split identity, target coverage, and pose values before registering a selectable immutable result. Manual imports have no fabricated controller provenance.</p></div>
+                    <div><div className="flex items-center gap-2 text-sm font-semibold"><FileUp aria-hidden="true" className="size-4" />Import a BOP19 CSV manually</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">The server validates the official columns, dataset/split identity, target coverage, and pose values before registering a selectable immutable result. Manual imports have no fabricated controller provenance.</p></div>
                     <div data-testid="bop-result-csv-contract" className="space-y-2 rounded-lg border bg-background p-3 text-[11px] leading-relaxed text-muted-foreground">
                       <div className="font-semibold text-foreground">Interoperable BOP CSV contract</div>
                       <code className="block max-w-full overflow-x-auto rounded bg-muted px-2 py-1.5 text-[10px] text-foreground">scene_id,im_id,obj_id,score,R,t,time</code>
@@ -533,7 +537,7 @@ export function BopEvaluationPage() {
                 </details>
 
                 <details className="rounded-lg border border-warning/35" data-testid="bop-test-simulation">
-                  <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-warning-foreground">Advanced · deterministic GT perturbation · Test only</summary>
+                  <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-warning-foreground">Test only · simulate estimates</summary>
                   <div className="space-y-4 border-t p-4">
                     <div role="alert" className="flex items-start gap-3 rounded-lg border border-warning/45 bg-warning/10 p-4"><FlaskConical aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-warning-foreground" /><div><div className="font-semibold text-warning-foreground">Estimates are derived from ground truth</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">This fixture checks formatting and the official evaluation path. Its metrics must never be presented as pose-estimator performance.</p></div></div>
                     <div className="grid gap-4 rounded-lg border p-4 sm:grid-cols-2">
@@ -578,7 +582,7 @@ export function BopEvaluationPage() {
           {currentJob && <EvaluationJobStatus job={currentJob} evaluationId={currentEvaluationId} reportAvailable={currentReportAvailable} />}
 
           {scopedEvaluations.length > 0 && <Card data-testid="bop-evaluation-history">
-            <CardHeader><CardTitle className="flex items-center gap-2 text-base"><History aria-hidden="true" className="size-4" />3 · Result-scoped evaluation history</CardTitle><CardDescription>{sourceKind === "registered_result" ? `Only evaluations bound to ${selectedResult?.display_name ?? selectedResultId} are shown.` : "Only deterministic test-fixture evaluations are shown."}</CardDescription></CardHeader>
+            <CardHeader><CardTitle className="flex items-center gap-2 text-base"><History aria-hidden="true" className="size-4" />Evaluations of this result</CardTitle><CardDescription>{sourceKind === "registered_result" ? `Only evaluations bound to ${selectedResult?.display_name ?? selectedResultId} are shown.` : "Only deterministic test-fixture evaluations are shown."}</CardDescription></CardHeader>
             <CardContent>
               <div className="overflow-x-auto rounded-lg border">
                 <table className="w-full min-w-[820px] text-left text-xs">

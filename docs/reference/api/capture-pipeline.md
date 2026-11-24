@@ -53,17 +53,19 @@ The submission body is exact and both booleans must be literal `true`:
 }
 ```
 
-`intent` must match `run_config.json`, and a fresh successful run preflight is
-required. Only `run_preflight.v2`, with active evidence matching every currently
-selected camera, can authorize queueing. The server runs one recipe: plan →
-capture-plan preflight → execution plan → supervised execution →
-capture-completion validation. Cancel requests cannot interrupt active IIWA
-motion and never send the idle-program exit command.
+`intent` must match `run_config.json`. Queueing requires a current
+`run_preflight.v2` report with status `ok` or `warning` and active evidence for
+every selected camera. The queue records the approved configuration SHA-256 in
+the worker arguments and job parameters. The fixed recipe builds a capture
+plan, runs capture-plan preflight, writes the execution plan, supervises capture,
+and validates completion. Cancel requests cannot interrupt active IIWA motion
+and never send the idle-program exit command.
 
-Before the recipe writes its first capture artifact, the capture worker repeats
-the bounded selected-camera open probe. Failure rejects capture without creating
-`capture_plan.json`, execution metadata/logs, or raw camera output, so the same
-run remains usable after the camera/backend issue is corrected.
+Before writing `capture_plan.json`, the worker repeats the bounded
+selected-camera open probe and checks the configuration SHA-256 again. The
+supervisor checks it under the run-config lock and publishes `starting` before
+releasing that lock. A changed configuration requires a fresh preflight and a
+new capture submission.
 
 ## Dataset processing
 
@@ -78,14 +80,16 @@ It requires dataset intent and a valid current reusable-calibration selection.
 It never rewrites raw capture. Optional pose or mask generation is deliberately
 separate under `/bop/annotations`.
 
-## Removed surfaces
-
-`/pipeline/*`, `/capture-plan*`, and `/run-command` are not registered. Clients
-must use the purpose-specific routes above and `/robot/commands`.
-
 ## Synchronization quality
 
-`GET /sync/quality?run_root=…` loads existing evidence. `POST /sync/quality`
-writes the current report after strict synchronized inputs exist. Quality is
-based on eligible in-motion frames, pose delta, packet loss, timestamp
-evidence, and unexplained exclusions—not lead-in/tail frames.
+The dataset-processing job writes the report. `GET /sync/quality?run_root=…`
+loads the saved evidence. Coverage uses eligible in-motion frames. The report
+includes pose delta, pose packet loss, missing timestamp evidence, and
+unexplained in-motion exclusions. Pose sequence gaps at the beginning and end
+of the streamed interval count toward packet loss.
+
+For manual synchronization, `--sync-delta` defaults to 0 ms. A JSON mapping
+must specify a delta for every sensor folder being synchronized. With
+`--timestamp-source host_wall`, the sidecar value represents userspace receipt
+of the frame for all supported cameras. OAK also retains an estimated capture
+time separately.

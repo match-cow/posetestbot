@@ -21,7 +21,7 @@ from posetestbot.cell.scene import (
     cell_depth_frame_preview_png,
     cell_timeline_page,
 )
-from posetestbot.pose_templates.selection import load_pose_template_selection
+from posetestbot.pose_templates.selection import open_pose_template_preview_asset
 from posetestbot.run_folders import MOVE_STAGING_PREFIX
 from posetestbot.web.security import (
     DEFAULT_RUN_ROOT,
@@ -375,31 +375,21 @@ def ui_cell_calibration_target_pdf():
 def ui_cell_pose_template_asset(instance_uuid: str, asset_kind: str):
     try:
         run_root = _requested_run_root()
-        selection = load_pose_template_selection(run_root)
-        item = next(
-            (
-                entry
-                for entry in selection["instances"]
-                if entry["instance_uuid"] == instance_uuid
-            ),
-            None,
-        )
-        if item is None:
-            return jsonify({"output": "Unknown selected template instance"}), 404
         key = CELL_POSE_TEMPLATE_ASSET_KEYS.get(asset_kind)
         if key is None:
             return jsonify({"output": "Unknown instance asset kind"}), 404
-        if key not in item["assets"]:
-            return jsonify({"output": "Unknown or unavailable instance asset"}), 404
-        snapshot = run_root / selection["bundle_snapshot"]
-        path = snapshot / item["assets"][key]["path"]
-        path.resolve(strict=True).relative_to(snapshot.resolve())
-        return send_file(
-            path,
-            mimetype="image/png" if key == "texture" else "application/octet-stream",
-            conditional=True,
-            max_age=3600,
-        )
+        handle, digest = open_pose_template_preview_asset(run_root, instance_uuid, key)
+        try:
+            return send_file(
+                handle,
+                mimetype="image/png" if key == "texture" else "application/octet-stream",
+                etag=digest,
+                conditional=True,
+                max_age=3600,
+            )
+        except BaseException:
+            handle.close()
+            raise
     except FileNotFoundError as exc:
         return jsonify({"output": str(exc)}), 404
     except (OSError, ValueError) as exc:

@@ -1583,22 +1583,6 @@ def load_template_thumbnail(
     return _validate_template_thumbnail_content(thumbnail, template_uuid=opaque_id)
 
 
-def list_template_bundles(
-    library_root: str | Path | None = None,
-) -> list[dict[str, Any]]:
-    library = Path(library_root or default_template_library_root())
-    if not library.is_dir():
-        return []
-    bundles = []
-    for child in sorted(library.iterdir()):
-        if child.is_dir() and not child.name.startswith("."):
-            try:
-                bundles.append(validate_template_bundle(child, library_root=library))
-            except (OSError, ValueError):
-                continue
-    return bundles
-
-
 def template_bundle_summary(bundle: Mapping[str, Any]) -> dict[str, Any]:
     """Return card metadata without exact contours, assets, or preview meshes."""
 
@@ -1652,6 +1636,7 @@ def template_bundle_summary(bundle: Mapping[str, Any]) -> dict[str, Any]:
 
 def list_template_bundle_summaries(
     library_root: str | Path | None = None,
+    *, invalid: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """List current bounded card metadata without hashing unrelated assets."""
 
@@ -1664,10 +1649,16 @@ def list_template_bundle_summaries(
             continue
         try:
             opaque_id = _uuid(child.name, label="template_uuid")
+            if opaque_id != child.name:
+                continue
+        except ValueError:
+            continue
+        try:
             bundle = load_template_bundle_metadata(opaque_id, library_root=library)
             summaries.append(template_bundle_summary(bundle))
-        except (OSError, ValueError):
-            continue
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            if invalid is not None:
+                invalid.append({"template_uuid": opaque_id, "display_name": opaque_id, "error": str(exc)})
     return summaries
 
 
@@ -1743,7 +1734,7 @@ def delete_template_bundle(
     library_root: str | Path | None = None,
     cleanup_assets: bool = True,
 ) -> dict[str, Any]:
-    """Permanently retire one active or archived global library bundle.
+    """Permanently retire one global library bundle, including damaged entries.
 
     Run selections own complete copied snapshots and remain valid. The live
     UUID directory is atomically moved out of the library before cleanup, and a
@@ -1774,9 +1765,15 @@ def delete_template_bundle(
                 raise ValueError(
                     "Pose-template deletion has both live and pending asset trees"
                 )
-            bundle = _load_template_bundle_detail_unlocked(
-                opaque_id, library_root=library
-            )
+            if not destination.is_dir():
+                raise ValueError("Pose-template bundle must be a directory")
+            try:
+                bundle = _load_template_bundle_detail_unlocked(opaque_id, library_root=library)
+                name, digest, state = bundle["display_name"], bundle["bundle_sha256"], bundle["archive"]["state"]
+                invalid_reason = None
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                name, digest, state = opaque_id, None, "invalid"
+                invalid_reason = str(exc)
             if tombstone_path.exists():
                 tombstone = _load_template_deletion_tombstone(
                     tombstone_path,
@@ -1785,9 +1782,9 @@ def delete_template_bundle(
                 )
                 if (
                     tombstone["asset_cleanup"]["status"] != "pending"
-                    or tombstone.get("display_name") != bundle["display_name"]
-                    or tombstone.get("bundle_sha256") != bundle["bundle_sha256"]
-                    or tombstone.get("state") != bundle["archive"]["state"]
+                    or tombstone.get("display_name") != name
+                    or tombstone.get("bundle_sha256") != digest
+                    or tombstone.get("state") != state
                 ):
                     raise ValueError(
                         "Pose-template deletion tombstone does not match the live bundle"
@@ -1797,9 +1794,10 @@ def delete_template_bundle(
                 tombstone = {
                     "schema_version": DELETION_TOMBSTONE_SCHEMA_VERSION,
                     "template_uuid": opaque_id,
-                    "display_name": bundle["display_name"],
-                    "bundle_sha256": bundle["bundle_sha256"],
-                    "state": bundle["archive"]["state"],
+                    "display_name": name,
+                    "bundle_sha256": digest,
+                    "state": state,
+                    "invalid_reason": invalid_reason,
                     "deleted_at": deleted_at,
                     "asset_cleanup": {
                         "status": "pending",

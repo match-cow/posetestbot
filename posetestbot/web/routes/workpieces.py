@@ -28,7 +28,6 @@ from posetestbot.pose_templates.catalog import (
     catalog_export_manifest,
     default_catalog_root,
     default_working_data_root,
-    delete_catalog_object,
     get_catalog_object,
     import_catalog_metadata,
     load_catalog,
@@ -441,7 +440,14 @@ def workpiece_catalog_delete(catalog_uuid: str):
         value = _json()
         if value.get("confirm") is not True:
             raise ValueError("confirm must be true to delete a workpiece")
-        return jsonify(delete_catalog_object(catalog_uuid))
+        opaque_id = str(uuid.UUID(catalog_uuid))
+        job = job_runner.submit(
+            name="workpiece_delete",
+            command=["uv", "run", "python", "scripts/run_workpiece_delete.py", opaque_id, "--confirm-delete"],
+            cwd=APP_ROOT, resources=["cpu", "disk_io", f"workpiece:{opaque_id}"],
+            scope_kind="library", parameters={"catalog_uuid": opaque_id, "cancelable": False},
+        )
+        return jsonify({"status": job.status, "job_id": job.id, "job": job.to_dict()}), 202
     except Exception as exc:
         return _error(exc)
 

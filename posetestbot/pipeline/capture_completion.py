@@ -100,15 +100,17 @@ def _sensor_check(root: Path, sensor: Mapping[str, Any]) -> dict[str, Any]:
         and (folder / name).stat().st_size > 0
         for name in sidecar_names
     )
+    # A dot-prefixed PNG is the frame writer's temporary file, left behind only
+    # if a camera process died mid-write. It is not a frame.
     rgb_files = {
         path.relative_to(folder).as_posix()
         for path in (folder / RGB_DIR).glob("*.png")
-        if path.is_file() and not path.is_symlink()
+        if path.is_file() and not path.is_symlink() and not path.name.startswith(".")
     }
     depth_files = {
         path.relative_to(folder).as_posix()
         for path in (folder / DEPTH_DIR).glob("*.png")
-        if path.is_file() and not path.is_symlink()
+        if path.is_file() and not path.is_symlink() and not path.name.startswith(".")
     }
     try:
         records = _load_current_frame_records(folder / FRAME_METADATA_JSONL)

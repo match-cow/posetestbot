@@ -530,7 +530,13 @@ def _commit_catalog(value: dict[str, Any], root: Path) -> None:
     # A revision without a current-manifest pointer is harmless and auditable;
     # the reverse ordering can leave the live manifest pointing at assets whose
     # importing transaction is about to roll back.
-    atomic_write_json(revisions / f"{value['version']:08d}.json", value)
+    while True:
+        try:
+            atomic_write_json(revisions / f"{value['version']:08d}.json", value, overwrite=False)
+        except FileExistsError:
+            value["version"] += 1
+        else:
+            break
     atomic_write_json(root / CATALOG_MANIFEST, value)
 
 
@@ -834,11 +840,13 @@ def correct_catalog_object_units(
     )
     derived_root = root / "objects" / item["catalog_uuid"] / "derived"
     _contained(derived_root, root, must_exist=False)
-    derived_root.mkdir(parents=True, exist_ok=True)
-    stage = derived_root / f".{revision_name}.{uuid.uuid4().hex}.tmp"
+    staging_root = root.parent / STAGING_DIRECTORY
+    if staging_root.is_symlink():
+        raise ValueError("Workpiece staging must be a regular directory")
+    staging_root.mkdir(parents=True, exist_ok=True)
+    stage = staging_root / f"{item['catalog_uuid']}.{uuid.uuid4().hex}.tmp"
     destination = derived_root / revision_name
     stage.mkdir(exist_ok=False)
-    moved = False
     orientation_analysis_cache: dict[str, Any] = {
         "status": "not_generated",
         "reason": "The PoseTemplateCreator backend does not provide orientation analysis.",
@@ -859,7 +867,6 @@ def correct_catalog_object_units(
                     item["catalog_uuid"],
                     staged_canonical,
                     canonical_sha256,
-                    catalog_root=root,
                     backend=backend,
                 )
                 atomic_write_json(stage / ORIENTATION_CACHE_FILENAME, analysis)
@@ -901,12 +908,12 @@ def correct_catalog_object_units(
             _assert_unit_correction_target(current, request_value)
             _validate_asset_record(current["assets"]["canonical_ply"], root)
             _validate_asset_record(current["assets"]["source"], root)
+            _contained(derived_root, root, must_exist=True)
             if destination.exists():
                 raise CatalogGeometryRevisionConflict(
                     f"Geometry revision destination already exists: {next_revision}"
                 )
             os.replace(stage, destination)
-            moved = True
             canonical_asset = _asset_record(
                 destination / "canonical.ply",
                 root,
@@ -939,11 +946,19 @@ def correct_catalog_object_units(
             current["assets"]["canonical_ply"] = canonical_asset
             current["assets"].pop("orientation_analysis", None)
             current["updated_at"] = corrected_at
-            _commit_catalog(catalog, root)
-    except Exception:
-        if not moved:
-            shutil.rmtree(stage, ignore_errors=True)
-        raise
+            try:
+                _commit_catalog(catalog, root)
+            except BaseException:
+                published = load_catalog(root, verify_assets=False)
+                if not any(
+                    record["catalog_uuid"] == item["catalog_uuid"]
+                    and record["assets"]["canonical_ply"] == canonical_asset
+                    for record in published["objects"]
+                ):
+                    shutil.rmtree(destination)
+                raise
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
     result = get_catalog_object(item["catalog_uuid"], catalog_root=root)
     result["orientation_analysis_cache"] = orientation_analysis_cache
     return result
@@ -1025,7 +1040,10 @@ def _template_delete_blockers(
             }
         ]
     for child in children:
-        if child.name.startswith("."):
+        try:
+            if str(uuid.UUID(child.name)) != child.name:
+                continue
+        except ValueError:
             continue
         try:
             bundle = validate_template_bundle(child, library_root=library)
@@ -1293,7 +1311,7 @@ def import_catalog_metadata(
             except (OSError, ValueError, TypeError):
                 skipped.append(opaque_id)
                 continue
-            metadata = normalize_catalog_metadata(raw)
+            metadata = normalize_catalog_metadata(raw, require_name=False)
             if all(existing.get(key) == item for key, item in metadata.items()):
                 unchanged.append(opaque_id)
                 continue

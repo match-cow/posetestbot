@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from posetestbot.sensors.contracts import SensorType
+from posetestbot.web.paths import APP_ROOT
 
 
-DEFAULT_SENSOR_SNAPSHOT_ROOT = Path("working_data") / "sensor_snapshots"
+DEFAULT_SENSOR_SNAPSHOT_ROOT = APP_ROOT / "working_data" / "sensor_snapshots"
 SNAPSHOT_MANIFEST = "sensor_snapshot_manifest.json"
 
 

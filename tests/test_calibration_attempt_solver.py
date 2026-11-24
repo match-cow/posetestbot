@@ -35,15 +35,10 @@ from posetestbot.calibration.transforms import robot_ee_to_reference
 
 from posetestbot.calibration.intrinsics import (
     factory_intrinsic_profile,
-    write_intrinsic_profile_collection,
 )
 
 from posetestbot.calibration.targets import DEFAULT_TARGET_SPEC, opencv_grid_board
 
-from posetestbot.io.artifacts import (
-    INTRINSIC_CALIBRATION_PROFILES,
-    INTRINSIC_COMPARISON,
-)
 
 from posetestbot.sensors.contracts import CameraIntrinsics
 
@@ -191,6 +186,7 @@ def test_prepare_attempt_normalizes_paths_and_requires_zero_sync_delta(
                     "sensor_key": "realsense_d435:1",
                     "folder": "realsense_1",
                     "sensor_type": "realsense_d435",
+                    "device_id": "1",
                     "robot_pose_path": "raw_robot_ee_poses.json",
                 }
             ]
@@ -410,6 +406,7 @@ def test_realsense_calibration_timestamp_preflight_requires_global_time(
         {
             "sensor_key": "realsense_d435:1",
             "sensor_type": "realsense_d435",
+            "device_id": "1",
             "folder": "realsense_1",
             "robot_pose_path": "raw_robot_ee_poses.json",
         }
@@ -461,6 +458,7 @@ def test_prepare_attempt_rejects_mutated_per_sensor_timestamp_policy(
         {
             "sensor_key": "realsense_d435:1",
             "sensor_type": "realsense_d435",
+            "device_id": "1",
             "folder": "realsense_1",
             "robot_pose_path": "raw_robot_ee_poses.json",
         }
@@ -526,26 +524,6 @@ def _intrinsic_sensor_fixture(folder: Path) -> dict:
         + "\n"
     )
     return factory_intrinsic_profile(folder)
-
-
-def _unsupported_intrinsic_profile(profile: dict, *, profile_id: str) -> dict:
-    return {
-        **profile,
-        "profile_id": profile_id,
-        "native": {
-            **profile["native"],
-            "distortion_model": "inverse_brown_conrady",
-        },
-        "rectified": None,
-        "source": {
-            **profile["source"],
-            "opencv_projection_compatible": False,
-            "rectification_available": False,
-            "rectification_unavailable_reason": (
-                "sdk_distortion_model_is_not_forward_opencv_compatible"
-            ),
-        },
-    }
 
 
 def _intrinsic_split_detections(
@@ -661,56 +639,6 @@ def test_intrinsic_split_caps_views_preserves_coverage_and_blocks_leakage() -> N
                 > 5
             )
             assert np.linalg.norm(training_descriptor - holdout_descriptor) >= 1.0
-
-
-def test_reuse_intrinsics_rejects_incompatible_existing_and_uses_factory(
-    tmp_path: Path,
-) -> None:
-    run_root = tmp_path / "run"
-    attempt_root = run_root / "processed" / "calibration" / ("d" * 32)
-    attempt_root.mkdir(parents=True)
-    folder = attempt_root / "processed" / "synchronized" / "realsense_1"
-    factory = _intrinsic_sensor_fixture(folder)
-    existing = _unsupported_intrinsic_profile(
-        factory,
-        profile_id="stored-inverse-projection",
-    )
-    write_intrinsic_profile_collection(
-        [existing],
-        run_root / INTRINSIC_CALIBRATION_PROFILES,
-    )
-
-    profiles, by_sensor = attempt_module._intrinsics_for_sensors(
-        run_root,
-        attempt_root,
-        {"realsense_d435:1": folder},
-        {
-            "attempt_id": "d" * 32,
-            "intrinsics_policy": "reuse_compatible_or_factory",
-            "target": {},
-        },
-    )
-
-    assert profiles[0]["profile_id"] == factory["profile_id"]
-    selected = by_sensor["realsense_d435:1"]
-    assert selected["attempt_intrinsics_source"] == (
-        "factory_capture_sidecars_existing_projection_unusable"
-    )
-    comparison = json.loads((attempt_root / INTRINSIC_COMPARISON).read_text())
-    sensor = comparison["sensors"][0]
-    assert sensor["status"] == "factory_selected"
-    assert sensor["existing_projection"] == {
-        "profile_id": "stored-inverse-projection",
-        "opencv_projection_compatible": False,
-        "distortion_model": "inverse_brown_conrady",
-        "reason": "distortion_model_is_not_forward_opencv_compatible",
-    }
-    assert sensor["factory_projection"]["opencv_projection_compatible"] is True
-    assert sensor["unusable_projection"] is None
-    assert {item["profile_id"] for item in sensor["candidates"]} == {
-        factory["profile_id"],
-        "stored-inverse-projection",
-    }
 
 
 def test_manual_intrinsic_plausibility_rejects_absurd_parameters(
@@ -1273,7 +1201,7 @@ def test_parent_attempt_runs_five_phases_writes_evidence_and_cannot_be_replayed(
         "solver_policy": "auto_compare",
         "pnp_methods": ["ITERATIVE"],
         "extrinsic_methods": ["park"],
-        "intrinsics_policy": "reuse_compatible_or_factory",
+        "intrinsics_policy": "compare_factory_opencv",
         "synchronization_policy": "fixed_zero",
         "synchronization_search": attempt_module.time_offset_search_configuration(),
         "synchronization_implementation_revision": (
@@ -1493,7 +1421,7 @@ def _multi_camera_request() -> dict:
         "solver_policy": "auto_compare",
         "pnp_methods": ["IPPE", "ITERATIVE"],
         "extrinsic_methods": ["park"],
-        "intrinsics_policy": "reuse_compatible_or_factory",
+        "intrinsics_policy": "compare_factory_opencv",
         "robot_pose_reference": {
             "schema_version": "robot_pose_reference.v1",
             "status": "verified",

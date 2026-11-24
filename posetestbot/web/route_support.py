@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
@@ -26,11 +27,10 @@ from posetestbot.io.artifacts import (
     RAW_ROBOT_EE_POSES,
     RGB_DIR,
 )
-from posetestbot.jobs.runner import ResourceBusyError, TERMINAL_STATUSES
+from posetestbot.jobs.runner import MAX_JOB_PAGE_LIMIT, ResourceBusyError, TERMINAL_STATUSES
 from posetestbot.pipeline.capture_execution import load_capture_execution_status
 from posetestbot.pipeline.hardware_status import (
     load_hardware_status_report,
-    write_hardware_status_report_with_manifest,
 )
 from posetestbot.pipeline.orchestration import (
     capture_job_recipe,
@@ -46,21 +46,19 @@ from posetestbot.pipeline.run_config import (
     fixed_transform_from_mapping,
     load_run_config_for_run_root,
     run_config_lock,
-    sensor_configs_from_status,
     sensor_configs_from_values,
     write_run_config_with_manifest,
 )
 from posetestbot.robot.status import collect_robot_status
 from posetestbot.runtime.status import collect_runtime_status
 from posetestbot.sensors.registry import list_sensor_adapters
-from posetestbot.sensors.status import collect_sensor_status
 from posetestbot.sync.quality import (
-    build_sync_quality_report,
-    write_sync_quality_report_with_manifest,
+    SCHEMA_VERSION as SYNC_QUALITY_SCHEMA,
+    sync_quality_report_path,
 )
 from posetestbot.web.paths import APP_ROOT
-from posetestbot.web.runtime import job_runner
-from posetestbot.web.security import resolve_web_run_root
+from posetestbot.web.runtime import assert_no_active_run_jobs, job_runner
+from posetestbot.web.security import parse_strict_bool, require_run_folder_target, resolve_web_run_root
 
 
 ACTIVE_JOB_STATUSES = {"queued", "running", "canceling"}
@@ -137,7 +135,6 @@ def _run_config_from_payload(data: dict[str, Any]):
         "fps",
         "velocity_m_s",
         "sensors",
-        "from_detected_sensors",
         "mounting_mode",
         "synchronization",
         "dataset_mode",
@@ -167,14 +164,7 @@ def _run_config_from_payload(data: dict[str, Any]):
         )
 
     mounting_mode = data.get("mounting_mode")
-    if data.get("from_detected_sensors") is True and "sensors" not in data:
-        sensors = sensor_configs_from_status(
-            collect_sensor_status(),
-            default_mounting_mode=mounting_mode,
-        )
-        if not sensors:
-            raise ValueError("No connected sensors were detected")
-    elif "sensors" in data:
+    if "sensors" in data:
         sensors = sensor_configs_from_values(
             data["sensors"], default_mounting_mode=mounting_mode
         )
@@ -302,15 +292,24 @@ def run_config():
             return jsonify({"output": "JSON object required"}), 400
         try:
             root = resolve_web_run_root(data.get("run_root"))
+            require_run_folder_target(root)
+            # A running capture re-checks the config hash it was approved
+            # against; changing the config under it would waste the recording.
+            assert_no_active_run_jobs(root)
             normalized = {**data, "run_root": root.as_posix()}
+            if not root.exists():
+                _run_config_from_payload(normalized)
             with run_config_lock(root):
+                require_run_folder_target(root)
                 config = _run_config_from_payload(normalized)
                 path = write_run_config_with_manifest(root, config)
                 config_data = config.to_dict()
                 preflight = run_preflight_queue_summary(root, config_data)
         except CalibrationSelectionConflict as exc:
             return jsonify({"output": str(exc), "issues": exc.issues}), 409
-        except (OSError, ValueError) as exc:
+        except ResourceBusyError as exc:
+            return jsonify({"output": str(exc)}), 409
+        except (OSError, ValueError, TypeError) as exc:
             return jsonify({"output": str(exc)}), 400
         return (
             jsonify(
@@ -423,15 +422,6 @@ def submit_capture_job():
             allow_cameras=data.get("allow_cameras") is True,
             allow_real_robot=data.get("allow_real_robot") is True,
         )
-        config = load_run_config_for_run_root(root)
-        if config["capture"]["intent"] != data.get("intent"):
-            raise ValueError("Requested intent does not match run_config.json")
-        preflight = run_preflight_queue_summary(root, config)
-        if preflight["ready_for_queue"] is not True:
-            raise ValueError(
-                "A fresh successful preflight is required before capture: "
-                + str(preflight.get("queue_blocker"))
-            )
     except (OSError, ValueError) as exc:
         return jsonify({"output": str(exc)}), 400
     return _submit_recipe(recipe, root)
@@ -552,11 +542,8 @@ def robot_commands():
 
 
 def list_jobs():
-    include_services = request.args.get("include_services", "").lower() in {
-        "1",
-        "true",
-    }
     try:
+        include_services = parse_strict_bool(request.args.get("include_services"), name="include_services", default=False)
         limit = int(request.args.get("limit", 50))
         statuses = {
             item.strip().lower()
@@ -655,7 +642,7 @@ def _capture_job_summary(job) -> dict[str, Any]:
 
 def _capture_jobs_for_run(run_root: str | Path | None) -> list[dict[str, Any]]:
     result = []
-    for job in job_runner.list():
+    for job in job_runner.list_page(run_root=run_root, limit=MAX_JOB_PAGE_LIMIT, search="capture", include_services=False).jobs:
         if (job.parameters or {}).get("purpose") != "capture":
             continue
         if run_root is not None and (
@@ -739,26 +726,6 @@ def robot_status():
 
 
 def hardware_status():
-    if request.method == "POST":
-        data = request.get_json(silent=True)
-        if not isinstance(data, dict) or not data.get("run_root"):
-            return jsonify({"output": "run_root is required"}), 400
-        try:
-            path, report = write_hardware_status_report_with_manifest(
-                data["run_root"],
-                include_sensor_status=data.get("include_sensors", True) is True,
-                include_runtime_status=data.get("include_runtimes", True) is True,
-            )
-        except ValueError as exc:
-            return jsonify({"output": str(exc)}), 400
-        return jsonify(
-            {
-                "output": f"Wrote {path}",
-                "path": path.as_posix(),
-                "run_root": str(Path(data["run_root"])),
-                "report": report,
-            }
-        ), 201 if report["overall_status"] != "error" else 409
     run_root = request.args.get("run_root")
     if not run_root:
         return jsonify({"output": "Missing run_root"}), 400
@@ -772,29 +739,16 @@ def hardware_status():
 
 
 def sync_quality_endpoint():
-    if request.method == "POST":
-        data = request.get_json(silent=True)
-        if not isinstance(data, dict) or not data.get("run_root"):
-            return jsonify({"output": "run_root is required"}), 400
-        try:
-            path, report = write_sync_quality_report_with_manifest(data["run_root"])
-        except FileNotFoundError as exc:
-            return jsonify({"output": str(exc)}), 404
-        except ValueError as exc:
-            return jsonify({"output": str(exc)}), 400
-        return jsonify(
-            {
-                "output": f"Wrote {path}",
-                "path": path.as_posix(),
-                "run_root": str(Path(data["run_root"])),
-                "report": report,
-            }
-        ), 201 if report["overall_status"] != "error" else 409
     run_root = request.args.get("run_root")
     if not run_root:
         return jsonify({"output": "Missing run_root"}), 400
     try:
-        report = build_sync_quality_report(run_root)
+        path = sync_quality_report_path(run_root)
+        if path.is_symlink():
+            raise ValueError("Synchronization quality report must be a regular file")
+        report = json.loads(path.read_text())
+        if not isinstance(report, dict) or report.get("schema_version") != SYNC_QUALITY_SCHEMA:
+            raise ValueError("Unsupported synchronization quality report")
     except FileNotFoundError as exc:
         return jsonify({"output": str(exc)}), 404
     except ValueError as exc:

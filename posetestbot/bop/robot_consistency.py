@@ -25,6 +25,7 @@ from scipy.optimize import linear_sum_assignment
 from scipy.spatial.transform import Rotation
 
 from posetestbot.bop.evaluation import (
+    RESULT_ROTATION_TOLERANCE,
     _has_symlink_component,
     _plain_file,
     _sha256_file,
@@ -80,6 +81,26 @@ def _rigid(value: Any) -> np.ndarray:
         raise ValueError(
             "Robot consistency requires finite rigid transforms in millimetres"
         )
+    return matrix
+
+
+def _estimated_pose(matrix: np.ndarray) -> np.ndarray:
+    """Accept a pose estimate under the tolerance its CSV was imported with.
+
+    A result printed to four decimals is a valid BOP19 submission, but it is
+    not orthonormal to the 1e-5 that calibration-derived transforms meet.
+    Holding estimates to that would fail the evaluation after the official
+    toolkit had already scored it.
+    """
+
+    rotation = matrix[:3, :3]
+    if (
+        not np.isfinite(matrix).all()
+        or np.linalg.norm(rotation.T @ rotation - np.eye(3), ord="fro")
+        > RESULT_ROTATION_TOLERANCE
+        or abs(np.linalg.det(rotation) - 1.0) > RESULT_ROTATION_TOLERANCE
+    ):
+        raise ValueError("Robot consistency requires finite pose estimates")
     return matrix
 
 
@@ -564,18 +585,22 @@ def evaluate(
     models_info = json.loads(
         _path(root, "bop/models_eval/models_info.json").read_text()
     )
-    estimates: dict[tuple[int, int, int], list[np.ndarray]] = defaultdict(list)
-    target_keys = {(row["scene_id"], row["im_id"], row["obj_id"]) for row in targets}
+    ranked_estimates: dict[tuple[int, int, int], list[tuple[float, np.ndarray]]] = defaultdict(list)
+    target_counts = {(row["scene_id"], row["im_id"], row["obj_id"]): row["inst_count"] for row in targets}
     with result_path.open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
             key = (int(row["scene_id"]), int(row["im_id"]), int(row["obj_id"]))
-            if key in target_keys:
+            if key in target_counts:
                 pose = np.eye(4)
                 pose[:3, :3] = np.asarray(
                     [float(value) for value in row["R"].split()]
                 ).reshape(3, 3)
                 pose[:3, 3] = [float(value) for value in row["t"].split()]
-                estimates[key].append(_rigid(pose))
+                ranked_estimates[key].append((float(row["score"]), _estimated_pose(pose)))
+    estimates = {
+        key: [pose for _, pose in sorted(rows, key=lambda row: row[0], reverse=True)[:target_counts[key]]]
+        for key, rows in ranked_estimates.items()
+    }
     tracks: dict[tuple[int, str], dict] = {}
     excluded = []
     candidate_count = matched_count = prediction_count = 0
@@ -595,7 +620,7 @@ def evaluate(
             by_object: dict[int, list[dict]] = defaultdict(list)
             for identity in frame["instances"]:
                 obj_id = identity["obj_id"]
-                if (scene_id, im_id, obj_id) not in target_keys:
+                if (scene_id, im_id, obj_id) not in target_counts:
                     continue
                 by_object[obj_id].append(identity)
                 key = (scene_id, identity["instance_uuid"])
@@ -613,7 +638,7 @@ def evaluate(
                 track["eligible_frames"] += 1
                 candidate_count += 1
             for obj_id, identities in by_object.items():
-                predictions = estimates[(scene_id, im_id, obj_id)]
+                predictions = estimates.get((scene_id, im_id, obj_id), [])
                 prediction_count += len(predictions)
                 if not predictions:
                     continue

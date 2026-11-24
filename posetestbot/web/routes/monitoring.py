@@ -45,13 +45,9 @@ _replacement_lock = threading.Lock()
 _replacement_job_ids: set[str] = set()
 
 
-def _monitor_jobs() -> list[Any]:
-    return [job for job in job_runner.list() if job.parameters.get("monitor_webrtc")]
-
-
 def _active_monitor_job() -> Any | None:
     return next(
-        (job for job in _monitor_jobs() if job.status in ACTIVE_JOB_STATUSES),
+        (job for job in job_runner.active_jobs() if job.parameters.get("monitor_webrtc")),
         None,
     )
 
@@ -178,6 +174,10 @@ def _schedule_monitor_replacement(job: Any, reason: str) -> None:
     thread.start()
 
 
+# The monitor worker is on loopback. The default opener would route these
+# requests through a site HTTP_PROXY unless NO_PROXY happened to cover it.
+_LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 def _proxy_webrtc_offer(port: int, payload: Mapping[str, str]) -> dict[str, Any]:
     body = json.dumps(dict(payload)).encode("utf-8")
     upstream = urllib.request.Request(
@@ -187,7 +187,7 @@ def _proxy_webrtc_offer(port: int, payload: Mapping[str, str]) -> dict[str, Any]
         method="POST",
     )
     try:
-        with urllib.request.urlopen(upstream, timeout=10) as response:
+        with _LOOPBACK_OPENER.open(upstream, timeout=10) as response:
             response_body = response.read(MAX_SDP_BYTES + 4096)
     except (OSError, TimeoutError, socket.timeout, urllib.error.URLError) as exc:
         raise RuntimeError(f"Monitor signaling request failed: {exc}") from exc
@@ -214,7 +214,7 @@ def _proxy_brightness_autocalibration(port: int) -> dict[str, Any]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(upstream, timeout=5) as response:
+        with _LOOPBACK_OPENER.open(upstream, timeout=5) as response:
             response_body = response.read(64 * 1024)
     except urllib.error.HTTPError as exc:
         try:
@@ -264,8 +264,9 @@ def get_monitor_webcam():
                 }
             )
         return jsonify(_monitor_payload(active))
-    jobs = _monitor_jobs()
-    return jsonify(_monitor_payload(jobs[0] if jobs else None))
+    jobs = job_runner.list_page(search="monitor-webrtc:ugreen", limit=1).jobs
+    last = next((job for job in jobs if job.parameters.get("monitor_webrtc")), None)
+    return jsonify(_monitor_payload(last))
 
 
 @monitoring_bp.post("/monitoring/webcam")

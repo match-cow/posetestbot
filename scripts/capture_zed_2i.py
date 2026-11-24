@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import signal
+import threading
 
 from posetestbot.sensors.zed_2i import (
     ZED2iCaptureError,
@@ -28,6 +30,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    # The capture supervisor ends every recording with SIGTERM. Dying on it
+    # mid-frame leaves an RGB without its depth or metadata, which fails the
+    # completion check for an otherwise good run.
+    stop_requested = threading.Event()
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: stop_requested.set())
     try:
         summary = capture_zed_2i_rgbd(
             args.output_path,
@@ -38,6 +45,7 @@ def main() -> int:
             resolution=args.resolution,
             preview=args.preview,
             record=not args.test,
+            stop_requested=stop_requested.is_set,
         )
     except (ValueError, ZED2iCaptureError) as exc:
         raise SystemExit(str(exc)) from exc

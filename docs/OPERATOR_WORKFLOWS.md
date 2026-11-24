@@ -9,11 +9,45 @@ Every long-running action is a background job. A submission continues after
 navigation and remains visible on **Jobs** with its resources, status, log, and
 failure evidence.
 
+**Inspect → Depth Evaluation** follows the completed dataset/GT workflow.
+In **New evaluation**, select frozen geometry and cameras; draft one finish label
+per run and metric settings, then queue a CPU/disk job. It accepts both
+`pose` and `pose_and_masks` exports without a result CSV or BOP19 visibility
+annotations. Inspect retained metrics and RGB/measured/reference/error/missing
+maps in **Results & videos**, or download a standalone research bundle. Its
+**Videos** view generates per-camera MP4s from retained results, with an inline
+player, download, FPS/frame-step/width settings, and recoverable export history.
+It reuses completed evaluation media; FFmpeg/libx264 is required for encoding.
+Use **Compare finishes** to compare completed evaluations
+with common canonical geometry hashes and settings; the active run must be an
+input. Common distance/incidence bins retain separate run/sensor counts and
+unmatched coverage. Work continues after navigation and is cancelable in
+**Jobs**. See [depth quality](concepts/depth-evaluation.md) for definitions,
+assumptions, provenance, and interpretation. BOP Evaluation remains the path
+for pose accuracy; acquisition configuration is unchanged.
+Submitted job links open Jobs with the recorded job ID in its search filter.
+
+**Calibrations** (under **Prepare**) lists every promoted calibration on the
+machine with its age, cameras, reprojection quality, where it lives, and which
+runs use it. Valid calibrations are selectable from their calibration run or
+their retained library entry. Publishing profiles also keeps a verified
+library copy. Deleting a calibration run or a run with the last verified
+snapshot requires a choice about retaining the calibration. The job verifies
+the library copy before deleting a run when you choose to keep its calibration.
+To reuse a calibration that survives only inside a dataset run, verify its
+camera identities and mounts and choose **Keep in library**. Age uses each
+camera's recorded capture date. The publication date is displayed separately.
+An optional lab age threshold flags older profiles for a mount check.
+
 The compact **Active acquisition run** control in the top bar switches the
 browser-local run context in place, so operators can move between discovered
 runs without leaving the current page. Use **Run folders** beside it when
 creating a fresh acquisition folder or performing inventory, archive, move, or
 delete work. Switching context does not modify either run.
+
+The Dashboard's **Run storage** bar shows filesystem space used. Its fill is
+green for ready capacity, amber for warning, and red for critical, matching the
+storage status badge as capacity refreshes.
 
 ## Scope of supporting pages
 
@@ -29,6 +63,7 @@ delete work. Switching context does not modify either run.
 | Pose Estimation | Browser-safe handoff with closed, driver-advertised settings | Requires an appropriate completed BOP export; results return to Inspect |
 | Pose Results | Frame-level estimate/GT comparison and image/video downloads | Consumes one retained compatible result; retains requested visualizations and links to evaluation or the dataset workflow |
 | BOP Evaluation | Inspect-only standard-result validation | Requires annotations and an immutable BOP19 CSV |
+| Depth Evaluation | Inspect-only depth quality and finish comparisons | Requires pose-bearing export and frozen geometry/calibration; no CSV or BOP19 visibility data |
 
 ## Outcome 1: calibrate cameras
 
@@ -107,9 +142,16 @@ internally valid evidence solely for missing a conservative metrology target.
 
 Create a fresh dataset-intent `run_config.v4`. Select a promoted calibration
 for every enabled camera with exact sensor identity, resolution, mounting, and
-orientation. PoseTestBot copies and hash-binds the combined calibration and
+orientation. Sources are listed newest first by capture date, including
+profiles kept in the library. PoseTestBot copies and hash-binds the combined calibration and
 timing policy into `processed/calibration_inputs/<bundle_sha256>/`; later
 source-run edits cannot change this dataset.
+
+Choose the **BOP annotation outcome** explicitly. Nothing is preselected, and
+setup cannot be saved until one of base dataset only, pose ground truth, or
+pose ground truth plus masks is chosen. Setup also cannot be saved from the
+other workflow's page: a calibration run is not converted into a dataset run
+or the reverse. Start a new run folder instead.
 
 ### 2. Choose the pose template and placement
 
@@ -132,7 +174,9 @@ enumerated but process-blocked camera fails readiness.
 ### 4. Record the object dataset
 
 Place objects exactly as confirmed, clear the workcell, and submit the single
-fresh acknowledgement covering both execution permissions. Raw RGB, depth,
+fresh acknowledgement covering both execution permissions. If the saved run
+configuration changes before the supervisor starts, rerun preflight and submit
+capture again. Raw RGB, depth,
 current frame metadata, and strict `robot_pose.v1` packets are preserved. Never
 reuse a prior run folder for a new physical capture.
 

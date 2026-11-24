@@ -1,4 +1,6 @@
-import { useMemo, useState } from "react"
+import { QueryProblem } from "@/components/query-problem"
+import { activeWorkflowHref } from "@/lib/workflow-session"
+import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { AlertTriangle, Archive, ArrowRight, Box, CheckCircle2, Cpu, Download, ExternalLink, FileCheck2, FileJson, LoaderCircle, RefreshCw, ScanSearch, Send, Server } from "lucide-react"
 import { Link } from "react-router-dom"
@@ -67,7 +69,7 @@ function jobOptionLabel(job: ClusterJob) {
 
 export function PoseEstimationPage() {
   const queryClient = useQueryClient()
-  const { selectedRun } = useOperator()
+  const { currentWorkflow, selectedRun } = useOperator()
   const [operator, setOperator] = useState(() => localStorage.getItem("posetestbot.clusterOperator") ?? "")
   const [estimatorId, setEstimatorId] = useState("")
   const [profileId, setProfileId] = useState("")
@@ -83,19 +85,16 @@ export function PoseEstimationPage() {
   const estimators = setup.data?.estimators ?? []
   const effectiveEstimatorId = estimators.some((estimator) => estimator.estimator_id === estimatorId)
     ? estimatorId
-    : setup.data?.estimator_id ?? estimators[0]?.estimator_id ?? ""
-  const selectedEstimator = estimators.find((estimator) => estimator.estimator_id === effectiveEstimatorId) ?? setup.data?.estimator ?? null
+    : (estimators.length === 1 ? estimators[0].estimator_id : "")
+  const selectedEstimator = estimators.find((estimator) => estimator.estimator_id === effectiveEstimatorId) ?? null
   const history = useQuery({
     queryKey: ["cluster-jobs", selectedRun, effectiveEstimatorId],
-    queryFn: () => api<{ jobs: ClusterJob[] }>(query("/cluster/jobs", { run_root: selectedRun, estimator_id: effectiveEstimatorId, limit: 50 })),
+    queryFn: () => api<{ jobs: ClusterJob[]; truncated?: boolean }>(query("/cluster/jobs", { run_root: selectedRun, estimator_id: effectiveEstimatorId, limit: 50 })),
     enabled: Boolean(effectiveEstimatorId),
     retry: false,
     refetchInterval: (state) => state.state.data?.jobs.some((job) => ACTIVE.has(job.state)) ? 2_000 : 10_000,
   })
-  const latestRunJob = useMemo(
-    () => history.data?.jobs[0] ?? null,
-    [history.data],
-  )
+  const latestRunJob = history.data?.jobs[0] ?? null
   const selectedJobId = jobSelection?.runRoot === selectedRun && jobSelection.estimatorId === effectiveEstimatorId
     ? jobSelection.jobId
     : latestRunJob?.job_id ?? null
@@ -120,7 +119,7 @@ export function PoseEstimationPage() {
   const enabledProfiles = setup.data?.enabled_profiles ?? []
   const effectiveProfileId = enabledProfiles.some((profile) => profile.profile_id === profileId)
     ? profileId
-    : enabledProfiles[0]?.profile_id ?? ""
+    : (enabledProfiles.length === 1 ? enabledProfiles[0].profile_id : "")
   const collectedResponse = importedResult?.runRoot === selectedRun
     && importedResult.estimatorId === effectiveEstimatorId
     && importedResult.jobId === currentJob?.job_id
@@ -128,35 +127,29 @@ export function PoseEstimationPage() {
     : null
   const collectedResult = collectedResponse?.result ?? currentJob?.collection?.result ?? null
   const settingsDescriptor = selectedEstimator?.job_settings ?? null
-  const sensorSequences = useMemo(() => setup.data?.sensor_sequences ?? [], [setup.data?.sensor_sequences])
+  const sensorSequences = setup.data?.sensor_sequences ?? []
   const settingsScope = `${selectedRun}\u0000${effectiveEstimatorId}`
-  const defaultSettingsValues = useMemo(() => {
-    const values: Record<string, string | number[]> = {}
-    for (const field of settingsDescriptor?.fields ?? []) {
-      values[field.key] = field.control === "enum"
-        ? field.default
-        : sensorSequences.filter((sensor) => sensor.tracking_eligible).map((sensor) => sensor.scene_id)
-    }
-    return values
-  }, [sensorSequences, settingsDescriptor])
+  const defaultSettingsValues: Record<string, string | number[]> = {}
+  for (const field of settingsDescriptor?.fields ?? []) {
+    defaultSettingsValues[field.key] = field.control === "enum"
+      ? (field.options.length === 1 ? field.options[0].value : "")
+      : sensorSequences.filter((sensor) => sensor.tracking_eligible).map((sensor) => sensor.scene_id)
+  }
   const settingsValues = settingsDraft?.scope === settingsScope ? settingsDraft.values : defaultSettingsValues
   const updateSetting = (key: string, value: string | number[]) => {
     setSettingsDraft({ scope: settingsScope, values: { ...settingsValues, [key]: value } })
   }
-  const settingsBlockers = useMemo(() => {
-    const blockers: string[] = []
-    for (const field of settingsDescriptor?.fields ?? []) {
-      const value = settingsValues[field.key]
-      if (field.control === "enum") {
-        if (typeof value !== "string" || !field.options.some((option) => option.value === value)) blockers.push(`Choose ${field.label.toLowerCase()}.`)
-      } else {
-        const selected = Array.isArray(value) ? value : []
-        if (selected.length < field.minimum_selected) blockers.push("Select at least one eligible sensor sequence.")
-        if (selected.some((sceneId) => !sensorSequences.some((sensor) => sensor.scene_id === sceneId && sensor.tracking_eligible))) blockers.push("The sensor selection contains an ineligible sequence.")
-      }
+  const settingsBlockers = new Set<string>()
+  for (const field of settingsDescriptor?.fields ?? []) {
+    const value = settingsValues[field.key]
+    if (field.control === "enum") {
+      if (typeof value !== "string" || !field.options.some((option) => option.value === value)) settingsBlockers.add(`Choose ${field.label.toLowerCase()}.`)
+    } else {
+      const selected = Array.isArray(value) ? value : []
+      if (selected.length < field.minimum_selected) settingsBlockers.add("Select at least one eligible sensor sequence.")
+      if (selected.some((sceneId) => !sensorSequences.some((sensor) => sensor.scene_id === sceneId && sensor.tracking_eligible))) settingsBlockers.add("The sensor selection contains an ineligible sequence.")
     }
-    return [...new Set(blockers)]
-  }, [sensorSequences, settingsDescriptor, settingsValues])
+  }
   const estimatorSettings = settingsDescriptor
     ? settingsDescriptor.fields.reduce<Record<string, string | number[]>>(
         (settings, field) => ({ ...settings, [field.key]: settingsValues[field.key] }),
@@ -194,7 +187,13 @@ export function PoseEstimationPage() {
   })
 
   const selectedProfile = enabledProfiles.find((profile) => profile.profile_id === effectiveProfileId)
-  const canSubmit = Boolean(setup.data?.ready && effectiveEstimatorId && effectiveProfileId && operator.trim().length >= 2 && settingsBlockers.length === 0 && !submit.isPending)
+  const canSubmit = Boolean(setup.data?.ready && effectiveEstimatorId && effectiveProfileId && operator.trim().length >= 2 && settingsBlockers.size === 0 && !submit.isPending)
+  const submissionReasons = [
+    !effectiveEstimatorId && "Choose an estimator.",
+    !effectiveProfileId && "Choose a resource profile.",
+    operator.trim().length < 2 && "Enter your name (2+ characters).",
+    ...settingsBlockers,
+  ].filter(Boolean).join(" ")
   const runtime = setup.data?.runtime
 
   return <div className="space-y-6" data-testid="pose-estimation-page">
@@ -207,10 +206,13 @@ export function PoseEstimationPage() {
         <Button variant="outline" onClick={() => { void setup.refetch(); void history.refetch() }} disabled={setup.isFetching || history.isFetching}><RefreshCw className={setup.isFetching || history.isFetching ? "animate-spin" : undefined} />Refresh evidence</Button>
       </>}
     />
+    {history.isError && <QueryProblem title="Cluster job history unavailable" error={history.error} retry={() => void history.refetch()} />}
+    {job.isError && <QueryProblem title="Selected cluster job unavailable" error={job.error} retry={() => void job.refetch()} />}
+    {history.data?.truncated && <p role="status" className="rounded border p-3 text-xs">The controller returned a limited history. Older jobs and their results may be missing here.</p>}
     <ProcessHandoff
       title="Consumes the dataset produced by Workflow"
       description="Pose Estimation reads an already exported, annotation-bearing BOP dataset. The external job remains durable after navigation; return through Jobs, then evaluate its immutable BOP19 CSV on BOP Evaluation."
-      to="/workflow/setup"
+      to={currentWorkflow ? activeWorkflowHref(currentWorkflow) : "/workflow/dataset?step=export"}
       action="Return to workflow"
     />
 
@@ -263,7 +265,7 @@ export function PoseEstimationPage() {
                 <div className="space-y-2">
                   <Label htmlFor="cluster-estimator">Estimator method</Label>
                   <Select value={effectiveEstimatorId} onValueChange={setEstimatorId} disabled={!estimators.length}>
-                    <SelectTrigger id="cluster-estimator"><SelectValue placeholder="No estimator installed" /></SelectTrigger>
+                    <SelectTrigger id="cluster-estimator"><SelectValue placeholder={estimators.length ? "Choose an estimator" : "No estimator installed"} /></SelectTrigger>
                     <SelectContent>{estimators.map((estimator) => <SelectItem key={estimator.estimator_id} value={estimator.estimator_id}>{estimator.display_name}{estimator.ready ? " · ready" : " · blocked"}</SelectItem>)}</SelectContent>
                   </Select>
                   {selectedEstimator && <p className="text-[11px] leading-relaxed text-muted-foreground">{selectedEstimator.output_contract ?? "No output contract"} · {selectedEstimator.input_contracts.join(", ") || "No compatible input contract"}</p>}
@@ -274,7 +276,7 @@ export function PoseEstimationPage() {
                     ? <div key={field.key} className="space-y-2">
                       <Label htmlFor={`estimator-setting-${field.key}`}>{field.label}</Label>
                       <Select value={typeof settingsValues[field.key] === "string" ? settingsValues[field.key] as string : ""} onValueChange={(value) => updateSetting(field.key, value)}>
-                        <SelectTrigger id={`estimator-setting-${field.key}`} data-testid={`estimator-setting-${field.key}`}><SelectValue /></SelectTrigger>
+                        <SelectTrigger id={`estimator-setting-${field.key}`} data-testid={`estimator-setting-${field.key}`}><SelectValue placeholder={`Choose ${field.label.toLowerCase()}`} /></SelectTrigger>
                         <SelectContent>{field.options.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
                       </Select>
                       <p className="text-[11px] leading-relaxed text-muted-foreground">{field.description}</p>
@@ -300,18 +302,18 @@ export function PoseEstimationPage() {
                         })}
                       </div>
                     </div>)}
-                  {settingsBlockers.map((message) => <p key={message} role="alert" className="text-[11px] font-medium text-destructive">{message}</p>)}
+                  {[...settingsBlockers].map((message) => <p key={message} role="alert" className="text-[11px] font-medium text-destructive">{message}</p>)}
                 </div>}
                 <div className="space-y-2">
                   <Label htmlFor="cluster-profile">Server-owned resource profile</Label>
                   <Select value={effectiveProfileId} onValueChange={setProfileId} disabled={!enabledProfiles.length}>
-                    <SelectTrigger id="cluster-profile"><SelectValue placeholder="No qualified profile" /></SelectTrigger>
+                    <SelectTrigger id="cluster-profile"><SelectValue placeholder={enabledProfiles.length ? "Choose a resource profile" : "No qualified profile"} /></SelectTrigger>
                     <SelectContent>{setup.data.enabled_profiles.map((profile) => <SelectItem key={profile.profile_id} value={profile.profile_id}>{profile.profile_id} · {profile.gres} · {profile.walltime}</SelectItem>)}</SelectContent>
                   </Select>
                   {selectedProfile && <p className="text-[11px] leading-relaxed text-muted-foreground">{selectedProfile.partition} · {selectedProfile.gres} · {selectedProfile.cpus} CPU · {selectedProfile.memory} · {selectedProfile.walltime}{selectedProfile.max_targets ? ` · bounded to ${selectedProfile.max_targets} targets` : ""}</p>}
                 </div>
-                <div className="space-y-2"><Label htmlFor="cluster-operator">Operator / submitter</Label><Input id="cluster-operator" value={operator} onChange={(event) => setOperator(event.target.value)} placeholder="Name or lab account" maxLength={120} /></div>
-                <Button className="w-full" onClick={() => submit.mutate()} disabled={!canSubmit}>{submit.isPending ? <LoaderCircle className="animate-spin" /> : <Send />}{submit.isPending ? "Submitting…" : `Submit ${selectedEstimator?.display_name ?? "estimator"} job`}</Button>
+                <div className="space-y-2"><Label htmlFor="cluster-operator">Operator / submitter</Label><Input id="cluster-operator" value={operator} onChange={(event) => setOperator(event.target.value)} placeholder="Name or lab account" maxLength={120} />{submissionReasons && <p id="pose-submission-reasons" className="text-xs text-muted-foreground">{submissionReasons}</p>}</div>
+                <Button className="w-full" onClick={() => submit.mutate()} aria-describedby={submissionReasons ? "pose-submission-reasons" : undefined} disabled={!canSubmit}>{submit.isPending ? <LoaderCircle className="animate-spin" /> : <Send />}{submit.isPending ? "Submitting…" : `Submit ${selectedEstimator?.display_name ?? "estimator"} job`}</Button>
                 <p className="text-[11px] leading-relaxed text-muted-foreground">Submission creates a durable controller record and SLURM job. Work continues after navigation. <Link className="font-semibold text-primary-strong underline-offset-4 hover:underline" to="/jobs">Open Jobs</Link>.</p>
               </CardContent>
             </Card>
@@ -352,8 +354,8 @@ export function PoseEstimationPage() {
                   <div className="flex items-center gap-2 text-sm font-semibold text-success"><CheckCircle2 className="size-4" />Immutable BOP19 result collected</div>
                   <p className="mt-1 break-all font-mono text-[9px] text-muted-foreground">{collectedResult.result_id} · {shortHash(collectedResult.sha256)}</p>
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <Button asChild size="sm"><Link to={query("/pose-results", { result_id: collectedResult.result_id, run_root: selectedRun })}><ScanSearch />Inspect poses</Link></Button>
-                    <Button asChild size="sm" variant="outline"><Link to={query("/bop-evaluation", { result_id: collectedResult.result_id, run_root: selectedRun })}>Evaluate<ArrowRight /></Link></Button>
+                    <Button asChild size="sm"><Link to={collectedResponse?.inspection_url ?? query("/pose-results", { result_id: collectedResult.result_id, run_root: selectedRun })}><ScanSearch />Inspect poses</Link></Button>
+                    <Button asChild size="sm" variant="outline"><Link to={collectedResponse?.evaluation_url ?? query("/bop-evaluation", { result_id: collectedResult.result_id, run_root: selectedRun })}>Evaluate<ArrowRight /></Link></Button>
                     <Button asChild size="sm" variant="outline"><a href={collectedResponse?.package_url ?? query(`/bop/evaluation/results/${collectedResult.result_id}/package`, { run_root: selectedRun })}><Box />Package</a></Button>
                     <Button asChild size="sm" variant="outline"><a href={collectedResponse?.download_url ?? query(`/bop/evaluation/results/${collectedResult.result_id}/download`, { run_root: selectedRun })}><Download />CSV</a></Button>
                     {collectedResult.provenance_available && <Button asChild size="sm" variant="outline"><a href={collectedResponse?.provenance_url ?? query(`/bop/evaluation/results/${collectedResult.result_id}/provenance`, { run_root: selectedRun })}><FileJson />Provenance</a></Button>}

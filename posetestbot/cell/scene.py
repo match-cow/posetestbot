@@ -369,8 +369,6 @@ def _depth_scale_to_mm(sensor_folder: Path) -> float | None:
 def _synchronized_source_contexts(
     run_root: Path,
     config: Mapping[str, Any],
-    *,
-    timeline_id: str | None = None,
 ) -> list[dict[str, Any]]:
     candidates = [
         run_root / PROCESSED_DIR / "rectified",
@@ -403,8 +401,6 @@ def _synchronized_source_contexts(
     sources: list[dict[str, Any]] = []
     for name, sensor in enabled_sensors:
         source_id = f"sensor:{name}"
-        if timeline_id is not None and source_id != timeline_id:
-            continue
         folder = folders_by_name.get(name)
         if folder is None:
             continue

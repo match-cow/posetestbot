@@ -20,9 +20,12 @@ class FakeRunner:
     def __init__(self, statuses: list[str] | None = None) -> None:
         self.statuses = statuses or []
 
-    def list(self, *, include_services: bool = False):
-        assert include_services is True
-        return [SimpleNamespace(status=status) for status in self.statuses]
+    def active_jobs(self):
+        return [
+            SimpleNamespace(status=status, parameters={})
+            for status in self.statuses
+            if status in {"queued", "running", "canceling"}
+        ]
 
 
 class FakeWebServiceManager:

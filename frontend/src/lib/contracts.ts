@@ -103,6 +103,7 @@ export interface RunFolderEvidence {
 }
 
 export interface RunFolder {
+  calibration_retention?: "promoted" | "last_snapshot" | null
   path: string
   name: string
   root: string
@@ -151,6 +152,7 @@ export interface RunFolderInventory {
   stale: boolean
   roots: Array<{
     path: string
+    unavailable_reason?: string | null
     exists: boolean
     identity: RunFolderIdentity | null
     storage: RunStorage

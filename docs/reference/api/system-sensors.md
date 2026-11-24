@@ -12,21 +12,18 @@ Status is not physical execution authorization.
 | `GET /runtime/status` | Acquisition runtime visibility, including optional BlenderProc and ZED bindings |
 | `GET /robot/status` | Read-only iiwa connectivity/status evidence |
 | `GET /hardware/status?run_root=…` | Load the run-owned `hardware_status_report.json` |
-| `POST /hardware/status` | Collect and write a hardware snapshot for `run_root`; `no_sensors` and `no_runtimes` may disable sections |
-| `GET /system/lifecycle` | Report whether managed backend restart is configured and whether local jobs block it |
-| `POST /system/restart-backend` | Request the fixed configured user-service restart after explicit confirmation; arbitrary commands/units are rejected |
+| `GET /system/lifecycle` | Report whether managed restart is configured and identify any running capture or non-cancelable job blocking it |
+| `POST /system/restart-backend` | Request the configured user-service restart with explicit confirmation. Returns `409` while a blocking job is active |
 
-Example snapshot request:
+Fetch a snapshot retained by the readiness check.
 
 ```bash
-curl --fail-with-body \
-  -H 'Content-Type: application/json' \
-  -d '{"run_root":"working_data/example"}' \
+curl --fail-with-body --get \
+  --data-urlencode 'run_root=working_data/example' \
   http://127.0.0.1:5000/hardware/status
 ```
 
-The response embeds `hardware_status_report.v1`. An `overall_status` of
-`error` is returned with HTTP `409` while retaining the report as evidence.
+The response embeds `hardware_status_report.v1` when a saved report exists.
 
 ## Sensor aliases and status
 
@@ -35,6 +32,7 @@ The response embeds `hardware_status_report.v1`. An `overall_status` of
 | `GET /sensors/status` | Discover current supported sensors and claimed-device state |
 | `GET /sensors/aliases` | Read reusable lab-default operator aliases |
 | `PUT /sensors/aliases` | Replace validated aliases in `working_data/sensor_aliases.json` |
+| `PATCH /sensors/aliases` | Update selected fields of one camera default using its `sensor_type` and `device_id` |
 
 Aliases are global defaults. Workflow setup snapshots `operator_alias` into
 `run_config.json`; later alias changes do not rename an existing run. Physical
@@ -56,6 +54,7 @@ identity and sensor-folder naming remain bound to sensor type and device ID.
 
 Preview endpoints are diagnostic acquisition tools. They can open cameras and
 therefore conflict with physical capture jobs through the local resource model.
+Preview, snapshot, and monitor defaults resolve from the application checkout.
 
 ## Room monitor
 

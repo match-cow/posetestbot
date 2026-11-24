@@ -1,64 +1,12 @@
-"""Explicit calibration/run frame graph composition helpers."""
+"""Decode the iiwa robot-pose stream into a rigid transform."""
 
 from __future__ import annotations
 
-import math
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 import numpy as np
 from pytransform3d import rotations as pr
 from pytransform3d import transformations as pt
-from pytransform3d.transform_manager import TransformManager
-
-from posetestbot.calibration.profiles import CalibrationProfile
-
-
-def transform_matrix(value: Mapping[str, Any]) -> np.ndarray:
-    quaternion = np.asarray(value.get("rotation_quaternion_wxyz"), dtype=float)
-    translation = np.asarray(value.get("translation_mm"), dtype=float)
-    if quaternion.shape != (4,) or translation.shape != (3,):
-        raise ValueError("Frame transform requires quaternion[4] and translation_mm[3]")
-    if not np.all(np.isfinite([*quaternion, *translation])) or not math.isclose(
-        float(np.linalg.norm(quaternion)), 1.0, abs_tol=1e-3
-    ):
-        raise ValueError("Frame transform must be finite with a normalized quaternion")
-    return pt.transform_from(pr.matrix_from_quaternion(quaternion), translation)
-
-
-def profile_transform_matrix(profile: CalibrationProfile) -> np.ndarray:
-    profile.validate()
-    return transform_matrix(
-        {
-            "rotation_quaternion_wxyz": profile.extrinsics.rotation_quaternion_wxyz,
-            "translation_mm": profile.extrinsics.translation_mm,
-        }
-    )
-
-
-def resolve_profile_transform(
-    profile: CalibrationProfile,
-    to_frame: str,
-    *,
-    fixed_transforms: Sequence[Mapping[str, Any]] = (),
-) -> np.ndarray:
-    """Resolve camera to a requested frame through typed fixed edges."""
-
-    manager = TransformManager()
-    manager.add_transform(
-        profile.extrinsics.from_frame.value,
-        profile.extrinsics.to_frame.value,
-        profile_transform_matrix(profile),
-    )
-    for edge in fixed_transforms:
-        from_frame = str(edge.get("from", ""))
-        edge_to = str(edge.get("to", ""))
-        if not from_frame or not edge_to or from_frame == edge_to:
-            raise ValueError("Fixed frame edges require distinct from/to endpoints")
-        manager.add_transform(from_frame, edge_to, transform_matrix(edge))
-    try:
-        return manager.get_transform("camera", to_frame)
-    except KeyError as exc:
-        raise ValueError(f"No frame path from camera to {to_frame!r}") from exc
 
 
 def robot_flange_to_template_base(robot_pose: Mapping[str, Any]) -> np.ndarray:

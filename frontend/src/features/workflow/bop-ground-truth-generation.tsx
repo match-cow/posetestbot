@@ -41,8 +41,8 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
   const submittedJobId = submittedJob?.runRoot === runRoot ? submittedJob.id : null
 
   const jobs = useQuery({
-    queryKey: ["jobs"],
-    queryFn: () => api<{ jobs: Job[]; resources: Record<string, string> }>("/jobs"),
+    queryKey: ["jobs", runRoot, "bop-annotations"],
+    queryFn: () => api<{ jobs: Job[] }>(query("/jobs", { run_root: runRoot, search: '"bop_annotations": true' })),
     refetchInterval: (state) => state.state.data?.jobs.some((job) => isAnnotationJob(job, runRoot) && ACTIVE_JOB_STATUSES.has(job.status)) ? 1_000 : 5_000,
   })
   const latestPersistedJob = useMemo(
@@ -67,6 +67,7 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
   const configuredMode = setup.data?.configured_mode ?? "none"
   const selectedMode: BopAnnotationMode = configuredMode === "pose" ? "pose" : "pose_and_masks"
   const annotationRequested = configuredMode !== "none"
+  const masksRequested = configuredMode === "pose_and_masks"
   const generate = useMutation({
     mutationFn: () => api<{ job_id: string; job: Job }>("/bop/annotations", {
       method: "POST",
@@ -112,9 +113,9 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
     <CardHeader>
       <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <div>
-          <CardTitle className="text-base">Choose the BOP ground-truth evidence</CardTitle>
+          <CardTitle className="text-base">Generate the configured ground truth</CardTitle>
           <CardDescription className="mt-1 max-w-4xl leading-relaxed">
-            Both choices derive each model-to-camera pose through the immutable object model, pose template, measured placement, robot pose, and selected camera calibration. Choose how much annotation evidence this exported dataset needs.
+            Each model-to-camera pose is derived through the immutable object model, pose template, measured placement, robot pose, and selected camera calibration. The outcome below was chosen in step 1.
           </CardDescription>
         </div>
         {setup.data && <div className="grid shrink-0 grid-cols-3 gap-3 rounded-lg border bg-muted/20 px-4 py-3 text-center text-[10px]">
@@ -145,67 +146,33 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
                 </p>
                 {!setup.data.runtime.available && setup.data.runtime.install_command && <code className="mt-2 block select-all rounded bg-background px-2 py-1.5 text-[10px]">{setup.data.runtime.install_command}</code>}
               </div>
-              <div className={cn("rounded-lg border p-4", setup.data.toolkit.available ? "border-success/30 bg-success/5" : selectedMode === "pose_and_masks" ? "border-warning/40 bg-warning/5" : "bg-muted/20")}>
+              <div className={cn("rounded-lg border p-4", setup.data.toolkit.available ? "border-success/30 bg-success/5" : masksRequested ? "border-warning/40 bg-warning/5" : "bg-muted/20")}>
                 <div className="flex flex-wrap items-center gap-2 text-sm font-semibold">
                   Pinned rendering toolkit
-                  <StatusBadge status={setup.data.toolkit.available ? "ready" : selectedMode === "pose_and_masks" ? "blocked" : "not_required"} tone={setup.data.toolkit.available ? "success" : selectedMode === "pose_and_masks" ? "destructive" : "neutral"}>
-                    {setup.data.toolkit.available ? "available" : selectedMode === "pose_and_masks" ? "required for masks" : "not required for pose-only"}
+                  <StatusBadge status={setup.data.toolkit.available ? "ready" : masksRequested ? "blocked" : "not_required"} tone={setup.data.toolkit.available ? "success" : masksRequested ? "destructive" : "neutral"}>
+                    {setup.data.toolkit.available ? "available" : masksRequested ? "required for masks" : "not required for this run"}
                   </StatusBadge>
                 </div>
                 <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                   {setup.data.toolkit.available
                     ? `Revision ${setup.data.toolkit.revision ?? "unreported"}${setup.data.toolkit.renderer ? ` · ${setup.data.toolkit.renderer} renderer` : ""}.`
-                    : selectedMode === "pose"
-                      ? "Plain pose GT is transform-derived and remains available without the rendering toolkit."
+                    : !masksRequested
+                      ? "Only masks and visibility evidence need the rendering toolkit; this run did not ask for them."
                       : setup.data.toolkit.reason ?? "Install the pinned rendering toolkit before generating masks and visibility evidence."}
                 </p>
-                {!setup.data.toolkit.available && selectedMode === "pose_and_masks" && setup.data.toolkit.install_command && <code className="mt-2 block select-all rounded bg-background px-2 py-1.5 text-[10px]">{setup.data.toolkit.install_command}</code>}
+                {!setup.data.toolkit.available && masksRequested && setup.data.toolkit.install_command && <code className="mt-2 block select-all rounded bg-background px-2 py-1.5 text-[10px]">{setup.data.toolkit.install_command}</code>}
               </div>
             </div>
             <div className="flex justify-end"><Button type="button" variant="outline" size="sm" onClick={refresh}><RefreshCw aria-hidden="true" />Refresh readiness</Button></div>
 
-            <fieldset>
-              <legend className="text-sm font-semibold">Configured optional annotation outcome</legend>
-              <p className="mt-1 text-xs text-muted-foreground">This choice is owned by <Link className="font-medium text-primary-strong underline-offset-4 hover:underline" to="/workflow/dataset?step=configure">Workflow step 1</Link>. Return there to change it before queueing derived evidence.</p>
-              {configuredMode === "none" && <div className="mt-3 rounded-lg border bg-muted/20 p-4 text-xs"><div className="font-semibold">Base BOP dataset only</div><p className="mt-1 text-muted-foreground">No ground-truth job is requested for this run. The verified image/model export remains the complete configured outcome.</p></div>}
-              {annotationRequested && <div className="mt-3 grid gap-4 xl:grid-cols-2" role="radiogroup" aria-label="BOP ground-truth annotation version">
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={selectedMode === "pose"}
-                  disabled
-                  className={cn("rounded-xl border p-4 text-left transition-colors", selectedMode === "pose" ? "border-primary bg-primary/5 ring-1 ring-primary/30" : "hover:border-foreground/25")}
-                >
-                  <span className="flex items-start gap-3">
-                    <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-muted"><FileJson aria-hidden="true" className="size-4 text-primary-strong" /></span>
-                    <span className="min-w-0">
-                      <span className="flex flex-wrap items-center gap-2"><span className="font-semibold">Plain pose ground truth</span><StatusBadge status="warning" tone="warning">not evaluation-ready</StatusBadge></span>
-                      <span className="mt-2 block text-xs leading-relaxed text-muted-foreground">Writes standard per-instance rotations and translations to each scene’s <code>scene_gt.json</code>. No segmentation render is performed.</span>
-                      <span className="mt-3 block rounded-md bg-muted/50 p-2 text-[11px]"><strong>Contains:</strong> target identity and exact model-to-camera pose.</span>
-                      <span className="mt-2 block text-[11px] text-warning-foreground">Does not create <code>scene_gt_info.json</code>, masks, visible masks, or BOP evaluation visibility evidence.</span>
-                    </span>
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={selectedMode === "pose_and_masks"}
-                  disabled
-                  className={cn("rounded-xl border p-4 text-left transition-colors", selectedMode === "pose_and_masks" ? "border-primary bg-primary/5 ring-1 ring-primary/30" : "hover:border-foreground/25")}
-                >
-                  <span className="flex items-start gap-3">
-                    <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10"><ImageIcon aria-hidden="true" className="size-4 text-primary-strong" /></span>
-                    <span className="min-w-0">
-                      <span className="flex flex-wrap items-center gap-2"><span className="font-semibold">Pose + object masks and ROI</span><StatusBadge status="ready" tone="success">recommended</StatusBadge></span>
-                      <span className="mt-2 block text-xs leading-relaxed text-muted-foreground">BlenderProc loads and validates the calibrated scene and emits pose GT; the pinned official BOP Toolkit then renders full and visible masks against captured depth and writes the BOP visibility evidence.</span>
-                      <span className="mt-3 block rounded-md bg-primary/5 p-2 text-[11px]"><strong>Contains:</strong> <code>scene_gt.json</code>, <code>scene_gt_info.json</code>, standard full-frame per-instance <code>mask/</code> and <code>mask_visib/</code> PNGs, plus <code>bbox_obj</code> and <code>bbox_visib</code> ROI metadata.</span>
-                      <span className="mt-2 block text-[11px] text-success">This is the evaluation-compatible choice for simulated or real BOP19 pose results.</span>
-                    </span>
-                  </span>
-                </button>
-              </div>}
-            </fieldset>
+            <div className="space-y-2 rounded-lg border bg-muted/20 p-4 text-xs" data-testid="configured-bop-annotation">
+              <div className="flex items-center gap-2 font-semibold">
+                {masksRequested ? <ImageIcon className="size-4" /> : <FileJson className="size-4" />}
+                {masksRequested ? "Pose ground truth + masks" : annotationRequested ? "Pose ground truth" : "Base BOP dataset only"}
+              </div>
+              <p className="text-muted-foreground">{masksRequested ? "Includes camera-relative poses, full and visible masks, bounding boxes, and BOP Evaluation visibility evidence." : annotationRequested ? "Adds camera-relative poses in scene_gt.json. BOP Evaluation requires pose ground truth + masks." : "The verified image and model export completes the configured outcome."}</p>
+              <Link to="/workflow/dataset?step=configure" className="font-medium text-primary-strong underline underline-offset-4">Change in step 1</Link>
+            </div>
 
             {annotationRequested && (selectedReadiness?.blockers.length ?? 0) > 0 && <div role="alert" data-testid="bop-annotation-blockers" className="rounded-lg border border-warning/40 bg-warning/5 p-4">
               <div className="flex items-center gap-2 text-xs font-semibold text-warning-foreground"><AlertTriangle aria-hidden="true" className="size-4" />Ground truth cannot be queued yet</div>

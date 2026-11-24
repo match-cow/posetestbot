@@ -164,10 +164,8 @@ def test_generated_route_reference_matches_every_flask_rule() -> None:
         ("POST", "/capture/jobs"): "Queue the supervised capture recipe",
         ("GET", "/run-config"): "Load run configuration",
         ("POST", "/run-config"): "Create or update run configuration",
-        ("GET", "/sync/quality"): "Build synchronization quality report",
-        ("POST", "/sync/quality"): ("Build and persist synchronization quality report"),
+        ("GET", "/sync/quality"): "Load synchronization quality report",
         ("GET", "/hardware/status"): "Load hardware status report",
-        ("POST", "/hardware/status"): ("Collect and persist hardware status report"),
     }
     for (method, path), purpose in mixed_method_purposes.items():
         assert f"| `{method}` | `{path}` | JSON | {purpose} |" in reference

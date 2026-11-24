@@ -32,6 +32,7 @@ class RouteRecord:
 def _group(path: str) -> str:
     prefixes = (
         ("/bop/", "BOP annotation and evaluation"),
+        ("/depth/", "Inspect depth evaluation"),
         ("/calibration-targets", "Calibration targets"),
         ("/calibration/", "Calibration"),
         ("/capture", "Capture"),
@@ -59,6 +60,9 @@ def _group(path: str) -> str:
 
 
 INTERFACE_OVERRIDES = {
+    "depth_evaluation.depth_report": "JSON",
+    "depth_evaluation.depth_download": "ZIP",
+    "depth_evaluation.depth_video_media": "MP4",
     "bop_evaluation.download_bop_result_package": "ZIP",
     "bop_inspection.bop_inspection_mask": "PNG",
     "bop_inspection.bop_inspection_model": "PLY",
@@ -72,6 +76,10 @@ INTERFACE_OVERRIDES = {
 
 
 def _interface(path: str, endpoint: str) -> str:
+    if endpoint == "depth_evaluation.depth_video_media" and path.endswith("/poster"):
+        return "PNG"
+    if endpoint == "depth_evaluation.depth_frame_media" and "/media/" in path:
+        return "PNG / NPZ"
     if endpoint in INTERFACE_OVERRIDES:
         return INTERFACE_OVERRIDES[endpoint]
     if path == "/":
@@ -108,15 +116,9 @@ METHOD_PURPOSE_OVERRIDES = {
     ("orchestration.run_config", "GET"): "Load run configuration",
     ("orchestration.run_config", "POST"): "Create or update run configuration",
     ("sync_quality.sync_quality_endpoint", "GET"): (
-        "Build synchronization quality report"
-    ),
-    ("sync_quality.sync_quality_endpoint", "POST"): (
-        "Build and persist synchronization quality report"
+        "Load synchronization quality report"
     ),
     ("system_status.hardware_status", "GET"): "Load hardware status report",
-    ("system_status.hardware_status", "POST"): (
-        "Collect and persist hardware status report"
-    ),
 }
 
 

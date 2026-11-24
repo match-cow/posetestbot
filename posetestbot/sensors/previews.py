@@ -8,8 +8,10 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
+from posetestbot.web.paths import APP_ROOT
 
-DEFAULT_SENSOR_PREVIEW_ROOT = Path("working_data") / "sensor_previews"
+
+DEFAULT_SENSOR_PREVIEW_ROOT = APP_ROOT / "working_data" / "sensor_previews"
 PREVIEW_STATUS_NAME = "preview_status.json"
 PREVIEW_IMAGE_NAME = "latest.jpg"
 PREVIEW_STOP_NAME = "stop"

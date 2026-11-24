@@ -7,7 +7,7 @@ import re
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import numpy as np
 
@@ -74,7 +74,7 @@ class OAKDProPreviewStream:
                 self.dai.ImgFrame.Type.BGR888i,
                 self.dai.ImgResizeMode.STRETCH,
                 float(fps),
-                True,
+                enableUndistortion=True,
             )
             self.queue = output.createOutputQueue()
             set_blocking = getattr(self.queue, "setBlocking", None)
@@ -261,6 +261,8 @@ def camera_intrinsics_from_matrix(
     height: int = DEFAULT_HEIGHT,
     depth_scale_to_mm: float = 1.0,
     distortion: tuple[float, ...] = (),
+    distortion_model: str = "brown_conrady",
+    projection_source: str | None = None,
 ) -> CameraIntrinsics:
     values = np.asarray(matrix, dtype=float).reshape(-1)
     if values.size != 9:
@@ -270,6 +272,8 @@ def camera_intrinsics_from_matrix(
         width=int(width),
         height=int(height),
         distortion=tuple(float(value) for value in distortion),
+        distortion_model=distortion_model,
+        projection_source=projection_source,
         depth_scale_to_mm=float(depth_scale_to_mm),
     )
 
@@ -286,15 +290,6 @@ def _camera_intrinsics_from_depthai(
         matrix = calibration.getCameraIntrinsics(
             dai.CameraBoardSocket.CAM_A, width, height
         )
-        try:
-            distortion = tuple(
-                float(value)
-                for value in calibration.getDistortionCoefficients(
-                    dai.CameraBoardSocket.CAM_A
-                )
-            )
-        except Exception:
-            distortion = ()
     except Exception as exc:
         raise OAKDProCaptureError(
             f"Unable to read OAK-D Pro RGB calibration: {type(exc).__name__}: {exc}"
@@ -304,7 +299,9 @@ def _camera_intrinsics_from_depthai(
         width=width,
         height=height,
         depth_scale_to_mm=1.0,
-        distortion=distortion,
+        distortion=(0.0,) * 5,
+        distortion_model="none",
+        projection_source="depthai_device_undistorted",
     )
 
 
@@ -371,7 +368,7 @@ def write_oak_d_pro_rgbd_frame(
         sensor_timestamp_ns=rgb_timestamp_ns,
         depth_sensor_timestamp_ns=depth_timestamp_ns,
         host_received_timestamp_ns=host_received_timestamp_ns,
-        host_wall_timestamp_ns=capture_wall_timestamp_ns,
+        host_wall_timestamp_ns=host_wall_received_timestamp_ns,
         frame_stem=str(capture_wall_timestamp_ns // 1_000_000),
         extra_metadata=metadata,
     )
@@ -458,7 +455,7 @@ def _build_pipeline_outputs(
         dai.ImgFrame.Type.BGR888i,
         dai.ImgResizeMode.STRETCH,
         float(fps),
-        True,
+        enableUndistortion=True,
     )
     left.requestOutput(
         (width, height),
@@ -503,10 +500,15 @@ def capture_oak_d_pro_rgbd(
     preview: bool = False,
     record: bool = True,
     max_rgb_depth_delta_ns: int = DEFAULT_RGB_DEPTH_DELTA_NS,
+    stop_requested: Callable[[], bool] | None = None,
     dai_module: Any | None = None,
     cv2_module: Any | None = None,
 ) -> dict[str, Any]:
-    """Capture aligned OAK-D Pro RGB-D frames into the current folder contract."""
+    """Capture aligned OAK-D Pro RGB-D frames into the current folder contract.
+
+    ``stop_requested`` is polled between frames so a stop never lands inside a
+    frame write.
+    """
 
     if fps <= 0:
         raise ValueError("fps must be positive")
@@ -565,10 +567,15 @@ def capture_oak_d_pro_rgbd(
                 sidecar_paths = {key: path.name for key, path in written.items()}
 
             pipeline.start()
-            while pipeline.isRunning() and (
-                max_frames <= 0 or captured_frames < max_frames
+            while (
+                pipeline.isRunning()
+                and (max_frames <= 0 or captured_frames < max_frames)
+                and not (stop_requested and stop_requested())
             ):
-                message_group = output_queue.get()
+                message_group = output_queue.tryGet()
+                if message_group is None:
+                    time.sleep(0.01)
+                    continue
                 host_wall_received_timestamp_ns = time.time_ns()
                 host_received_timestamp_ns = time.monotonic_ns()
                 depthai_now_ns = depthai_timedelta_ns(dai.Clock.now())

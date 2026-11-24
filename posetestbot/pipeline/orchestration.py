@@ -27,6 +27,7 @@ from posetestbot.pipeline.preflight import run_preflight_queue_summary
 from posetestbot.pipeline.run_config import (
     CAPTURE_INTENTS,
     load_run_config_for_run_root,
+    run_config_sha256,
 )
 from posetestbot.sensors.readiness import (
     probe_selected_sensor_readiness,
@@ -85,6 +86,7 @@ def execute_capture(
     intent: str,
     allow_cameras: bool,
     allow_real_robot: bool,
+    approved_config_sha256: str | None = None,
     probe_selected_sensors=probe_selected_sensor_readiness,
 ) -> tuple[Path, dict[str, Any]]:
     """Run the fixed supervised physical-capture recipe."""
@@ -94,7 +96,7 @@ def execute_capture(
             "Capture requires allow_cameras=true and allow_real_robot=true"
         )
     root = Path(run_root)
-    config = load_run_config_for_run_root(root)
+    config = load_run_config_for_run_root(root, approved_sha256=approved_config_sha256)
     _validated_intent(config, intent)
     saved_preflight = run_preflight_queue_summary(root, config)
     if saved_preflight["ready_for_queue"] is not True:
@@ -103,11 +105,13 @@ def execute_capture(
             "A fresh successful run preflight is required before capture "
             f"({blocker})"
         )
+    approved_config_sha256 = run_config_sha256(config)
 
     # This must precede capture-plan and supervisor artifacts. SDK discovery can
     # still enumerate a camera held by a crashed recorder, so prove that every
     # selected adapter can actually open and deliver a frame without recording.
     selected_sensor_readiness = probe_selected_sensors(config)
+    config = load_run_config_for_run_root(root, approved_sha256=approved_config_sha256)
     if not selected_sensor_readiness_matches_config(
         selected_sensor_readiness,
         config,
@@ -122,7 +126,7 @@ def execute_capture(
             + ("; ".join(blocked) if blocked else "readiness probe failed")
         )
 
-    plan_capture(root)
+    write_capture_plan_with_manifest(root, config)
     _, capture_preflight = write_capture_plan_preflight_with_manifest(
         root,
         include_sensor_status=True,
@@ -147,6 +151,7 @@ def execute_capture(
         allow_real_robot=True,
         include_sensor_status=True,
         write_plan_if_missing=False,
+        approved_config_sha256=approved_config_sha256,
     )
 
 
@@ -257,6 +262,15 @@ def capture_job_recipe(
             "Capture requires allow_cameras=true and allow_real_robot=true"
         )
     root = Path(run_root)
+    config = load_run_config_for_run_root(root)
+    _validated_intent(config, intent)
+    preflight = run_preflight_queue_summary(root, config)
+    if preflight["ready_for_queue"] is not True:
+        raise ValueError(
+            "A fresh successful preflight is required before capture: "
+            + str(preflight.get("queue_blocker"))
+        )
+    approved_config_sha256 = run_config_sha256(config)
     return JobRecipe(
         name=f"{intent.capitalize()} capture",
         command=(
@@ -269,6 +283,8 @@ def capture_job_recipe(
             intent,
             "--allow-cameras",
             "--allow-real-robot",
+            "--approved-config-sha256",
+            approved_config_sha256,
         ),
         resources=("camera", "disk_io", "robot_command"),
         parameters={
@@ -277,6 +293,7 @@ def capture_job_recipe(
             "intent": intent,
             "allow_cameras": True,
             "allow_real_robot": True,
+            "approved_config_sha256": approved_config_sha256,
         },
     )
 

@@ -366,6 +366,18 @@ def test_result_validation_requires_the_exact_bop19_header(tmp_path: Path) -> No
         validate_bop_result_csv(path, dataset=dataset)
 
 
+def test_result_validation_rejects_a_byte_order_mark(tmp_path: Path) -> None:
+    # Later readers of the retained CSV use plain UTF-8, so a BOM accepted here
+    # would only fail after import, when the immutable result cannot be fixed.
+    run_root = make_tiny_evaluation_run(tmp_path)
+    dataset = inspect_dataset(run_root)
+    path = write_result_csv(tmp_path / f"method_{dataset['dataset_alias']}-test.csv")
+    path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())
+
+    with pytest.raises(ValueError, match="header"):
+        validate_bop_result_csv(path, dataset=dataset)
+
+
 def test_result_validation_enforces_per_image_timing_and_dataset_filename(
     tmp_path: Path,
 ) -> None:

@@ -4,8 +4,6 @@ import { X } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 export const Sheet = DialogPrimitive.Root
-export const SheetTrigger = DialogPrimitive.Trigger
-export const SheetClose = DialogPrimitive.Close
 
 export const SheetTitle = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Title>,
@@ -36,7 +34,4 @@ SheetContent.displayName = DialogPrimitive.Content.displayName
 
 export function SheetHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return <div className={cn("flex flex-col gap-1.5 pr-8", className)} {...props} />
-}
-export function SheetFooter({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("mt-auto flex justify-end gap-2", className)} {...props} />
 }

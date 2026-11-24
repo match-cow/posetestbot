@@ -113,6 +113,71 @@ def test_local_job_runner_requires_valid_explicit_scope(tmp_path: Path) -> None:
     assert finished.parameters["run_root"] == "kept-for-command-provenance"
 
 
+@pytest.mark.parametrize("failure", ["persistence", "thread_start"])
+def test_submit_rolls_back_index_record_and_disk_reservation(
+    tmp_path, monkeypatch, failure
+):
+    runner = LocalJobRunner(tmp_path / "jobs")
+    attempted = []
+    started = []
+    original_persist = runner._persist_job
+    original_start = runner_module.threading.Thread.start
+    command = [sys.executable, "-c", "pass"]
+
+    def persist(job):
+        attempted.append(job.id)
+        original_persist(job)
+        if failure == "persistence":
+            raise OSError("Injected persistence failure after indexing")
+
+    def start(thread):
+        original_start(thread)
+        started.append(thread)
+        raise RuntimeError("Injected thread_start failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runner, "_persist_job", persist)
+        if failure == "thread_start":
+            patch.setattr(runner_module.threading.Thread, "start", start)
+        with pytest.raises((OSError, RuntimeError), match=f"Injected {failure}"):
+            runner.submit(
+                name="aborted",
+                command=command,
+                scope_kind="global",
+                resources=["disk_io"],
+            )
+    for thread in started:
+        thread.join(timeout=5)
+    assert len(attempted) == 1
+    assert runner.active_jobs() == [] and runner.resource_holders() == {}
+    assert not (runner.job_root / attempted[0]).exists()
+    with runner._index_connection() as db:
+        assert db.execute("SELECT id FROM jobs").fetchall() == []
+    job = runner.submit(
+        name="retry", command=command, scope_kind="global", resources=["disk_io"]
+    )
+    assert runner.wait(job.id, timeout=5).status == SUCCEEDED
+
+
+def test_job_binding_is_persisted_before_the_worker_starts(tmp_path):
+    runner = LocalJobRunner(tmp_path / "jobs")
+    binding = tmp_path / "binding"
+    job = runner.submit(
+        name="bound job",
+        command=[
+            sys.executable,
+            "-c",
+            "from pathlib import Path; import sys; print(Path(sys.argv[1]).read_text())",
+            str(binding),
+        ],
+        scope_kind="global",
+        before_start=binding.write_text,
+    )
+    finished = runner.wait(job.id, timeout=5)
+    assert finished.status == SUCCEEDED
+    assert job.id in finished.tail
+
+
 def test_job_index_rebuilds_without_rewriting_or_pruning_history(
     tmp_path: Path,
 ) -> None:
@@ -395,6 +460,39 @@ def test_local_job_runner_rejects_busy_resources(tmp_path: Path) -> None:
         assert runner.resource_holders()["robot"] == job.id
     finally:
         runner.cancel(job.id)
+
+
+def test_reader_thread_io_error_fails_the_job_and_frees_its_resources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = LocalJobRunner(tmp_path / "jobs")
+    original = runner._append_tail
+    failures = iter([OSError(28, "No space left on device")])
+
+    def append_tail_on_a_full_disk(job, line):
+        if line == "started":
+            raise next(failures)
+        original(job, line)
+
+    monkeypatch.setattr(runner, "_append_tail", append_tail_on_a_full_disk)
+    job = runner.submit(
+        name="non-cancelable storage work",
+        scope_kind="global",
+        command=[
+            sys.executable,
+            "-c",
+            "import time; print('started', flush=True); time.sleep(30)",
+        ],
+        resources=["robot"],
+    )
+
+    finished = runner.wait(job.id, timeout=10)
+
+    assert finished.status == FAILED
+    assert "No space left on device" in finished.message
+    assert runner.resource_holders() == {}
+    with pytest.raises(ProcessLookupError):
+        os.killpg(finished.supervisor_process_group_id, 0)
 
 
 def test_local_job_runner_applies_hierarchical_resource_conflicts(

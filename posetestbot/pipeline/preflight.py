@@ -93,6 +93,9 @@ def run_preflight_queue_summary(
     overall_status = report.get("overall_status")
     if overall_status == "error":
         blocker = "failed_preflight"
+    elif overall_status not in ("ok", "warning"):
+        overall_status = None
+        blocker = "invalid_preflight"
     elif not matches_config:
         blocker = "stale_preflight"
     elif not selected_sensor_readiness_matches_config(

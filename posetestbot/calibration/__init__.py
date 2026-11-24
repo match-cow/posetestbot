@@ -1,2 +1,2 @@
-"""Calibration profile schemas and migration helpers."""
+"""Calibration evidence, profiles, and transforms."""
 

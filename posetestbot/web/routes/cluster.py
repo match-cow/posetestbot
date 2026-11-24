@@ -22,7 +22,7 @@ from posetestbot.bop.evaluation import (
     public_result_descriptor,
 )
 from posetestbot.cluster.client import ClusterClientError, new_idempotency_key
-from posetestbot.jobs.runner import ResourceBusyError, TERMINAL_STATUSES
+from posetestbot.jobs.runner import ResourceBusyError
 from posetestbot.run_folders import (
     resolve_destination_root,
     resolve_direct_run_folder,
@@ -30,12 +30,14 @@ from posetestbot.run_folders import (
 )
 from posetestbot.sensors.registry import sensor_folder_name
 from posetestbot.web.runtime import (
+    assert_no_active_run_jobs,
     get_cluster_client,
     get_cluster_service_manager,
     get_job_runner,
     get_web_runtime,
+    serialize_run_storage_submission,
 )
-from posetestbot.web.security import resolve_web_run_root, web_run_roots
+from posetestbot.web.security import RESERVED_RUN_NAMES, parse_strict_bool, resolve_web_run_root, web_run_roots
 
 
 cluster_bp = Blueprint("cluster", __name__)
@@ -83,6 +85,13 @@ CONTROLLER_BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 CONTROLLER_SECRET_LINE_RE = re.compile(
     r"(?im)^.*\b(?:authorization|api[_ -]?token|password|private key|secret)\b\s*[:=].*$"
 )
+CONTROLLER_LOCATION_RE = re.compile(
+    r"(?i)(?:[\w.%-]+@)?[\w-]+(?:\.[\w-]+)+(?::\d+)?"
+    r"|[\w.%-]+@[\w.-]+|(?:~|\$\{?\w+\}?|[\w.-]+)/(?:[^\s'\"<>|,;)\]}]+)"
+)
+CONTROLLER_IDENTITY_RE = re.compile(
+    r"(?i)(\b(?:hostname|username|user|login|account|server|host)\b\s*[:=]\s*)[\w.%-]+"
+)
 PUBLIC_ESTIMATOR_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{2,63}$")
 PUBLIC_DRIVER_ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{2,95}$")
 PUBLIC_RUNTIME_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,95}$")
@@ -117,7 +126,14 @@ def _require_id(value: Any, *, prefix: str | None = None) -> str:
 
 def _error(exc: Exception):
     if isinstance(exc, ClusterClientError):
-        return jsonify({"output": _public_controller_text(exc)}), exc.status
+        messages = {
+            400: "The controller rejected the request.",
+            401: "The controller did not accept the configured connection.",
+            403: "The controller refused this operation.",
+            404: "The requested controller record was not found.",
+            409: "The controller reported a conflict. Refresh its status before retrying.",
+        }
+        return jsonify({"output": messages.get(exc.status, "The controller could not complete the request.")}), exc.status
     if isinstance(exc, ResourceBusyError | FileExistsError | RuntimeError):
         return jsonify({"output": str(exc)}), 409
     if isinstance(exc, FileNotFoundError | KeyError):
@@ -141,7 +157,9 @@ def _public_controller_text(value: Any) -> str | None:
         return None
     text = CONTROLLER_SECRET_LINE_RE.sub("[redacted controller detail]", str(value))
     text = CONTROLLER_BEARER_RE.sub("Bearer [redacted]", text)
-    return CONTROLLER_PATH_RE.sub("[controller path]", text)
+    text = CONTROLLER_PATH_RE.sub("[controller path]", text)
+    text = CONTROLLER_LOCATION_RE.sub("[controller detail]", text)
+    return CONTROLLER_IDENTITY_RE.sub(r"\1[controller detail]", text)
 
 
 def _selected_mapping(value: Any, fields: set[str]) -> dict[str, Any]:
@@ -559,6 +577,38 @@ def _public_archive(value: Any) -> dict[str, Any]:
 
 
 def _controller_status() -> dict[str, Any]:
+    """Browser-safe controller status; a contract violation becomes a blocker.
+
+    A newer companion can advertise an estimator or settings control this
+    console does not know. Sanitizing it raises, and without this guard the
+    status route answered with an HTML 500 instead of the designed blocker.
+    """
+
+    try:
+        return _sanitized_controller_status()
+    except (RuntimeError, TypeError, ValueError, KeyError, AttributeError):
+        return {
+            "schema_version": "posetestbot_cluster_status_proxy.v1",
+            "ready": False,
+            "available": False,
+            "integration": {
+                "enabled": _settings().cluster_enabled,
+                "controller_configured": get_web_runtime().cluster_client is not None,
+            },
+            "blockers": [
+                {
+                    "code": "controller_contract_invalid",
+                    "message": (
+                        "The cluster controller advertised an estimator or runtime "
+                        "this console cannot interpret. Update PoseTestBot and the "
+                        "cluster companion to matching releases."
+                    ),
+                }
+            ],
+        }
+
+
+def _sanitized_controller_status() -> dict[str, Any]:
     settings = _settings()
     integration = {
         "enabled": settings.cluster_enabled,
@@ -598,7 +648,12 @@ def _controller_status() -> dict[str, Any]:
             "ready": False,
             "available": False,
             "integration": integration,
-            "blockers": [{"code": "controller_unavailable", "message": str(exc)}],
+            "blockers": [
+                {
+                    "code": "controller_unavailable",
+                    "message": _public_controller_text(exc),
+                }
+            ],
         }
     if (
         status.get("schema_version") != "posetestbot_cluster_status.v1"
@@ -1297,31 +1352,6 @@ def _build_pose_setup(
     }
 
 
-def _all_local_jobs():
-    return get_job_runner().list(include_services=True)
-
-
-def _assert_no_active_run_jobs(run_root: Path) -> None:
-    active: list[str] = []
-    for job in _all_local_jobs():
-        if (
-            job.status in TERMINAL_STATUSES
-            or job.scope_kind != "run"
-            or not job.run_root
-        ):
-            continue
-        try:
-            same = Path(job.run_root).resolve() == run_root.resolve()
-        except OSError:
-            same = job.run_root == run_root.as_posix()
-        if same:
-            active.append(job.id)
-    if active:
-        raise ResourceBusyError(
-            "Run folder has active background work: " + ", ".join(sorted(active))
-        )
-
-
 @cluster_bp.get("/cluster/status")
 def cluster_status():
     return jsonify(_controller_status())
@@ -1409,6 +1439,7 @@ def cluster_pose_setup():
 
 
 @cluster_bp.post("/cluster/pose-estimation/jobs")
+@serialize_run_storage_submission
 def submit_cluster_pose_job():
     try:
         _require_cluster_enabled()
@@ -1423,6 +1454,7 @@ def submit_cluster_pose_job():
         }:
             raise ValueError("Pose-estimation submission contains unsupported fields")
         run_root = resolve_web_run_root(value.get("run_root"))
+        assert_no_active_run_jobs(run_root)
         estimator_id = value.get("estimator_id")
         if (
             not isinstance(estimator_id, str)
@@ -1494,8 +1526,10 @@ def list_cluster_jobs():
             and PUBLIC_ESTIMATOR_ID_RE.fullmatch(estimator_id) is None
         ):
             raise ValueError("estimator_id is invalid")
+        filtered_request = run_root is not None or estimator_id is not None
+        controller_limit = 100 if filtered_request else limit
         response = get_cluster_client().estimation_jobs(
-            limit=100 if run_root is not None or estimator_id is not None else limit,
+            limit=controller_limit,
             state=request.args.get("state"),
         )
         jobs = response.get("jobs") if isinstance(response, Mapping) else None
@@ -1518,6 +1552,7 @@ def list_cluster_jobs():
             ):
                 continue
             filtered.append(job)
+        truncated = bool(len(filtered) > limit or len(jobs) >= controller_limit or response.get("next_cursor"))
         filtered = filtered[:limit]
         results_by_job: dict[str, Mapping[str, Any]] = {}
         if run_root is not None:
@@ -1546,6 +1581,7 @@ def list_cluster_jobs():
         return jsonify(
             {
                 "jobs": public_jobs,
+                "truncated": truncated,
                 "next_cursor": (
                     None
                     if run_root is not None or estimator_id is not None
@@ -1562,8 +1598,9 @@ def get_cluster_job(job_id: str):
     try:
         _require_cluster_enabled()
         _require_id(job_id)
+        include_log = parse_strict_bool(request.args.get("include_log"), name="include_log", default=False)
         response = _public_job_response(get_cluster_client().job(job_id))
-        if request.args.get("include_log") in {"1", "true", "yes"}:
+        if include_log:
             response["log"] = _public_controller_text(
                 get_cluster_client().job_log(job_id)
             )
@@ -1737,8 +1774,10 @@ def import_cluster_result(job_id: str):
                 {
                     "result": public_result_descriptor(registered),
                     "created": created,
-                    "evaluation_url": f"/bop-evaluation?{result_query}",
-                    "inspection_url": f"/pose-results?{result_query}",
+                    # The console is a hash-routed single-page app, so a
+                    # page link has to address the route after "#".
+                    "evaluation_url": f"/#/bop-evaluation?{result_query}",
+                    "inspection_url": f"/#/pose-results?{result_query}",
                     "download_url": (
                         f"/bop/evaluation/results/{result_id}/download"
                         f"?{run_query}"
@@ -1798,6 +1837,7 @@ def list_cluster_archives():
 
 
 @cluster_bp.post("/cluster/archives")
+@serialize_run_storage_submission
 def create_cluster_archive():
     try:
         _require_cluster_enabled()
@@ -1808,7 +1848,7 @@ def create_cluster_archive():
         )
         expected = value.get("expected_identity")
         validate_expected_identity(run_root, expected)
-        _assert_no_active_run_jobs(run_root)
+        assert_no_active_run_jobs(run_root)
         operator = value.get("operator")
         if not isinstance(operator, str) or not operator.strip():
             raise ValueError("operator is required")
@@ -1839,7 +1879,7 @@ def restore_cluster_archive(archive_id: str):
         if destination_name is not None and (
             not isinstance(destination_name, str)
             or Path(destination_name).name != destination_name
-            or destination_name in {".", ".."}
+            or destination_name.startswith(".") or destination_name in RESERVED_RUN_NAMES
         ):
             raise ValueError("destination_name must be one folder name")
         operator = value.get("operator")

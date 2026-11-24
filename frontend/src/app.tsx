@@ -8,9 +8,11 @@ const WorkflowPage = lazy(() => import("@/features/workflow/workflow-page").then
 const JobsPage = lazy(() => import("@/features/jobs/jobs-page").then((module) => ({ default: module.JobsPage })))
 const CellPage = lazy(() => import("@/features/cell/cell-page").then((module) => ({ default: module.CellPage })))
 const CalibrationTargetsPage = lazy(() => import("@/features/calibration-targets/calibration-targets-page").then((module) => ({ default: module.CalibrationTargetsPage })))
+const CalibrationsPage = lazy(() => import("@/features/calibrations/calibrations-page").then((module) => ({ default: module.CalibrationsPage })))
 const WorkpiecesPage = lazy(() => import("@/features/workpieces/workpieces-page").then((module) => ({ default: module.WorkpiecesPage })))
 const PoseTemplatesPage = lazy(() => import("@/features/pose-templates/pose-templates-page").then((module) => ({ default: module.PoseTemplatesPage })))
 const BopEvaluationPage = lazy(() => import("@/features/bop-evaluation/bop-evaluation-page").then((module) => ({ default: module.BopEvaluationPage })))
+const DepthEvaluationPage = lazy(() => import("@/features/depth-evaluation/depth-evaluation-page").then((module) => ({ default: module.DepthEvaluationPage })))
 const PoseEstimationPage = lazy(() => import("@/features/pose-estimation/pose-estimation-page").then((module) => ({ default: module.PoseEstimationPage })))
 const PoseResultsPage = lazy(() => import("@/features/pose-results/pose-results-page").then((module) => ({ default: module.PoseResultsPage })))
 const RunFoldersPage = lazy(() => import("@/features/run-folders/run-folders-page").then((module) => ({ default: module.RunFoldersPage })))
@@ -28,9 +30,11 @@ export function App() {
         <Route path="/devices" element={<Page><DevicesPage /></Page>} />
         <Route path="/cell" element={<Page><CellPage /></Page>} />
         <Route path="/calibration-targets" element={<Page><CalibrationTargetsPage /></Page>} />
+        <Route path="/calibrations" element={<Page><CalibrationsPage /></Page>} />
         <Route path="/workpieces" element={<Page><WorkpiecesPage /></Page>} />
         <Route path="/pose-templates" element={<Page><PoseTemplatesPage /></Page>} />
         <Route path="/bop-evaluation" element={<Page><BopEvaluationPage /></Page>} />
+        <Route path="/depth-evaluation" element={<Page><DepthEvaluationPage /></Page>} />
         <Route path="/pose-estimation" element={<Page><PoseEstimationPage /></Page>} />
         <Route path="/pose-results" element={<Page><PoseResultsPage /></Page>} />
         <Route path="/run-folders" element={<Page><RunFoldersPage /></Page>} />

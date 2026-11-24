@@ -4,6 +4,7 @@ import json
 
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -55,8 +56,11 @@ class FakeRunner:
         self.jobs = {job.id: job for job in jobs or []}
         self.submitted: list[dict] = []
 
-    def list(self):
-        return list(self.jobs.values())
+    def active_jobs(self):
+        return [job for job in self.jobs.values() if job.status in {"queued", "running", "canceling"}]
+
+    def list_page(self, **kwargs):
+        return SimpleNamespace(jobs=list(self.jobs.values()))
 
     def get(self, job_id: str):
         if job_id not in self.jobs:

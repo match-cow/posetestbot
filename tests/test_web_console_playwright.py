@@ -1184,6 +1184,12 @@ def install_common_mocks(
         lambda route: fulfill_json(route, run_folder_inventory()),
     )
     page.route(
+        "**/ui/run-folders/cluster-activity",
+        lambda route: fulfill_json(
+            route, {"available": True, "active_run_roots": [], "reason": None}
+        ),
+    )
+    page.route(
         "**/cluster/archives",
         lambda route: fulfill_json(
             route,
@@ -1483,16 +1489,18 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     assert primary_navigation.get_by_role("link").all_inner_texts() == [
         "Dashboard",
         "Workflow",
+        "Jobs",
         "Devices",
         "Calibration Targets",
+        "Calibrations",
         "Workpiece Catalogue",
         "Pose Templates",
         "Cell View",
-        "Run folders",
         "Pose Estimation",
         "Pose Results",
         "BOP Evaluation",
-        "Jobs",
+        "Depth Evaluation",
+        "Run folders",
     ]
     expect(primary_navigation.get_by_role("link", name="Workflow")).to_have_attribute(
         "href", "#/workflow/setup"
@@ -1568,32 +1576,19 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     cluster_storage_box = cluster_storage.bounding_box()
     active_selection_box = active_selection.bounding_box()
     assert cluster_storage_box is not None and active_selection_box is not None
-    assert cluster_storage_box["y"] < active_selection_box["y"]
-    assert cluster_storage_box["y"] < 1080
-    storage_search = page.get_by_role("textbox", name="Search storage inventory")
+    assert active_selection_box["y"] < cluster_storage_box["y"]
+    storage_search = page.get_by_role("textbox", name="Search run folders")
     storage_search.fill("Object A")
     storage_table = page.get_by_test_id("run-folders-table")
     expect(storage_table.get_by_test_id("run-folder-row")).to_have_count(1)
     expect(storage_table.get_by_test_id("run-folder-row")).to_contain_text(
         "Object A capture"
     )
-    storage_search.fill("")
-    chooser = page.get_by_test_id("run-folder-chooser")
     expect(
-        chooser.get_by_role("heading", name="Choose an existing run")
-    ).to_be_visible()
-    chooser.get_by_role("textbox", name="Search run folders").fill("Object A")
-    expect(chooser.get_by_test_id("run-selection-row")).to_have_count(1)
-    expect(chooser.get_by_test_id("run-selection-row")).to_contain_text(
-        "Object A capture"
-    )
-    expect(
-        chooser.get_by_role("button", name="old-run is the active run")
+        storage_table.get_by_role("button", name="old-run is the active run")
     ).to_be_disabled()
-    chooser.get_by_role("textbox", name="Search run folders").fill(
-        "Calibration baseline"
-    )
-    chooser.get_by_role("button", name="Use new-run as active run").click()
+    storage_search.fill("Calibration baseline")
+    storage_table.get_by_role("button", name="Use new-run as active run").click()
     expect(active_run_context).to_contain_text("Calibration baseline")
     expect(active_run_context).to_contain_text(RUN_ROOT)
     assert (
@@ -1685,8 +1680,9 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     )
 
 
+@pytest.mark.parametrize("archive_state", ["succeeded", "deleting"])
 def test_run_folders_queues_confirmed_cluster_archive_deletion(
-    console_server, page
+    console_server, page, archive_state
 ) -> None:
     install_common_mocks(page)
     archive_id = "archive-12345678-1234-4234-9234-123456789abc"
@@ -1697,15 +1693,15 @@ def test_run_folders_queues_confirmed_cluster_archive_deletion(
         "schema_version": "posetestbot_cluster_archive.v1",
         "archive_id": archive_id,
         "job_id": "job-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        "state": "succeeded",
-        "status": "succeeded",
+        "state": archive_state,
+        "status": archive_state,
         "source_run_root": "/tmp/posetestbot-console/old-run",
         "source_identity": {"device": 1, "inode": 11},
         "created_at": "2026-08-18T10:00:00Z",
         "updated_at": "2026-08-18T10:05:00Z",
         "archive_sha256": "a" * 64,
         "operator": "Archive Operator",
-        "verified": True,
+        "verified": archive_state == "succeeded",
     }
 
     page.unroute("**/cluster/archives")
@@ -1734,6 +1730,13 @@ def test_run_folders_queues_confirmed_cluster_archive_deletion(
                 "body": route.request.post_data_json,
             }
         )
+        if len(delete_requests) == 1:
+            fulfill_json(
+                route,
+                {"output": "The cluster controller does not support archive deletion. Update and restart the companion controller before retrying."},
+                status=409,
+            )
+            return
         archive_deleted["value"] = True
         fulfill_json(
             route,
@@ -1792,13 +1795,23 @@ def test_run_folders_queues_confirmed_cluster_archive_deletion(
     cluster_storage = page.get_by_test_id("cluster-storage-section")
     expect(cluster_storage).to_contain_text(archive_id)
     cluster_storage.locator("#archive-operator").fill("Delete Operator")
-    cluster_storage.get_by_role("button", name="Delete").click()
+    if archive_state == "deleting":
+        expect(cluster_storage.get_by_role("button", name="Restore", exact=True)).to_be_disabled()
+        expect(cluster_storage).to_contain_text("Deletion has begun; restore is unavailable")
+    cluster_storage.get_by_role("button", name="Retry deletion" if archive_state == "deleting" else "Delete", exact=True).click()
 
     dialog = page.get_by_test_id("cluster-archive-delete-dialog")
     expect(dialog).to_contain_text("does not delete the local acquisition folder")
     queue_delete = dialog.get_by_role("button", name="Queue archive deletion")
     expect(queue_delete).to_be_disabled()
     dialog.get_by_test_id("cluster-archive-delete-confirmation").click()
+    expect(queue_delete).to_be_enabled()
+    queue_delete.click()
+
+    expect(page.get_by_text("Cluster archive deletion was not queued")).to_be_visible()
+    expect(page.get_by_text("Update and restart the companion controller", exact=False)).to_be_visible()
+    expect(dialog).to_be_visible()
+    expect(cluster_storage).to_contain_text(archive_id)
     expect(queue_delete).to_be_enabled()
     queue_delete.click()
 
@@ -1811,8 +1824,49 @@ def test_run_folders_queues_confirmed_cluster_archive_deletion(
             "path": f"/cluster/archives/{archive_id}",
             "body": {"confirm": True, "operator": "Delete Operator"},
         }
-    ]
+    ] * 2
     expect(page.get_by_test_id("run-folders-table")).to_contain_text("old-run")
+
+
+@pytest.mark.parametrize("job_state", ["preparing", "collecting"])
+def test_cluster_archive_deletion_jobs_show_cancellation_boundary(
+    console_server, page, job_state
+) -> None:
+    install_common_mocks(page)
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    job = cluster_pose_job(state=job_state)
+    job["job_id"] = "job-11111111-1111-4111-8111-111111111111"
+    job["slurm_job_id"] = None
+    job["kind"] = "archive-delete"
+    job["payload"] = {
+        "archive_id": "archive-12345678-1234-4234-9234-123456789abc",
+        "operator": "Delete Operator",
+    }
+    page.route(
+        "**/cluster/jobs?**",
+        lambda route: fulfill_json(route, {"jobs": [job], "next_cursor": None}),
+    )
+    page.route(
+        f"**/cluster/jobs/{job['job_id']}?**",
+        lambda route: fulfill_json(route, {"job": job, "log": "Archive deletion evidence"}),
+    )
+    page.goto(f"{console_server.url}/#/jobs", wait_until="networkidle")
+    row = page.get_by_test_id(f"cluster-job-{job['job_id']}")
+    expect(row).to_contain_text("Archive deletion")
+    cancel = row.get_by_role("button", name="Cancel", exact=True)
+    if job_state == "collecting":
+        expect(cancel).to_be_disabled()
+        expect(row).to_contain_text("Remote removal has begun; cancellation is unavailable")
+    else:
+        expect(cancel).to_be_enabled()
+    row.get_by_role("button", name="Log", exact=True).click()
+    sheet = page.get_by_role("dialog")
+    expect(sheet).to_contain_text("Archive deletion evidence")
+    if job_state == "collecting":
+        expect(sheet.get_by_role("button", name="Cancel", exact=True)).to_be_disabled()
+        expect(sheet).to_contain_text("Remote removal has begun; cancellation is unavailable")
+    else:
+        expect(sheet.get_by_role("button", name="Cancel", exact=True)).to_be_enabled()
 
 
 def test_run_folder_name_validation_rejects_paths_and_existing_run_collisions(
@@ -1976,6 +2030,68 @@ def test_active_run_header_is_compact_dropdown_with_management_handoff(
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
     )
+
+
+@pytest.mark.parametrize("viewport", [(1920, 1080), (1440, 900)])
+@pytest.mark.parametrize(
+    ("theme", "warning_color", "critical_color"),
+    [
+        ("light", "rgb(196, 137, 34)", "rgb(165, 79, 79)"),
+        ("dark", "rgb(214, 163, 64)", "rgb(209, 122, 122)"),
+    ],
+)
+def test_dashboard_storage_bar_reflects_live_capacity_status(
+    console_server, page, viewport, theme, warning_color, critical_color
+) -> None:
+    install_common_mocks(page)
+    page.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+    page.emulate_media(color_scheme=theme)
+    total_bytes = 1024**4
+    storage = {
+        "schema_version": "run_storage.v1",
+        "run_root": RUN_ROOT,
+        "filesystem_path": "/tmp",
+        "status": "ready",
+        "total_bytes": total_bytes,
+        "used_bytes": total_bytes // 2,
+        "free_bytes": total_bytes // 2,
+        "free_fraction": 0.5,
+        "thresholds": {
+            "critical_free_bytes": int(total_bytes * 0.05),
+            "warning_free_bytes": int(total_bytes * 0.15),
+            "critical_free_bytes_cap": 100 * 1024**3,
+            "warning_free_bytes_cap": 500 * 1024**3,
+            "critical_free_fraction": 0.05,
+            "warning_free_fraction": 0.15,
+        },
+        "error": None,
+    }
+    page.route("**/ui/storage**", lambda route: fulfill_json(route, storage))
+    page.goto(console_server.url, wait_until="networkidle")
+
+    card = page.get_by_test_id("dashboard-storage")
+    bar = card.get_by_role("progressbar", name="Run filesystem space used")
+    fill = bar.locator("div")
+    badge = card.locator("[data-status-tone]")
+    expect(page.locator("html")).to_have_attribute("data-theme", theme)
+    for status, free_gib, label, color, used_percent in [
+        ("ready", 512, "ready", "rgb(177, 203, 33)", 50),
+        ("warning", 120, "warning", warning_color, 88),
+        ("error", 40, "critical", critical_color, 96),
+        ("ready", 512, "ready", "rgb(177, 203, 33)", 50),
+    ]:
+        free_bytes = free_gib * 1024**3
+        storage.update(
+            status=status,
+            free_bytes=free_bytes,
+            used_bytes=total_bytes - free_bytes,
+            free_fraction=free_bytes / total_bytes,
+        )
+        page.get_by_role("button", name="Refresh", exact=True).click()
+        expect(badge).to_have_text(label)
+        expect(bar).to_have_attribute("aria-valuenow", str(used_percent))
+        expect(fill).to_have_css("background-color", color)
+        expect(fill).to_be_visible()
 
 
 @pytest.mark.parametrize("viewport", [(1920, 1080), (1440, 900)])
@@ -2403,9 +2519,8 @@ def test_pose_estimation_tracking_defaults_sensor_selection_and_payload(
 
     form = page.get_by_test_id("estimator-settings-form")
     expect(form).to_contain_text("Browser-local draft")
-    expect(page.get_by_test_id("estimator-setting-execution_mode")).to_contain_text(
-        "Continuous tracking"
-    )
+    execution_mode = page.get_by_test_id("estimator-setting-execution_mode")
+    expect(execution_mode).to_contain_text("Choose")
     center = page.get_by_label("Select Center scene 1")
     right = page.get_by_label("Select Right scene 2")
     wrist = page.get_by_label("Select Wrist scene 3")
@@ -2414,6 +2529,10 @@ def test_pose_estimation_tracking_defaults_sensor_selection_and_payload(
     expect(wrist).to_be_disabled()
     page.get_by_label("Operator / submitter").fill("Tracking Operator")
     submit = page.get_by_role("button", name="Submit FoundationPose job")
+    expect(submit).to_be_disabled()
+    expect(form.get_by_role("alert")).to_contain_text("Choose execution mode")
+    execution_mode.click()
+    page.get_by_role("option", name="Continuous tracking").click()
     expect(submit).to_be_enabled()
 
     center.uncheck()
@@ -2684,8 +2803,8 @@ def test_pose_estimation_selects_historical_jobs_collects_and_survives_reload(
                 {
                     "result": result,
                     "created": len(collection_requests) == 1,
-                    "evaluation_url": f"/bop-evaluation?result_id={result['result_id']}",
-                    "inspection_url": f"/pose-results?result_id={result['result_id']}",
+                    "evaluation_url": f"/bop-evaluation?{urlencode({'result_id': result['result_id'], 'run_root': RUN_ROOT})}",
+                    "inspection_url": f"/pose-results?{urlencode({'result_id': result['result_id'], 'run_root': RUN_ROOT})}",
                     "download_url": f"/mock/{result['result_id']}.csv",
                     "package_url": f"/mock/{result['result_id']}.zip",
                     "provenance_url": f"/mock/{result['result_id']}-provenance.json",
@@ -2996,6 +3115,24 @@ def test_bop_evaluation_keeps_history_and_metrics_result_scoped(
     page.get_by_label("Retained pose result").click()
     page.get_by_role("option", name=re.compile("FoundationPose result A")).click()
     expect(page.get_by_role("button", name="Queue BOP evaluation")).to_be_enabled()
+
+    page.get_by_role("button", name="Make linked run active").click()
+    alternate_root = "/tmp/posetestbot-console/old-run"
+
+    def setup_other_run(route):
+        requested = parse_qs(urlparse(route.request.url).query)["run_root"]
+        if requested == [alternate_root]:
+            fulfill_json(route, {**setup, "run_root": alternate_root, "results": [], "evaluations": []})
+        else:
+            setup_handler(route)
+
+    page.route("**/bop/evaluation/setup?**", setup_other_run)
+    page.get_by_role("combobox", name="Active run folder").click()
+    page.get_by_role("option").filter(has_text="Object A capture").click()
+    expect(page).to_have_url(f"{console_server.url}/#/bop-evaluation")
+    expect(page.get_by_test_id("active-run-path")).to_have_text(alternate_root)
+    expect(page.get_by_test_id("bop-evaluation-report")).to_have_count(0)
+    expect(page.get_by_role("button", name="Queue BOP evaluation")).to_be_disabled()
 
 
 @pytest.mark.parametrize(
@@ -3607,12 +3744,17 @@ def test_workpiece_catalogue_metadata_filters_actions_import_and_upload(
             catalogue["objects"].remove(current)
             fulfill_json(
                 route,
-                {"schema_version": "workpiece_catalog_delete.v1", "status": "deleted"},
+                {"job_id": "workpiece-delete-job", "status": "queued"},
+                status=202,
             )
             return
         fulfill_json(route, {"output": "Unexpected workpiece request"}, status=404)
 
     page.route("**/workpieces/status", status_handler)
+    page.route(
+        "**/jobs/workpiece-delete-job",
+        lambda route: fulfill_json(route, {"job": {"id": "workpiece-delete-job", "status": "succeeded"}}),
+    )
     page.route("**/workpieces/catalog**", catalog_handler)
     page.route(
         "**/pose-templates/workpieces/*/orientations",
@@ -3875,7 +4017,8 @@ def test_workpiece_service_status_fails_closed_when_status_request_errors(
     service = page.get_by_test_id("workpiece-catalog-status")
     expect(service).to_contain_text("unavailable")
     expect(service.get_by_text("ready", exact=True)).to_have_count(0)
-    expect(service).to_contain_text("Request failed (503)")
+    # The service's own reason is shown, not just the HTTP status.
+    expect(service).to_contain_text("Inspection service unavailable")
     upload = page.get_by_test_id("workpiece-upload-button")
     expect(upload).to_be_disabled()
     expect(upload).to_have_attribute(
@@ -4103,7 +4246,11 @@ def test_calibration_target_selection_returns_workflow_to_readiness(
     page.get_by_role("link", name="Choose grid", exact=True).click()
     expect(page).to_have_url(f"{console_server.url}/#/calibration-targets")
     page.get_by_role("button", name="Select for run", exact=True).click()
-    page.get_by_role("button", name="Select target", exact=True).click()
+    select_target = page.get_by_role("button", name="Select target", exact=True)
+    expect(select_target).to_be_disabled()
+    page.get_by_label("Target placement").click()
+    page.get_by_role("option", name="Fixed target; estimate grid → PoseTemplateBase").click()
+    select_target.click()
 
     expect(page).to_have_url(
         f"{console_server.url}/#/workflow/calibration?step=readiness"
@@ -4790,10 +4937,10 @@ def test_dataset_processing_is_one_ordered_operator_action(
         )
     ).to_be_visible()
     expect(processing).to_contain_text(
-        "One queued job runs the fixed four-command recipe below"
+        "One background job matches frames to robot poses"
     )
     expect(processing).to_contain_text(
-        "Ground-truth generation is chosen separately in optional step 6"
+        "Configure ground truth in step 1 and generate it in step 6"
     )
     expect(processing).to_contain_text(
         "Calibration validation is automatic here; there is no second operator preflight."
@@ -4911,7 +5058,7 @@ def test_robot_controls_are_dashboard_only_fixed_target_and_acknowledged(
     page.get_by_role("button", name="Queue start").click()
     expect(page.get_by_text("IIWA start queued")).to_be_visible()
 
-    page.get_by_role("button", name="End program").click()
+    page.get_by_role("button", name="Exit idle program").click()
     expect(page.get_by_role("dialog")).to_contain_text("not a motion stop")
     expect(page.get_by_role("dialog")).to_contain_text(
         "requires a manual Sunrise restart"
@@ -5813,7 +5960,7 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
         "1 failed alternative solution is retained for diagnosis"
     )
     expect(
-        page.get_by_role("button", name="Save selected calibrations")
+        page.get_by_role("button", name="Publish selected calibrations")
     ).to_be_enabled()
     alignment = page.get_by_test_id("calibration-time-alignment")
     expect(alignment).to_contain_text(
@@ -5876,7 +6023,8 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     )
     expect(wrist_intrinsics).to_contain_text("Using OpenCV estimate")
     expect(wrist_intrinsics).to_contain_text(
-        "Factory values come from the camera SDK. The OpenCV estimate is fitted from this recording's grid views."
+        "This OpenCV estimate passed training, held-out, and plausibility checks.",
+        ignore_case=True,
     )
     expect(wrist_intrinsics).to_contain_text("OpenCV training views / image coverage")
     expect(wrist_intrinsics).to_contain_text("18 views · 6 of 9 regions")
@@ -5915,8 +6063,8 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
     wrist_result.get_by_text("Alternative passing solution", exact=True).click()
     wrist_result.get_by_label("Alternative solution", exact=True).click()
     page.get_by_role("option", name="SQPNP + tsai · score 0.2000").click()
-    page.get_by_role("button", name="Save selected calibrations").click()
-    expect(page.get_by_text("Calibration acceptance queued")).to_be_visible()
+    page.get_by_role("button", name="Publish selected calibrations").click()
+    expect(page.get_by_text("Calibration publication queued")).to_be_visible()
     promotion_job = page.get_by_test_id("calibration-promotion-job-status")
     expect(promotion_job).to_contain_text("continues after navigation")
     expect(promotion_job.get_by_role("link", name="Open Jobs")).to_have_attribute(
@@ -5927,8 +6075,8 @@ def test_calibration_workflow_explains_intrinsics_and_saves_complete_bundle(
         "oak_d_pro:static-1": static_recommended["candidate_id"],
     }
     promotion_status["value"] = "promoted"
-    expect(page.get_by_role("button", name="Calibrations saved")).to_be_visible()
-    expect(page.get_by_text("Saved 2 camera profile(s).")).to_be_visible()
+    expect(page.get_by_role("button", name="Calibrations published")).to_be_visible()
+    expect(page.get_by_text("Published 2 camera profile(s).")).to_be_visible()
 
 
 def calibration_time_alignment_setup(
@@ -6251,7 +6399,7 @@ def test_failed_auto_sync_evidence_remains_visible_without_solver_results(
     expect(row).to_contain_text("0 ms → rejected +150.0 ms candidate")
     expect(row).to_contain_text("reference method sensitivity")
     expect(row).to_contain_text("search optimum not at boundary")
-    expect(page.get_by_role("button", name="Save selected calibrations")).to_have_count(
+    expect(page.get_by_role("button", name="Publish selected calibrations")).to_have_count(
         0
     )
     assert page.evaluate(

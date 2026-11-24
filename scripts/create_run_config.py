@@ -94,7 +94,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    run_root = Path(args.run_root)
+    # Absolute, so the plan's sensor folders mean the same directory to the
+    # capture supervisor and to the camera processes it starts elsewhere.
+    run_root = Path(args.run_root).resolve()
     sensors = (
         tuple(
             sensor_config_from_token(

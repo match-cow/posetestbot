@@ -16,6 +16,10 @@ uv run python scripts/runtime_status.py --json
 
 Status commands do not authorize capture or robot motion.
 
+`scripts/run_monitor_webrtc_smoke.py --plan-only` prints the room-monitor test plan.
+For an authorized camera test, use the gates in
+[UGREEN room monitor setup](https://github.com/match-cow/PoseTestBot/blob/main/INSTALL.md#ugreen-room-monitor).
+
 ## Run creation and fixed orchestration
 
 | Command | Purpose |
@@ -25,6 +29,7 @@ Status commands do not authorize capture or robot motion.
 | `scripts/run_preflight.py <run> --check --write` | Write readiness evidence, including one non-recorded frame from each selected camera, without authorizing robot execution |
 | `scripts/run_capture.py <run> --intent … --allow-cameras --allow-real-robot` | Internal/supervised worker for the one physical capture recipe |
 | `scripts/process_dataset.py <run>` | Run sync → quality → rectification → calibrated base BOP export |
+| `scripts/report_robot_pose_cadence.py <run> [--write]` | Inspect recorded robot-stream delivery cadence and optionally write the run-owned report |
 
 Example safe setup:
 
@@ -35,13 +40,14 @@ uv run python scripts/plan_capture.py working_data/test_run --json
 ```
 
 There is no stage or sequence registry and no caller-supplied stage list.
-`run_capture.py` touches cameras and the robot and must only be used with
-explicit operator authorization. Its two flags are fresh acknowledgements,
-not saved configuration.
+`run_capture.py` touches cameras and the robot and requires explicit operator
+authorization with both execution flags. The web queue supplies the approved
+configuration hash through `--approved-config-sha256`. A direct invocation
+establishes its approval from the current saved preflight before probing cameras.
 
-The lower-level capture-plan, preflight, execution-plan, execution, sync,
-quality, rectification, and BOP scripts remain implementation workers for the
-fixed recipes. They are not alternative operator workflows.
+`run_capture.py` builds the execution plan and runs capture completion checks
+within its fixed recipe. `process_dataset.py` runs the sync, quality,
+rectification, and BOP workers in order.
 
 Explicit sync, rectification, and BOP output directories must be separate from
 their inputs, raw sensor folders, and run-level artifacts. Output paths that
@@ -50,12 +56,17 @@ are rejected, including paths that resolve there through symlinks. Separate
 external output directories remain supported; `--overwrite` only permits
 replacing derived output.
 
+When the filesystem supports directory exchange, readers see the live output
+switch directly between complete generations. The fallback and batched
+BlenderProc promotions restore the previous generation on cooperative
+cancellation or a rename failure during publication.
+
 ## Calibration and reusable inputs
 
 | Command | Purpose |
 | --- | --- |
 | `run_calibration_target_generate.py` | Generate a reusable target bundle |
-| `run_calibration_target_import.py` | Import a pinned target bundle |
+| `run_calibration_target_import.py` | Validate the run's current target selection and record it in the manifest |
 | `run_calibration_target_select.py` | Snapshot a target into a run |
 | `run_calibration_attempt.py` | Execute one intent-level calibration attempt |
 | `refine_calibration_attempt.py` | Audit a completed wrist-camera bundle against one stationary grid; explicit `--refinement-id … --promote` accepts a reviewed passing report |
@@ -65,9 +76,8 @@ replacing derived output.
 | `run_pose_template_generate.py` | Publish an immutable pose-template bundle |
 | `run_pose_template_select.py` | Snapshot a bundle into a dataset run |
 
-Calibration review and promotion are explicit workflow/API operations. The
-removed observations/candidates/solver/validation stage chain has no CLI
-entry points.
+The Workflow and calibration API expose explicit review and promotion of
+retained intent-level attempts.
 
 The advanced shared-grid refinement command consumes existing recorded attempt
 evidence and does not access hardware. Its report and explicit acceptance
@@ -81,12 +91,22 @@ contract are described in [Calibration targets](../POSEGRIDGEN_CALIBRATION_TARGE
 | `run_blenderproc_render_stage.py` | Render requested GT/masks through BlenderProc |
 | `run_bop_annotations.py` | Generate the run-configured optional annotation product |
 | `run_bop_evaluation.py` | Run the narrow official BOP19 adapter plus IPD robot-consistency MVD/ADD using the request's frozen robot evidence |
+| `run_depth_evaluation.py --kind evaluations\|comparisons --request PATH` | Cancelable worker for an immutable Inspect depth request; normally submitted through the depth API/UI |
+| `run_depth_video.py --request PATH` | Cancelable worker for an immutable depth-quality MP4 request; consumes completed retained media, normally submitted through the Videos view |
 | `compare_bop_consistency_gt.py --evaluation LABEL RUN EVALUATION_ID … --output-run RUN` | Compare completed Inspect evaluations with saved GT in an offline HTML/JSON/CSV/figure report; the first condition is the baseline |
 
 The base export is produced by `process_dataset.py`. Optional annotation is a
 separate, deliberate step. Evaluation consumes an existing annotation-bearing
 BOP dataset and immutable standard BOP19 CSV; it is not acquisition or
 estimation.
+
+[Depth studies](../concepts/depth-evaluation.md) use a separate readiness and
+worker path: completed pose-bearing BOP, pinned BlenderProc 2.8.0 CPU references,
+canonical geometry/calibration snapshots, and measured depth. No result CSV or
+BOP19 visibility annotations are required. The internal
+`blenderproc_depth_reference.py --plan PATH` script runs only inside that pinned
+runtime; API submissions queue it through the worker. Both depth evaluation
+and comparisons retain output only in `processed/bop_evaluation/depth/`.
 
 The [offline consistency comparison](../concepts/robot-consistency.md#offline-comparison-with-saved-ground-truth)
 supports one fixed instance per scene and one estimate per target. Its output

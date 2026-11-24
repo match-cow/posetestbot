@@ -7,6 +7,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -229,6 +230,9 @@ class FakePreviewRunner:
     def list(self):
         return list(self.jobs.values())
 
+    def active_jobs(self):
+        return [job for job in self.jobs.values() if job.status in {"queued", "running", "canceling"}]
+
     def get(self, job_id: str):
         try:
             return self.jobs[job_id]
@@ -246,6 +250,15 @@ class FakePreviewRunner:
 class EmptyRunner:
     def list(self):
         return []
+
+    def active_jobs(self):
+        return []
+
+    def list_page(self, **_):
+        return SimpleNamespace(jobs=[], total=0, status_counts={}, next_cursor=None)
+
+    def resource_holders(self, **_):
+        return {}
 
 
 class PreviewRootFactory:
@@ -562,12 +575,8 @@ def test_device_disabled_reasons_describe_only_the_affected_control(
     oak_orientation = oak.locator('[data-testid="sensor-orientation"]')
     oak_preview = oak.locator('[data-testid="sensor-preview-toggle"]')
     oak_snapshot = oak.get_by_role("button", name="Snapshot")
-    expect(oak_orientation).to_be_disabled()
-    orientation_reason_id = oak_orientation.get_attribute("aria-describedby")
-    assert orientation_reason_id
-    expect(oak.locator(f"#{orientation_reason_id}")).to_contain_text(
-        "only for RealSense D435"
-    )
+    expect(oak_orientation).to_have_count(0)
+    expect(oak.get_by_text("Normal (fixed for this camera)")).to_be_visible()
     expect(oak_preview).to_be_enabled()
     expect(oak_snapshot).to_be_enabled()
     assert oak_preview.get_attribute("aria-describedby") is None
@@ -576,14 +585,10 @@ def test_device_disabled_reasons_describe_only_the_affected_control(
     zed = sensor_card(page, ZED_SENSOR)
     zed_orientation = zed.locator('[data-testid="sensor-orientation"]')
     zed_preview = zed.locator('[data-testid="sensor-preview-toggle"]')
-    orientation_reason_id = zed_orientation.get_attribute("aria-describedby")
     preview_reason_id = zed_preview.get_attribute("aria-describedby")
-    assert orientation_reason_id
     assert preview_reason_id
-    assert orientation_reason_id != preview_reason_id
-    expect(zed.locator(f"#{orientation_reason_id}")).to_contain_text(
-        "only for RealSense D435"
-    )
+    expect(zed_orientation).to_have_count(0)
+    expect(zed.get_by_text("Normal (fixed for this camera)")).to_be_visible()
     expect(zed.locator(f"#{preview_reason_id}")).to_contain_text(
         "Live RGB preview is unavailable"
     )
@@ -621,7 +626,7 @@ def test_saving_visible_alias_preserves_offline_alias_and_survives_reload(
     alias_input.fill("Persistent wrist camera")
     with page.expect_response(
         lambda response: (
-            response.request.method == "PUT"
+            response.request.method == "PATCH"
             and response.url.endswith("/sensors/aliases")
         )
     ) as response_info:

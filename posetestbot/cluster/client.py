@@ -202,15 +202,21 @@ class ClusterControllerClient:
         *,
         idempotency_key: str,
     ) -> dict[str, Any]:
-        return self._json(
-            "DELETE",
-            f"/v1/archives/{urllib.parse.quote(archive_id, safe='')}",
-            body=payload,
-            idempotency_key=idempotency_key,
-        )
-
-    def estimators(self) -> dict[str, Any]:
-        return self._json("GET", "/v2/estimators")
+        try:
+            return self._json(
+                "DELETE",
+                f"/v1/archives/{urllib.parse.quote(archive_id, safe='')}",
+                body=payload,
+                idempotency_key=idempotency_key,
+            )
+        except ClusterClientError as exc:
+            if exc.status == 404 and str(exc) == "Not Found":
+                raise ClusterClientError(
+                    "The cluster controller does not support archive deletion. "
+                    "Update and restart the companion controller before retrying.",
+                    status=409,
+                ) from exc
+            raise
 
     def estimation_jobs(
         self,

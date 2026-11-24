@@ -4,6 +4,38 @@ Run artifacts are governed evidence, not loose cache files. Writers validate
 inputs, write atomically where required, and update `dataset_manifest.json`.
 Raw acquisition evidence is preserved; processing writes derived output.
 
+## Inspect depth studies
+
+Below `processed/bop_evaluation/depth/{evaluations,comparisons}/<id>/`:
+
+| Path | Contract |
+| --- | --- |
+| `request.json` | Immutable versioned submission, per-camera projection evidence, and source identities or input publication hashes |
+| `progress.json`, `job.json` | Diagnostic progress and LocalJobRunner identity; Jobs owns process truth |
+| `.work/` | Incomplete/failed/canceled diagnostics, never downloadable |
+| `complete/manifest.json` | Atomic publication binding request and completed artifact hashes |
+| `complete/report.json`, `metrics.csv`, `frames.csv` (evaluations) | Exact region/bin metrics, counts, settings, camera projection and source/quality evidence |
+| `complete/frames.sqlite3` | Paginated frame metadata |
+| `complete/frames/<key>.npz` | Measured/reference optical-axis mm, OpenCV normals, render IDs, selected reference mask |
+| `complete/frames/<key>*.png`, `<key>.json` | RGB/depth/error/missing views and per-instance metrics |
+| `complete/report.html`, `metrics.png`, `metrics.svg` | Offline HTML with frame browsing and scientific figures |
+| `complete/settings.json`, `provenance.json`, `bundle_manifest.json` | Settings, source hashes, and research-file hash manifest |
+| `complete/research.zip` | Research bundle; the external publication manifest hashes this ZIP too |
+
+See [depth methodology](../concepts/depth-evaluation.md) and
+[depth APIs](api/depth-evaluation.md). Source BOP and raw data are preserved.
+
+Quality video exports use `processed/bop_evaluation/depth/videos/<id>/`:
+
+| Path | Contract |
+| --- | --- |
+| `request.json` | `depth_video_request.v1`: completed source publication/media hashes, ordered camera/input frame keys, frozen finish/scales, FPS/stride/view/width, implementation hashes |
+| `progress.json`, `job.json` | Encoding counts/state/errors and cancelable CPU/disk job identity |
+| `.work/` | Unpublished encoder output/diagnostics; never downloadable |
+| `complete/quality.mp4` | H.264/yuv420p MP4 with fixed scales, frame labels, and missing-depth legend |
+| `complete/preview.png` | First encoded composition, used as the browser player poster |
+| `complete/manifest.json` | `depth_video_publication.v1`: request/source hash, MP4 hash, settings/scales, dimensions, counts, duration, constant-rate timing definition |
+
 ## Run, preflight, and capture
 
 | Path | Contract |
@@ -43,7 +75,7 @@ starting the fixed recipe.
 | `sync_report.json` | Matching decisions and exclusions |
 | `sync_quality_report.json` | In-motion coverage, deltas, packet loss, and blockers |
 | `processed/rectified/<sensor>/` | Derived rectified RGB-D frames, metadata, and projection sidecars |
-| `camera_rectification_report.json` | Rectification source/output and per-sensor provenance |
+| `camera_rectification_report.json` | Rectification summary. BOP and BlenderProc validate each `rectification_provenance.json` source and output fingerprint before use |
 
 Lead-in and tail camera frames remain raw context. They are not counted as
 failed in-motion matches.
@@ -56,6 +88,9 @@ failed in-motion matches.
 | `calibration_profile_selection.json` | Current v2 per-sensor reusable selection |
 | `processed/calibration_inputs/<bundle_sha256>/calibration_profiles.json` | Exact selected extrinsic-profile snapshot |
 | `processed/calibration_inputs/<bundle_sha256>/intrinsic_calibration_profiles.json` | Exact selected intrinsic-profile snapshot |
+| `working_data/calibration_library/<bundle_sha256>/calibration_profiles.json` | Retained copy of a promoted extrinsic-profile collection; outlives its calibration run |
+| `working_data/calibration_library/<bundle_sha256>/intrinsic_calibration_profiles.json` | Retained copy of the matching intrinsic-profile collection |
+| `working_data/calibration_library/<bundle_sha256>/retained_calibration.json` | `retained_calibration.v1` record: name, `retained_at`, reason, origin run, and the two file hashes |
 | `processed/calibration/<attempt_id>/request.json` | Immutable attempt intent |
 | `processed/calibration/<attempt_id>/progress.json` | Five-phase attempt status |
 | `processed/calibration/<attempt_id>/intrinsic_comparison.json` | Factory/OpenCV evidence |
@@ -67,12 +102,12 @@ failed in-motion matches.
 | `processed/calibration/<attempt_id>/candidate_profiles.json` | Profiles eligible for review/promotion |
 | `processed/calibration/<attempt_id>/reprojection_refinement/<refinement_id>/report.json` | Optional current shared-grid fixed-intrinsic refinement, source hashes, motion-disjoint audit, and explicit promotion binding |
 | `processed/calibration/<attempt_id>/promotion_history/<snapshot_id>/` | Hash-bound retained prior promotion and canonical selection when a different reviewed refinement explicitly replaces it |
+| `.calibration-promotion.transaction.json` | Durable pending promotion journal. Recovered under the run configuration lock |
 | `calibration_profiles.json` | Explicitly promoted `calibration.v2` profiles, including retained multi-camera consistency warnings |
 | `intrinsic_calibration_profiles.json` | Explicitly promoted intrinsic profiles and projection evidence |
 | `processed/calibration/camera_ee_transform_from_calibration_profiles.json` | Derived BlenderProc camera transform bound to selected profiles |
 
-There are no root-level preflight/observations/candidates/solver/validation
-artifacts from the removed staged calibration implementation.
+Intent-level calibration calculation evidence lives under the attempt ID.
 
 ## Reusable libraries and run snapshots
 

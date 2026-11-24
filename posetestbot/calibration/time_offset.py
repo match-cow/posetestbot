@@ -37,9 +37,7 @@ from posetestbot.calibration.transforms import (
 
 SCHEMA_VERSION = "calibration_time_offset_search.v1"
 IMPLEMENTATION_REVISION = "constant_latency_nearest_pose_optical_spin.v6"
-SUPPORTED_IMPLEMENTATION_REVISIONS = frozenset({IMPLEMENTATION_REVISION})
 POLICIES = ("auto_offset", "fixed_zero")
-DEFAULT_POLICY = "fixed_zero"
 DEFAULT_MIN_OFFSET_MS = -300.0
 DEFAULT_MAX_OFFSET_MS = 300.0
 DEFAULT_STEP_MS = 5.0

@@ -92,6 +92,9 @@ def utc_now_iso() -> str:
 
 
 def default_target_library_root() -> Path:
+    working = os.environ.get("POSETESTBOT_WORKING_DATA_ROOT")
+    if working:
+        return Path(working).expanduser().resolve() / LIBRARY_DIRECTORY
     configured = os.environ.get("POSETESTBOT_APP_ROOT")
     if configured:
         app_root = Path(configured).expanduser().resolve()
@@ -386,7 +389,10 @@ def delete_target_bundle(
     bundle_path = library / target_uuid
     bundle = validate_target_bundle(bundle_path, library_root=library)
     if run_root is not None:
-        config = load_run_config_for_run_root(run_root)
+        try:
+            config = load_run_config_for_run_root(run_root)
+        except FileNotFoundError:
+            config = {}
         selection = config.get("calibration_target")
         if isinstance(selection, Mapping) and selection.get("target_id") == target_uuid:
             raise CalibrationTargetConflict(

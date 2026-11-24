@@ -1,8 +1,9 @@
+import { useInspectionSearch } from "@/lib/use-inspection-search"
+import { QueryProblem } from "@/components/query-problem"
 import { useEffect, useRef, useState } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { Link, useSearchParams } from "react-router-dom"
+import { Link } from "react-router-dom"
 import {
-  AlertTriangle,
   Box,
   ChevronLeft,
   ChevronRight,
@@ -228,7 +229,7 @@ function Viewer({
 export function PoseResultsPage() {
   const { selectedRun, selectRun } = useOperator()
   const queryClient = useQueryClient()
-  const [searchParams, setSearchParams] = useSearchParams()
+  const { params: searchParams, setParams: setSearchParams, switched } = useInspectionSearch()
   const requestedRunRoot = searchParams.get("run_root") ?? ""
   const runRoot = requestedRunRoot || selectedRun
   const requestedResultId = searchParams.get("result_id") ?? ""
@@ -278,29 +279,29 @@ export function PoseResultsPage() {
     enabled: Boolean(resultId && sceneId != null),
   })
   const validRequestedFrame = requestedFrameValue !== null && Number.isInteger(requestedFrameId) && requestedFrameId >= 0
-  const frameId = validRequestedFrame ? requestedFrameId : frames.data?.frames[0]?.im_id ?? null
+  const frameId = frames.data?.frames.length === 0
+    ? null
+    : validRequestedFrame ? requestedFrameId : frames.data?.frames[0]?.im_id ?? null
   const detail = useQuery({
     queryKey: ["bop-inspection", "frame", runRoot, resultId, sceneId, frameId],
     queryFn: () => api<BopInspectionFrame>(query("/bop/inspection/frame", { run_root: runRoot, result_id: resultId, scene_id: sceneId, im_id: frameId })),
     enabled: Boolean(resultId && sceneId != null && frameId != null),
-    placeholderData: (previous) => previous?.result.result_id === resultId && previous.scene.scene_id === sceneId ? previous : undefined,
   })
   const selectedResult = setup.data?.results.find((item) => item.result_id === resultId) ?? null
   const currentRow = frames.data?.frames.find((item) => item.im_id === frameId)
     ?? (detail.data?.frame.im_id === frameId ? detail.data.frame : null)
-  const overlayScope = `${resultId}:${sceneId ?? ""}:${frameId ?? ""}`
+  const overlayScope = `${runRoot}:${resultId}:${sceneId ?? ""}:${frameId ?? ""}`
   const overlayError = overlayFailure?.scope === overlayScope ? overlayFailure.message : null
   const geometryReady = webglAvailable && !overlayError
 
   useEffect(() => {
-    if (!resultId || sceneId == null) return
+    if (switched || !resultId || sceneId == null) return
     const updates: Record<string, string | number | null> = {}
-    if (!requestedRunRoot) updates.run_root = runRoot
     if (requestedResultId !== resultId) updates.result_id = resultId
     if (requestedSceneId !== sceneId) updates.scene_id = sceneId
     if (!validRequestedFrame && frames.data?.frames[0]) updates.frame_id = frames.data.frames[0].im_id
     if (Object.keys(updates).length) setSearchParams(updateSearch(searchParams, updates), { replace: true })
-  }, [frames.data?.frames, requestedFrameId, requestedResultId, requestedRunRoot, requestedSceneId, resultId, runRoot, sceneId, searchParams, setSearchParams, validRequestedFrame])
+  }, [frames.data?.frames, requestedFrameId, requestedResultId, requestedRunRoot, requestedSceneId, resultId, runRoot, sceneId, searchParams, setSearchParams, switched, validRequestedFrame])
 
   useEffect(() => {
     if (pendingOrdinal.current == null || !frames.data) return
@@ -371,7 +372,7 @@ export function PoseResultsPage() {
   }
 
   return <div className="space-y-5" data-testid="pose-results-page">
-    <PageHeader eyebrow="Inspect · retained estimator result" title="Pose Results" description="Compare one immutable standard BOP19 result with its run's ground truth, frame by frame." actions={<div className="flex gap-2">{runRoot !== selectedRun && <Button variant="outline" onClick={() => selectRun(runRoot)}>Make linked run active</Button>}<Button asChild variant="outline"><Link to="/pose-estimation" onClick={() => selectRun(runRoot)}>Pose Estimation</Link></Button><Button variant="outline" onClick={refresh} disabled={setup.isFetching || frames.isFetching || detail.isFetching}><RefreshCw className={setup.isFetching || frames.isFetching || detail.isFetching ? "animate-spin" : undefined} />Refresh</Button></div>} />
+    <PageHeader eyebrow="Inspect · retained estimator result" title="Pose Results" description="Compare one immutable standard BOP19 result with its run's ground truth, frame by frame." actions={<div className="flex gap-2">{runRoot !== selectedRun && <Button variant="outline" onClick={() => selectRun(runRoot)}>Make linked run active</Button>}<Button asChild variant="outline"><Link to="/pose-estimation">Pose Estimation</Link></Button><Button variant="outline" onClick={refresh} disabled={setup.isFetching || frames.isFetching || detail.isFetching}><RefreshCw className={setup.isFetching || frames.isFetching || detail.isFetching ? "animate-spin" : undefined} />Refresh</Button></div>} />
     <ProcessHandoff title="Result inspection & visualization exports" description={`Inspecting run ${runRoot}${runRoot !== selectedRun ? " from this direct link; the active operator run is different. Make this run active before returning to Workflow" : ""}. Overlay preferences are browser-local until you export images or video. Saved visualizations feed dataset review in Workflow.`} to="/workflow/dataset?step=export" action="Review dataset workflow" />
 
     {searchParams.has("export_id") && (setup.isError || setup.data?.ready === false) && <PoseExportControls runRoot={runRoot} selection={null} availability={setup.data?.exports} autoDownloadRef={autoDownloadExportRef} />}
@@ -389,17 +390,18 @@ export function PoseResultsPage() {
               </CardContent>
             </Card>
 
+            {frames.isError && <QueryProblem title="Frame inventory unavailable" error={frames.error} retry={() => void frames.refetch()} />}
             <Card data-testid="pose-frame-navigation">
               <CardContent className="space-y-3 p-4">
-                <div className="flex min-w-0 items-center gap-2"><Button size="icon" variant="outline" aria-label="Previous pose frame" disabled={currentRow?.previous_im_id == null} onClick={() => navigateFrame(currentRow?.previous_im_id, (currentRow?.ordinal ?? 0) - 1)}><ChevronLeft /></Button><Button size="icon" variant="outline" aria-label={playing ? "Pause pose playback" : "Play pose frames"} disabled={!currentRow?.next_im_id && currentRow?.next_im_id !== 0} onClick={() => setPlaying((value) => !value)}>{playing ? <CirclePause /> : <CirclePlay />}</Button><div className="min-w-0 flex-1"><input aria-label="Pose frame scrubber" type="range" min={0} max={Math.max(0, (frames.data?.total_count ?? 1) - 1)} value={currentRow?.ordinal ?? 0} disabled={!frames.data?.total_count} onChange={(event) => scrub(Number(event.target.value))} className="w-full accent-primary" /></div><div className="w-36 text-right font-mono text-[10px]">{currentRow ? `${(currentRow.ordinal ?? 0) + 1} / ${frames.data?.total_count ?? 0} · ID ${currentRow.im_id}` : frames.isFetching ? "Loading…" : "No frames"}</div><Button size="icon" variant="outline" aria-label="Next pose frame" disabled={currentRow?.next_im_id == null} onClick={() => navigateFrame(currentRow?.next_im_id, (currentRow?.ordinal ?? 0) + 1)}><ChevronRight /></Button></div>
+                <div className="flex min-w-0 items-center gap-2"><Button size="icon" variant="outline" aria-label="Previous pose frame" disabled={currentRow?.previous_im_id == null} onClick={() => navigateFrame(currentRow?.previous_im_id, (currentRow?.ordinal ?? 0) - 1)}><ChevronLeft /></Button><Button size="icon" variant="outline" aria-label={playing ? "Pause pose playback" : "Play pose frames"} disabled={!currentRow?.next_im_id && currentRow?.next_im_id !== 0} onClick={() => setPlaying((value) => !value)}>{playing ? <CirclePause /> : <CirclePlay />}</Button><div className="min-w-0 flex-1"><input aria-label="Pose frame scrubber" type="range" min={0} max={Math.max(0, (frames.data?.total_count ?? 1) - 1)} value={currentRow?.ordinal ?? 0} disabled={!frames.data?.total_count} onChange={(event) => scrub(Number(event.target.value))} className="w-full accent-primary" /></div><div className="w-36 text-right font-mono text-[10px]">{currentRow ? `${(currentRow.ordinal ?? 0) + 1} / ${frames.data?.total_count ?? 0} · ID ${currentRow.im_id}` : frames.isError ? "Unavailable" : frames.isFetching ? "Loading…" : "No frames"}</div><Button size="icon" variant="outline" aria-label="Next pose frame" disabled={currentRow?.next_im_id == null} onClick={() => navigateFrame(currentRow?.next_im_id, (currentRow?.ordinal ?? 0) + 1)}><ChevronRight /></Button></div>
                 <div className="flex gap-1.5 overflow-x-auto pb-1" data-testid="pose-frame-strip">{frames.data?.frames.map((item) => <button type="button" key={item.im_id} aria-label={`Inspect frame ${item.im_id}`} aria-pressed={item.im_id === frameId} onClick={() => navigateFrame(item.im_id, item.ordinal)} className={cn("relative min-w-12 rounded border px-2 py-1.5 font-mono text-[10px] hover:bg-muted", item.im_id === frameId && "border-primary bg-primary/10", item.missing_estimate && "border-destructive/50")}><span>{item.im_id}</span>{item.operations.some((operation) => operation !== "unknown") && <span className="mt-1 block text-[7px] uppercase text-muted-foreground">{item.operations.map((operation) => operation.slice(0, 3)).join("/")}</span>}</button>)}</div>
-                <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted-foreground"><span>{frames.data ? `${frames.data.total_count.toLocaleString()} matching frames · page ${frames.data.page} of ${Math.max(1, frames.data.page_count)}` : "Loading frame inventory…"}</span><div className="flex gap-2"><Button size="sm" variant="ghost" disabled={!frames.data?.previous_page} onClick={() => changePage(frames.data?.previous_page ?? 1)}>Previous page</Button><Button size="sm" variant="ghost" disabled={!frames.data?.next_page} onClick={() => changePage(frames.data?.next_page ?? page)}>Next page</Button></div></div>
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted-foreground"><span>{frames.data ? `${frames.data.total_count.toLocaleString()} matching frames · page ${frames.data.page} of ${Math.max(1, frames.data.page_count)}` : frames.isError ? "Frame inventory unavailable" : "Loading frame inventory…"}</span><div className="flex gap-2"><Button size="sm" variant="ghost" disabled={!frames.data?.previous_page} onClick={() => changePage(frames.data?.previous_page ?? 1)}>Previous page</Button><Button size="sm" variant="ghost" disabled={!frames.data?.next_page} onClick={() => changePage(frames.data?.next_page ?? page)}>Next page</Button></div></div>
               </CardContent>
             </Card>
 
             <div className="grid min-w-0 items-start gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
               <div className="min-w-0 space-y-4">
-                  <Card className="overflow-hidden"><CardHeader className="border-b py-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="flex items-center gap-2 text-base"><Eye className="size-4" />Pose overlay</CardTitle><CardDescription className="mt-1">Exact-aspect BOP projection · cyan estimate · magenta ground truth</CardDescription></div><div className="flex gap-2"><Button size="sm" variant={baseLayer === "rgb" ? "default" : "outline"} onClick={() => setBaseLayer("rgb")}>RGB</Button><Button size="sm" variant={baseLayer === "depth" ? "default" : "outline"} onClick={() => setBaseLayer("depth")}>Depth</Button></div></div></CardHeader><CardContent className="p-3">{detail.isPending && !detail.data ? <Skeleton className="aspect-video w-full" /> : detail.isError || !detail.data ? <div className="grid aspect-video place-items-center rounded-lg border border-destructive/35 bg-destructive/5 p-8 text-center"><div><AlertTriangle className="mx-auto size-7 text-destructive" /><div className="mt-2 font-semibold">Frame evidence unavailable</div><p className="mt-1 text-xs text-muted-foreground">{errorMessage(detail.error)}</p></div></div> : <Viewer frame={detail.data} baseLayer={baseLayer} geometry={geometry} masks={masks} webgl={geometryReady} onOverlayError={(message) => setOverlayFailure({ scope: overlayScope, message })} />}{overlayError && <div role="alert" className="mt-3 rounded-lg border border-warning/40 bg-warning/5 p-3 text-xs"><div className="font-semibold text-warning-foreground">Geometry overlay disabled</div><p className="mt-1 text-muted-foreground">{overlayError} Image, mask, navigation, and numeric evidence remain available.</p></div>}<div className="mt-3 flex items-start gap-2 rounded-lg border border-primary/25 bg-primary/5 p-3 text-xs"><ScanSearch className="mt-0.5 size-4 shrink-0 text-primary-strong" /><p><strong>X-ray diagnostic.</strong> Geometry is projected from the saved poses and camera intrinsics. It is not occluded against observed depth and must not be read as a photorealistic visibility claim. <HelpTip label="x-ray pose overlay">The surface, wireframe, axes, and boxes remain visible through scene objects so pose disagreement is easy to spot. Use GT masks and visibility evidence for observed-pixel context.</HelpTip></p></div></CardContent></Card>
+                  <Card className="overflow-hidden"><CardHeader className="border-b py-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="flex items-center gap-2 text-base"><Eye className="size-4" />Pose overlay</CardTitle><CardDescription className="mt-1">Exact-aspect BOP projection · cyan estimate · magenta ground truth</CardDescription></div><div className="flex gap-2"><Button size="sm" variant={baseLayer === "rgb" ? "default" : "outline"} onClick={() => setBaseLayer("rgb")}>RGB</Button><Button size="sm" variant={baseLayer === "depth" ? "default" : "outline"} onClick={() => setBaseLayer("depth")}>Depth</Button></div></div></CardHeader><CardContent className="p-3">{frames.isError ? null : frames.data?.total_count === 0 ? <p role="status" className="p-8 text-center text-sm text-muted-foreground">No frames match the selected filters.</p> : detail.isError ? <QueryProblem title="Frame evidence unavailable" error={detail.error} retry={() => void detail.refetch()} /> : !detail.data ? <Skeleton className="aspect-video w-full" /> : <Viewer frame={detail.data} baseLayer={baseLayer} geometry={geometry} masks={masks} webgl={geometryReady} onOverlayError={(message) => setOverlayFailure({ scope: overlayScope, message })} />}{overlayError && <div role="alert" className="mt-3 rounded-lg border border-warning/40 bg-warning/5 p-3 text-xs"><div className="font-semibold text-warning-foreground">Geometry overlay disabled</div><p className="mt-1 text-muted-foreground">{overlayError} Image, mask, navigation, and numeric evidence remain available.</p></div>}<div className="mt-3 flex items-start gap-2 rounded-lg border border-primary/25 bg-primary/5 p-3 text-xs"><ScanSearch className="mt-0.5 size-4 shrink-0 text-primary-strong" /><p><strong>X-ray diagnostic.</strong> Geometry is projected from the saved poses and camera intrinsics. It is not occluded against observed depth and must not be read as a photorealistic visibility claim. <HelpTip label="x-ray pose overlay">The surface, wireframe, axes, and boxes remain visible through scene objects so pose disagreement is easy to spot. Use GT masks and visibility evidence for observed-pixel context.</HelpTip></p></div></CardContent></Card>
                 {detail.data && <Card><CardHeader><CardTitle className="text-base">Frame evidence</CardTitle><CardDescription>{detail.data.estimates.length} ranked estimate{detail.data.estimates.length === 1 ? "" : "s"} · {detail.data.ground_truth.length} GT instance{detail.data.ground_truth.length === 1 ? "" : "s"}</CardDescription></CardHeader><CardContent><EvidencePane frame={detail.data} /></CardContent></Card>}
               </div>
               <div className="space-y-4 xl:sticky xl:top-20">

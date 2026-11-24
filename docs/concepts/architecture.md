@@ -46,6 +46,7 @@ external job rather than to `run_config.json` or a global catalogue.
 | Pose templates | remaining `posetestbot.pose_templates.*` | Immutable global bundles and run snapshots |
 | BOP export | `posetestbot.bop.writer` | `bop/` below the run |
 | Inspect results and evaluation | `posetestbot.bop.inspection`, `.evaluation` | Read-only BOP/result views; retained evidence only in `processed/bop_evaluation/` |
+| Inspect depth studies | `posetestbot.bop.depth_sources`, `.depth_metrics`, `.depth_evaluation` | BlenderProc CPU references and finish comparisons below `processed/bop_evaluation/depth/` |
 | Web interface | `posetestbot.web.routes.*` | Delegates mutations to domain code or queued jobs |
 
 ## Request and job boundary
@@ -85,7 +86,7 @@ this repository:
 - a general evaluation stage; or
 - cluster secrets and remote filesystem configuration.
 
-The narrow exception is Inspect-only official BOP19 and
+One narrow exception is Inspect-only official BOP19 and
 [IPD robot-consistency evaluation](robot-consistency.md) of an already
 exported annotation-bearing dataset and immutable compatible result. It writes
 derived evidence only below `processed/bop_evaluation/`. For a verified
@@ -93,6 +94,15 @@ sensor-subset result, the adapter recomputes the selected inventory from the
 unchanged local export, writes an immutable filtered BOP19 targets file inside
 the evaluation folder, and constrains the pinned toolkit to those scenes. No
 tracking or estimator logic crosses back into this repository.
+
+[Depth-quality studies](depth-evaluation.md) are another Inspect-only path.
+They consume completed pose-bearing exports and immutable geometry/calibration
+snapshots, render opaque reference surfaces using pinned BlenderProc 2.8.0 on
+CPU, and compare measured depth within reference-defined regions. Comparisons
+bind canonical geometry hashes and settings, retain run/sensor series, and use
+common distance/incidence bins. Jobs atomically publish complete reports,
+maps, and research bundles below `processed/bop_evaluation/depth/` after source
+validation. This path has no estimator, hardware, or acquisition-stage role.
 
 Robot consistency uses recorded robot poses and exported hand-eye calibration
 snapshots, retains hash-bound inputs and MVD/ADD evidence in the same evaluation

@@ -111,6 +111,7 @@ uv run python scripts/plan_capture.py working_data/example --json
 - [Calibration](api/calibration.md)
 - [Workpieces and pose templates](api/catalogs.md)
 - [BOP and cluster boundary](api/bop-cluster.md)
+- [Inspect depth evaluation](api/depth-evaluation.md)
 
 The route index is generated from Flask and tested for drift. Domain pages
 describe behavioral contracts and important payloads. Payload schema versions

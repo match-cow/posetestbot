@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import shutil
 import uuid
 from pathlib import Path
@@ -29,6 +30,7 @@ from posetestbot.bop.evaluation import (
     toolkit_status,
 )
 from posetestbot.jobs.runner import ResourceBusyError
+from posetestbot.web.inspect_jobs import reconcile_inspect_job, submit_inspect_job
 from posetestbot.web.runtime import job_runner
 from posetestbot.web.paths import APP_ROOT
 from posetestbot.web.security import resolve_web_run_root
@@ -70,12 +72,28 @@ def _source_from_request(value: Mapping[str, Any]) -> tuple[str | None, dict | N
                 "score": source.get("score", 1.0),
             }
         raise ValueError("source.kind must be registered_result or gt_simulation")
-    result_id = value.get("result_id")
-    simulation = value.get("simulation")
-    return (
-        str(result_id) if isinstance(result_id, str) else None,
-        dict(simulation) if isinstance(simulation, Mapping) else None,
-    )
+    raise ValueError("source must be an object")
+
+
+def _reconcile_evaluations(root: Path, evaluations: list[dict]) -> list[dict]:
+    for item in evaluations:
+        path = evaluation_request_path(root, item["evaluation_id"])
+        reconcile_inspect_job(
+            job_runner, root=root, path=path.parent, item=item,
+            recorded_root=lambda: json.loads(path.read_text())["run_root"],
+            name="bop_evaluation", id_parameter="evaluation_id",
+            availability="report_available", state_key="status", abandoned_when_unbound=False,
+        )
+        if item["status"] in {"queued", "running"} and "job_id" not in item:
+            # Earlier web jobs recorded the evaluation identity only in the job record.
+            matches = [
+                job for job in job_runner.list_page(run_root=root, search=item["evaluation_id"], limit=1).jobs
+                if job.parameters.get("evaluation_id") == item["evaluation_id"]
+            ]
+            if matches and matches[0].status in {"failed", "canceled"}:
+                item["status"] = matches[0].status
+                item["job_id"] = matches[0].id
+    return evaluations
 
 
 @bop_evaluation_bp.get("/bop/evaluation/setup")
@@ -92,10 +110,8 @@ def bop_evaluation_setup():
                 "toolkit": toolkit_status(APP_ROOT),
                 "dataset": public_dataset_descriptor(dataset),
                 "results": public_results,
-                "evaluations": list_evaluations(
-                    run_root,
-                    dataset=dataset,
-                    results=public_results,
+                "evaluations": _reconcile_evaluations(
+                    run_root, list_evaluations(run_root, dataset=dataset, results=public_results),
                 ),
             }
         )
@@ -114,7 +130,7 @@ def bop_result_import():
         ):
             raise RequestEntityTooLarge()
         run_root = resolve_web_run_root(request.form.get("run_root"))
-        upload = request.files.get("file") or request.files.get("result")
+        upload = request.files.get("file")
         if upload is None or not upload.filename:
             raise ValueError("A BOP result CSV file is required")
         filename = upload.filename
@@ -131,7 +147,7 @@ def bop_result_import():
         if staged.stat().st_size > MAX_RESULT_BYTES:
             raise RequestEntityTooLarge()
         display_name = (
-            request.form.get("display_name") or request.form.get("method_name") or None
+            request.form.get("display_name") or None
         )
         result = import_bop_result(
             run_root,
@@ -166,36 +182,17 @@ def queue_bop_evaluation():
             simulation=simulation,
         )
         request_path = evaluation_request_path(run_root, evaluation["evaluation_id"])
-        try:
-            job = job_runner.submit(
-                name="bop_evaluation",
-                command=[
-                    "uv",
-                    "run",
-                    "python",
-                    "scripts/run_bop_evaluation.py",
-                    "--request",
-                    request_path.as_posix(),
-                ],
-                cwd=APP_ROOT,
-                resources=["cpu", "disk_io"],
-                scope_kind="run",
-                run_root=run_root,
-                parameters={
-                    "run_root": run_root.as_posix(),
-                    "evaluation_id": evaluation["evaluation_id"],
-                    "request_path": request_path.as_posix(),
-                    "result_id": result_id,
-                    "source_kind": (
-                        "gt_simulation"
-                        if simulation is not None
-                        else "registered_result"
-                    ),
-                },
-            )
-        except Exception:
-            shutil.rmtree(request_path.parent, ignore_errors=True)
-            raise
+        job = submit_inspect_job(
+            job_runner, root=run_root, folder=request_path.parent,
+            name="bop_evaluation", script="scripts/run_bop_evaluation.py",
+            parameters={
+                "run_root": run_root.as_posix(),
+                "evaluation_id": evaluation["evaluation_id"],
+                "request_path": request_path.as_posix(),
+                "result_id": result_id,
+                "source_kind": "gt_simulation" if simulation is not None else "registered_result",
+            },
+        )
         return (
             jsonify(
                 {

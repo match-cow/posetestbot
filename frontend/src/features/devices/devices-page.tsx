@@ -1,3 +1,4 @@
+import { QueryProblem } from "@/components/query-problem"
 import { useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { AlertTriangle, Camera, Eye, EyeOff, Info, RefreshCw, Save, Webcam } from "lucide-react"
@@ -39,7 +40,6 @@ interface AliasState { aliases: Record<string, AliasRecord>; path?: string; erro
 type AliasDraft = Partial<AliasRecord>
 type AliasSaveReason = "alias" | "mounting" | "orientation"
 interface SaveAliasRequest {
-  records: Record<string, AliasRecord>
   key: string
   patch: AliasDraft
   reason: AliasSaveReason
@@ -113,7 +113,7 @@ export function DevicesPage() {
     onError: (error) => toast.error("Snapshot could not be queued", { description: errorMessage(error) }),
   })
   const saveAliases = useMutation({
-    mutationFn: ({ records }: SaveAliasRequest) => api<AliasState>("/sensors/aliases", { method: "PUT", body: JSON.stringify({ aliases: records }) }),
+    mutationFn: ({ key, patch }: SaveAliasRequest) => api<AliasState>("/sensors/aliases", { method: "PATCH", body: JSON.stringify({ aliases: { [key]: patch } }) }),
     onSuccess: (data, request) => {
       setAliasDraft((current) => {
         const draft = current[request.key]
@@ -182,22 +182,10 @@ export function DevicesPage() {
       return next
     })
   }
-  const aliasRecords = () => {
-    const records: Record<string, AliasRecord> = {
-      ...(aliases.data?.aliases ?? {}),
-    }
-    for (const device of devices) {
-      const key = sensorKey(device)
-      records[key] = aliases.data?.aliases[key] ?? defaultAliasRecord(device)
-    }
-    return records
-  }
   const persistDefault = async (device: SensorDevice, patch: AliasDraft, reason: AliasSaveReason) => {
     const key = sensorKey(device)
     setAliasDraft((current) => ({ ...current, [key]: { ...current[key], ...patch } }))
-    const records = aliasRecords()
-    records[key] = { ...savedAliasRecord(device), ...patch }
-    return saveAliases.mutateAsync({ records, key, patch, reason })
+    return saveAliases.mutateAsync({ key, patch, reason })
   }
   const updateMountingMode = (device: SensorDevice, mountingMode: MountingMode) => {
     void persistDefault(device, { mounting_mode: mountingMode }, "mounting").catch(() => undefined)
@@ -237,7 +225,7 @@ export function DevicesPage() {
       {(aliases.isError || aliases.data?.error) && <div className="flex items-start justify-between gap-4 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs" role="alert"><div><div className="font-semibold text-destructive">Reusable device defaults could not be loaded</div><p className="mt-1 text-muted-foreground">{aliases.data?.error ?? errorMessage(aliases.error)} Editing is disabled so retained defaults are not overwritten.</p></div><Button variant="outline" size="sm" onClick={() => void aliases.refetch()} disabled={aliases.isFetching}><RefreshCw className={aliases.isFetching ? "animate-spin" : ""} />Retry defaults</Button></div>}
 
       <div className="flex items-center justify-between"><div><h2 className="font-display text-xl font-semibold">RGB-D sensor lab defaults</h2><p className="text-sm text-muted-foreground">{captureReadyCount} capture-ready · {status.data?.total_connected ?? 0} connected</p></div><Button variant="outline" size="sm" onClick={() => stopAllPreviews.mutate()} disabled={!anyPreviewBusy || stopAllPreviews.isPending}><EyeOff />{stopAllPreviews.isPending ? "Stopping previews…" : "Stop all previews"}</Button></div>
-      {status.isPending ? <div className="grid items-start gap-4 md:grid-cols-2 xl:grid-cols-3">{Array.from({ length: 3 }).map((_, index) => <Skeleton className="h-[430px]" key={index} />)}</div> : devices.length === 0 ? <div className="rounded-xl border border-dashed p-10 text-center text-sm text-muted-foreground">No RGB-D sensors were detected. Check SDKs, USB connections, and permissions, then refresh.</div> : <div data-testid="sensor-grid" className="grid items-start gap-4 md:grid-cols-2 xl:grid-cols-3">
+      {status.isError ? <QueryProblem title="Sensor discovery unavailable" error={status.error} retry={() => void refreshDiscovery()} retrying={status.isFetching} /> : status.isPending ? <div className="grid items-start gap-4 md:grid-cols-2 xl:grid-cols-3">{Array.from({ length: 3 }).map((_, index) => <Skeleton className="h-[430px]" key={index} />)}</div> : devices.length === 0 ? <div className="rounded-xl border border-dashed p-10 text-center text-sm text-muted-foreground">No RGB-D sensors were detected. Check SDKs, USB connections, and permissions, then refresh.</div> : <div data-testid="sensor-grid" className="grid items-start gap-4 md:grid-cols-2 xl:grid-cols-3">
         {devices.map((device) => {
           const key = sensorKey(device)
           const alias = displayedAliasRecord(device)
@@ -254,12 +242,8 @@ export function DevicesPage() {
           const snapshotRecord = snapshotState?.manifest?.sensors?.find((item) => item.sensor_key === key)
           const snapshotJobId = snapshotJobs[key]
           const safeControlKey = key.replaceAll(/[^a-zA-Z0-9_-]/g, "-")
-          const orientationReasonId = `sensor-orientation-disabled-${safeControlKey}`
           const previewReasonId = `sensor-preview-disabled-${safeControlKey}`
           const snapshotReasonId = `sensor-snapshot-disabled-${safeControlKey}`
-          const orientationReason = device.sensor_type !== "realsense_d435"
-            ? "Image-orientation override is available only for RealSense D435 cameras."
-            : null
           const previewReason = !previewSupported
             ? "Live RGB preview is unavailable for this sensor family; use Snapshot when the camera is capture-ready."
             : null
@@ -272,8 +256,24 @@ export function DevicesPage() {
               {readinessMessage && <div data-testid="sensor-capture-readiness" className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs leading-relaxed"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" /><span><span className="font-semibold">Capture unavailable.</span> {readinessMessage}</span></div>}
               <Preview preview={previewBusy || preview?.job.status === "failed" ? preview : undefined} />
               {snapshotJobId && <div data-testid="sensor-snapshot" className="overflow-hidden rounded-lg border border-border bg-muted/20">{snapshotRecord?.rgb_thumbnail ? <img src={`/sensors/snapshots/${snapshotJobId}/image?path=${encodeURIComponent(snapshotRecord.rgb_thumbnail)}`} className="aspect-video w-full object-cover" alt="Latest sensor snapshot" /> : <div className="grid h-16 place-items-center px-3 text-center text-xs text-muted-foreground">{snapshotRecord?.error ?? (PREVIEW_BUSY.has(snapshotState?.job.status ?? "queued") ? "Capturing snapshot…" : "Snapshot did not produce an image")}</div>}</div>}
-              <div className="space-y-2"><Label htmlFor={`alias-${key}`}>Default operator alias</Label><div className="flex gap-2"><Input id={`alias-${key}`} value={alias.alias} onChange={(event) => updateAliasDraft(device, event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && aliasDirty && !defaultControlsDisabled) { event.preventDefault(); void persistDefault(device, { alias: alias.alias }, "alias").catch(() => undefined) } }} disabled={defaultControlsDisabled} /><Button variant="outline" onClick={() => void persistDefault(device, { alias: alias.alias }, "alias").catch(() => undefined)} disabled={defaultControlsDisabled || !aliasDirty} aria-label={`Save alias for ${key}`}><Save />Save alias</Button></div><p className={`text-[10px] leading-relaxed ${aliasDirty ? "font-medium text-warning" : "text-muted-foreground"}`}>{aliasDirty ? "Unsaved alias draft. Save it here before leaving." : "Saved lab default; it seeds new runs only. Existing runs keep their saved alias."}</p></div>
-              <div className="grid grid-cols-2 gap-3"><div className="space-y-2"><Label className="flex items-center gap-1" htmlFor={`mounting-${key}`}>Mounting default <HelpTip label="camera mounting mode">Robot-mounted cameras move rigidly with the flange. Static cameras remain fixed in the workcell; their calibration uses a moving robot-mounted grid to publish camera → PoseTemplateBase, not to track the hand.</HelpTip></Label><Select value={alias.mounting_mode ?? UNCONFIGURED_MOUNTING} onValueChange={(value) => { if (value !== UNCONFIGURED_MOUNTING) updateMountingMode(device, value as MountingMode) }} disabled={defaultControlsDisabled}><SelectTrigger id={`mounting-${key}`} aria-label={`Mounting default for ${key}`} data-testid="sensor-mounting-mode"><SelectValue /></SelectTrigger><SelectContent><SelectItem value={UNCONFIGURED_MOUNTING} disabled>Mounting not configured</SelectItem><SelectItem value="eye_in_hand">Robot-mounted</SelectItem><SelectItem value="static">Static</SelectItem></SelectContent></Select><p data-testid={!alias.mounting_mode ? "sensor-mounting-required" : undefined} className={`text-[10px] leading-relaxed ${alias.mounting_mode ? "text-muted-foreground" : "font-medium text-destructive"}`}>{alias.mounting_mode ? "Saved immediately as a new-run default. Existing runs change only in Workflow step 1." : "Required before this camera can seed a valid new run. Choose its physical mount; PoseTestBot will not assume Robot-mounted."}</p></div><div className="space-y-2"><Label className="flex items-center gap-1" htmlFor={`orientation-${key}`}>Orientation default <HelpTip label="camera image orientation">Inverted rotates supported camera output by 180° so saved RGB and aligned depth share the physical mounting orientation.</HelpTip></Label><Select value={alias.inverted ? "inverted" : "normal"} onValueChange={(value) => void updateOrientation(device, value === "inverted", preview)} disabled={defaultControlsDisabled || device.sensor_type !== "realsense_d435" || previewStopping || previewTransitionPending}><SelectTrigger id={`orientation-${key}`} data-testid="sensor-orientation" aria-label={`Orientation default for ${key}`} aria-describedby={orientationReason ? orientationReasonId : undefined}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="normal">Normal</SelectItem><SelectItem value="inverted">Inverted</SelectItem></SelectContent></Select><p className="text-[10px] leading-relaxed text-muted-foreground">Saved immediately as a new-run default. Active previews restart with it.</p>{orientationReason && <p id={orientationReasonId} data-testid="sensor-orientation-disabled-reason" className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-[10px] leading-relaxed text-muted-foreground">{orientationReason}</p>}</div></div>
+              <div className="space-y-2"><Label htmlFor={`alias-${key}`}>Default operator alias</Label><div className="flex gap-2"><Input id={`alias-${key}`} value={alias.alias} onChange={(event) => updateAliasDraft(device, event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && aliasDirty && !defaultControlsDisabled) { event.preventDefault(); void persistDefault(device, { alias: alias.alias }, "alias").catch(() => undefined) } }} disabled={defaultControlsDisabled} /><Button variant="outline" onClick={() => void persistDefault(device, { alias: alias.alias }, "alias").catch(() => undefined)} disabled={defaultControlsDisabled || !aliasDirty} aria-label={`Save alias for ${key}`}><Save />Save alias</Button></div><p className={`text-[10px] leading-relaxed ${aliasDirty ? "font-medium text-warning" : "text-muted-foreground"}`}>{aliasDirty ? "Unsaved alias draft. Save it here before leaving." : "Saved lab default"}</p></div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <Label className="flex items-center gap-1" htmlFor={`mounting-${key}`}>Mounting default <HelpTip label="camera mounting mode">Robot-mounted cameras move rigidly with the flange. Static cameras remain fixed in the workcell.</HelpTip></Label>
+                  <Select value={alias.mounting_mode ?? UNCONFIGURED_MOUNTING} onValueChange={(value) => { if (value !== UNCONFIGURED_MOUNTING) updateMountingMode(device, value as MountingMode) }} disabled={defaultControlsDisabled}>
+                    <SelectTrigger id={`mounting-${key}`} aria-label={`Mounting default for ${key}`} data-testid="sensor-mounting-mode"><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectItem value={UNCONFIGURED_MOUNTING} disabled>Mounting unconfigured</SelectItem><SelectItem value="eye_in_hand">Robot-mounted</SelectItem><SelectItem value="static">Static</SelectItem></SelectContent>
+                  </Select>
+                  {!alias.mounting_mode && <p data-testid="sensor-mounting-required" className="text-[10px] font-medium text-destructive">Choose the physical mount to use this default in a new run.</p>}
+                </div>
+                <div className="space-y-2">
+                  <Label className="flex items-center gap-1" htmlFor={device.sensor_type === "realsense_d435" ? `orientation-${key}` : undefined}>Orientation default <HelpTip label="camera image orientation">Inverted rotates RGB and aligned depth by 180°.</HelpTip></Label>
+                  {device.sensor_type === "realsense_d435" ? <Select value={alias.inverted ? "inverted" : "normal"} onValueChange={(value) => void updateOrientation(device, value === "inverted", preview)} disabled={defaultControlsDisabled || previewStopping || previewTransitionPending}>
+                    <SelectTrigger id={`orientation-${key}`} data-testid="sensor-orientation" aria-label={`Orientation default for ${key}`}><SelectValue /></SelectTrigger>
+                    <SelectContent><SelectItem value="normal">Normal</SelectItem><SelectItem value="inverted">Inverted</SelectItem></SelectContent>
+                  </Select> : <p className="text-xs">Normal (fixed for this camera)</p>}
+                </div>
+              </div>
               <div className="flex justify-end"><Button variant="ghost" size="sm" onClick={() => setDetail(device)}><Info />Details</Button></div>
               <div className="grid grid-cols-2 gap-2"><Button data-testid="sensor-preview-toggle" aria-label={`Toggle preview for ${alias?.alias || device.effective_display_name || device.display_name || device.device_id}`} aria-pressed={previewOn} aria-describedby={previewReason ? previewReasonId : undefined} variant={previewOn ? "secondary" : "outline"} disabled={!previewSupported || previewStopping || previewTransitionPending || (!captureReady && !previewOn)} title={!captureReady ? readinessMessage ?? "Camera is not capture-ready" : previewSupported ? undefined : "Live RGB preview is unavailable for this sensor family"} onClick={() => previewOn && preview ? stopPreview.mutate(preview.job.id) : startPreview.mutate(device)}>{!captureReady && !previewOn ? <><EyeOff />Not ready</> : !previewSupported ? <><EyeOff />Unavailable</> : previewStopping ? <><EyeOff />Stopping…</> : previewOn ? <><Eye />Preview on</> : <><EyeOff />Preview off</>}</Button><Button variant="outline" aria-describedby={snapshotReason ? snapshotReasonId : undefined} title={!captureReady ? readinessMessage ?? "Camera is not capture-ready" : previewBusy ? "Turn this preview off before taking a snapshot" : undefined} onClick={() => snapshot.mutate(device)} disabled={!captureReady || previewBusy || snapshot.isPending || PREVIEW_BUSY.has(snapshotState?.job.status ?? "")}><Camera />{PREVIEW_BUSY.has(snapshotState?.job.status ?? "") ? "Capturing…" : "Snapshot"}</Button></div>
               {previewReason && <p id={previewReasonId} data-testid="sensor-preview-disabled-reason" className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-[10px] leading-relaxed text-muted-foreground">{previewReason}</p>}

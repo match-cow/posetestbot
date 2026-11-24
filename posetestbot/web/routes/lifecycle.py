@@ -6,7 +6,6 @@ from typing import Any, Mapping
 
 from flask import Blueprint, jsonify, request
 
-from posetestbot.jobs.runner import TERMINAL_STATUSES
 from posetestbot.web.runtime import get_job_runner, get_web_runtime
 
 
@@ -32,14 +31,22 @@ def _restart_status() -> dict[str, Any]:
                 }
             ],
         }
-    return manager.status()
+    status = dict(manager.status())
+    blockers = [
+        job for job in get_job_runner().active_jobs()
+        if job.parameters.get("cancelable") is False or job.parameters.get("purpose") == "capture"
+    ]
+    if blockers:
+        status["available"] = False
+        status["blockers"] = [
+            *status.get("blockers", []),
+            {"code": "active_protected_local_job", "message": "Wait for capture and non-cancelable local jobs to finish before restarting the backend."},
+        ]
+    return status
 
 
 def _active_local_jobs() -> int:
-    return sum(
-        job.status not in TERMINAL_STATUSES
-        for job in get_job_runner().list(include_services=True)
-    )
+    return len(get_job_runner().active_jobs())
 
 
 @lifecycle_bp.get("/system/lifecycle")
@@ -71,7 +78,7 @@ def restart_web_backend():
     manager = runtime.web_service_manager
     if manager is None:
         return jsonify({"output": _restart_status()["blockers"][0]["message"]}), 409
-    status = manager.status()
+    status = _restart_status()
     if not status.get("available"):
         blockers = status.get("blockers")
         message = (

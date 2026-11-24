@@ -1,3 +1,4 @@
+import { QueryProblem } from "@/components/query-problem"
 import { useEffect, useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowRight, CheckCircle2, LoaderCircle, RefreshCw, Send } from "lucide-react"
@@ -39,15 +40,21 @@ function placementMatrix(values: number[]) {
   ]
 }
 
+const OPERATOR_NAME_KEY = "posetestbot.operatorName"
+
 export function GroundTruthWorkflow() {
   const { selectedRun, selectedRunEpoch } = useOperator()
   const client = useQueryClient()
   const [template, setTemplate] = useState("")
-  const [placement, setPlacement] = useState([0, 0, 0, 0, 0, 0])
+  // Raw text, blank until measured: zeros would be a confirmable placement nobody entered,
+  // and parsing on every keystroke swallowed a leading minus sign.
+  const [placement, setPlacement] = useState(["", "", "", "", "", ""])
   const [confirmation, setConfirmation] = useState<{ runRoot: string; runEpoch: number; value: boolean }>({ runRoot: "", runEpoch: -1, value: false })
-  const [operator, setOperator] = useState("operator-console")
+  const [operator, setOperator] = useState(() => localStorage.getItem(OPERATOR_NAME_KEY) ?? "")
   const [pendingJob, setPendingJob] = useState<{ id: string; runRoot: string } | null>(null)
-  const confirmed = confirmation.runRoot === selectedRun && confirmation.runEpoch === selectedRunEpoch && confirmation.value
+  const placementValues = placement.map((value) => value.trim() === "" ? Number.NaN : Number(value))
+  const placementComplete = placementValues.every(Number.isFinite)
+  const confirmed = placementComplete && confirmation.runRoot === selectedRun && confirmation.runEpoch === selectedRunEpoch && confirmation.value
   const library = useQuery({ queryKey: ["pose-template-library"], queryFn: () => api<{ templates: PoseTemplateBundle[] }>("/pose-templates/library") })
   const status = useQuery({ queryKey: ["pose-template-run", selectedRun], queryFn: () => api<SelectionStatus>(query("/pose-templates/runs/selection", { run_root: selectedRun })), retry: false })
   const active = useMemo(() => library.data?.templates.filter((item) => item.archive.state === "active") ?? [], [library.data])
@@ -92,7 +99,7 @@ export function GroundTruthWorkflow() {
     setTemplate(templateUuid)
     setConfirmation({ runRoot: selectedRun, runEpoch: selectedRunEpoch, value: false })
   }
-  const updatePlacement = (index: number, value: number) => {
+  const updatePlacement = (index: number, value: string) => {
     setPlacement((current) => current.map((item, itemIndex) => itemIndex === index ? value : item))
     setConfirmation({ runRoot: selectedRun, runEpoch: selectedRunEpoch, value: false })
   }
@@ -104,7 +111,7 @@ export function GroundTruthWorkflow() {
         {status.data?.selection ? <>
           <div className="rounded-lg bg-muted p-3 text-xs"><div className="font-semibold">Template {status.data.selection.template_uuid.slice(0, 8)}</div><div className="mt-1 text-muted-foreground">{status.data.selection.instances.length} resolved physical instance{status.data.selection.instances.length === 1 ? "" : "s"} · placement {status.data.selection.placement_confirmed ? "confirmed" : "not confirmed"}</div></div>
           <div className="space-y-1">{status.data.selection.instances.map((item) => <div key={item.instance_uuid} className="flex justify-between rounded border px-3 py-2 text-xs"><span>{item.name} · obj_{String(item.obj_id).padStart(6, "0")}</span><span className="font-mono text-muted-foreground">{item.template_base_from_object.translation_mm.map((value) => value.toFixed(1)).join(", ")} mm</span></div>)}</div>
-        </> : <div className="rounded-lg border border-dashed px-5 py-10 text-center text-xs text-muted-foreground">No pose template is selected. This is required for an object-labelled dataset because it establishes which physical objects are present and where the printed template sits in the workcell.</div>}
+        </> : status.isError ? <QueryProblem title="Run template selection unavailable" error={status.error} retry={() => void status.refetch()} /> : status.isPending ? <p role="status" className="p-4 text-xs">Loading run template selection…</p> : <div className="rounded-lg border border-dashed px-5 py-10 text-center text-xs text-muted-foreground">No pose template is selected. This is required for an object-labelled dataset because it establishes which physical objects are present and where the printed template sits in the workcell.</div>}
         {status.data?.ready && <div className="flex items-start gap-2 rounded-lg border border-success/30 bg-success/5 p-3 text-xs text-success" data-testid="saved-pose-template-ready"><CheckCircle2 className="mt-0.5 size-4 shrink-0" /><span>Object identities and measured placement are ready for dataset recording and BOP export.</span></div>}
         {status.data?.replacement_blockers.length ? <div className="rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs"><div className="font-semibold text-destructive">Selection replacement blocked</div>{status.data.replacement_blockers.map((item) => <div className="mt-1 font-mono text-muted-foreground" key={item}>{item}</div>)}</div> : null}
         <Button variant="outline" onClick={() => status.refetch()}><RefreshCw />Refresh selection</Button>
@@ -114,6 +121,7 @@ export function GroundTruthWorkflow() {
     <Card data-testid="pose-template-selection-draft">
       <CardHeader><CardTitle>{hasSavedSelection ? "Replacement selection draft" : "New selection draft"}</CardTitle><CardDescription>{hasSavedSelection ? "The saved pose template at left remains active. Use this separate draft only when intentionally replacing it with a different template or measured position." : "Choose the exact printed pose template used in the cell, then enter its measured position relative to the workcell reference. Cards use simplified footprints for browsing; selecting one loads its exact immutable object geometry and identity details."}</CardDescription></CardHeader>
       <CardContent className="space-y-5">
+        {library.isError && <QueryProblem title="Pose-template library unavailable" error={library.error} retry={() => void library.refetch()} />}
         <div>
           <Label>Pose template {hasSavedSelection ? <span className="font-normal text-muted-foreground">Replacement choice</span> : <span className="text-destructive">Required</span>}</Label>
           <div className="mt-2 grid gap-3 sm:grid-cols-2" role="radiogroup" aria-label="Pose template">
@@ -142,11 +150,11 @@ export function GroundTruthWorkflow() {
         </div>}
 
         <div className="@container space-y-3">
-          <div><Label className="inline-flex items-center gap-1">Measured template position in the workcell <HelpTip label="measured template position">This six-degree-of-freedom transform places the origin printed on the reusable pose template into the fixed workcell frame used by the exported dataset.</HelpTip></Label><p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">Translation and rotation from the blue origin printed on the template into <code>template_base</code>, the dataset's fixed workcell reference.</p><div className="mt-2 grid grid-cols-2 gap-2 @sm:grid-cols-3 @2xl:grid-cols-6" data-testid="template-placement-grid">{["X mm", "Y mm", "Z mm", "Roll °", "Pitch °", "Yaw °"].map((label, index) => <div key={label}><Label className="text-[10px]">{label}</Label><Input aria-label={`Template placement ${label}`} type="number" step="0.1" value={placement[index]} onChange={(event) => updatePlacement(index, Number(event.target.value))} /></div>)}</div></div>
-          <div className="max-w-[210px]"><Label>Operator name</Label><Input aria-label="Operator name" value={operator} onChange={(event) => setOperator(event.target.value)} /></div>
+          <div><Label className="inline-flex items-center gap-1">Measured template position in the workcell <HelpTip label="measured template position">This six-degree-of-freedom transform places the origin printed on the reusable pose template into the fixed workcell frame used by the exported dataset.</HelpTip></Label><p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">Translation and rotation from the blue origin printed on the template into <code>template_base</code>, the dataset's fixed workcell reference.</p><div className="mt-2 grid grid-cols-2 gap-2 @sm:grid-cols-3 @2xl:grid-cols-6" data-testid="template-placement-grid">{["X mm", "Y mm", "Z mm", "Roll °", "Pitch °", "Yaw °"].map((label, index) => <div key={label}><Label className="text-[10px]">{label}</Label><Input aria-label={`Template placement ${label}`} type="number" step="0.1" value={placement[index]} onChange={(event) => updatePlacement(index, event.target.value)} /></div>)}</div>{!placementComplete && <p data-testid="template-placement-required" className="mt-2 text-[11px] font-medium text-destructive">Enter all six measured values before confirming. Nothing is assumed.</p>}<Button type="button" variant="outline" size="sm" className="mt-2" onClick={() => { setPlacement(["0", "0", "0", "0", "0", "0"]); setConfirmation({ runRoot: selectedRun, runEpoch: selectedRunEpoch, value: false }) }}>Template origin sits exactly on PoseTemplateBase (all zeros)</Button></div>
+          <div className="max-w-[210px]"><Label>Operator name <span className="text-destructive">Required</span></Label><Input aria-label="Operator name" placeholder="Who measured this placement" value={operator} onChange={(event) => setOperator(event.target.value)} /></div>
         </div>
-        <div className="flex items-start gap-2 rounded-lg border bg-muted/40 p-3"><Checkbox id="confirm-placement" checked={confirmed} onCheckedChange={(value) => setConfirmation({ runRoot: selectedRun, runEpoch: selectedRunEpoch, value: value === true })} /><div><Label htmlFor="confirm-placement">I confirm this measured physical placement</Label><p className="mt-1 text-[11px] text-muted-foreground">Changing the run, template, or any placement value clears this confirmation. Print compensation never changes Ground Truth.</p></div></div>
-        <div className="flex flex-wrap items-center gap-3"><Button onClick={() => select.mutate({ runRoot: selectedRun, templateUuid: template, placementValues: [...placement], confirmed, operator: operator.trim() })} disabled={!template || !operator.trim() || !confirmed || select.isPending || Boolean(pendingJob) || Boolean(status.data?.replacement_blockers.length)}><Send />{select.isPending ? "Queueing…" : pendingJob ? "Selection running…" : hasSavedSelection ? "Replace run selection" : "Select for run"}</Button>{pendingJob && <div className="flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground"><span className="flex items-center gap-1.5 font-mono"><LoaderCircle className="size-3 animate-spin" />{pendingJob.id} · {pendingJob.runRoot === selectedRun ? selectionJob.data?.job.status ?? "queued" : "another run"}</span><span>Continues after navigation.</span><Link className="inline-flex items-center gap-1 font-semibold text-primary-strong underline-offset-4 hover:underline" to="/jobs">Open Jobs<ArrowRight className="size-3" /></Link></div>}</div>
+        <div className="flex items-start gap-2 rounded-lg border bg-muted/40 p-3"><Checkbox id="confirm-placement" checked={confirmed} disabled={!placementComplete} onCheckedChange={(value) => setConfirmation({ runRoot: selectedRun, runEpoch: selectedRunEpoch, value: value === true })} /><div><Label htmlFor="confirm-placement">I confirm this measured physical placement</Label><p className="mt-1 text-[11px] text-muted-foreground">Changing the run, template, or any placement value clears this confirmation. Print compensation never changes Ground Truth.</p></div></div>
+        <div className="flex flex-wrap items-center gap-3"><Button onClick={() => { localStorage.setItem(OPERATOR_NAME_KEY, operator.trim()); select.mutate({ runRoot: selectedRun, templateUuid: template, placementValues: placementValues, confirmed, operator: operator.trim() }) }} disabled={!template || status.isError || status.isPending || library.isError || !operator.trim() || !placementComplete || !confirmed || select.isPending || Boolean(pendingJob) || Boolean(status.data?.replacement_blockers.length)}><Send />{select.isPending ? "Queueing…" : pendingJob ? "Selection running…" : hasSavedSelection ? "Replace run selection" : "Select for run"}</Button>{pendingJob && <div className="flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground"><span className="flex items-center gap-1.5 font-mono"><LoaderCircle className="size-3 animate-spin" />{pendingJob.id} · {pendingJob.runRoot === selectedRun ? selectionJob.data?.job.status ?? "queued" : "another run"}</span><span>Continues after navigation.</span><Link className="inline-flex items-center gap-1 font-semibold text-primary-strong underline-offset-4 hover:underline" to="/jobs">Open Jobs<ArrowRight className="size-3" /></Link></div>}</div>
       </CardContent>
     </Card>
   </div>

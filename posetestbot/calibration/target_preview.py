@@ -31,6 +31,11 @@ def render_target_preview_png(
     bounds = target["target_bounds"]
     width_mm = float(bounds["width_mm"])
     height_mm = float(bounds["height_mm"])
+    # The spec stores physical geometry. The PDF, and so the page placement
+    # in the source manifest, is drawn at the print-compensated size.
+    compensation = target["print_compensation"]
+    print_x = float(compensation["x_percent"]) / 100.0
+    print_y = float(compensation["y_percent"]) / 100.0
     page = source_manifest.get("page_bounds") if source_manifest else None
     placement = source_manifest.get("target_bounds") if source_manifest else None
     if isinstance(page, Mapping) and isinstance(placement, Mapping):
@@ -41,11 +46,14 @@ def render_target_preview_png(
             for item in (page_width_mm, page_height_mm)
         ):
             raise ValueError("Calibration-target preview page bounds are invalid")
-        if not math.isclose(float(placement["width_mm"]), width_mm, abs_tol=1e-6) or not math.isclose(
-            float(placement["height_mm"]), height_mm, abs_tol=1e-6
+        if not math.isclose(
+            float(placement["width_mm"]), width_mm * print_x, abs_tol=1e-3
+        ) or not math.isclose(
+            float(placement["height_mm"]), height_mm * print_y, abs_tol=1e-3
         ):
             raise ValueError("Calibration-target preview placement does not match the target")
         scale = max_dimension / max(page_width_mm, page_height_mm)
+        scale_x, scale_y = scale * print_x, scale * print_y
         canvas_width = max(1, math.ceil(page_width_mm * scale))
         canvas_height = max(1, math.ceil(page_height_mm * scale))
         offset_x = (float(placement["x_mm"]) - float(page.get("x_mm", 0.0))) * scale
@@ -56,6 +64,7 @@ def render_target_preview_png(
         canvas_height = max(1, math.ceil(height_mm * scale)) + 2 * padding
         offset_x = float(padding)
         offset_y = float(padding)
+        scale_x = scale_y = scale
     canvas = np.full((canvas_height, canvas_width), 255, dtype=np.uint8)
 
     try:
@@ -70,10 +79,10 @@ def render_target_preview_png(
     origin_y = float(bounds["y_mm"])
     for marker in target["markers"]:
         corners = np.asarray(marker["corners_mm"], dtype=float)
-        x0 = round(offset_x + (float(corners[:, 0].min()) - origin_x) * scale)
-        x1 = round(offset_x + (float(corners[:, 0].max()) - origin_x) * scale)
-        y0 = round(offset_y + (float(corners[:, 1].min()) - origin_y) * scale)
-        y1 = round(offset_y + (float(corners[:, 1].max()) - origin_y) * scale)
+        x0 = round(offset_x + (float(corners[:, 0].min()) - origin_x) * scale_x)
+        x1 = round(offset_x + (float(corners[:, 0].max()) - origin_x) * scale_x)
+        y0 = round(offset_y + (float(corners[:, 1].min()) - origin_y) * scale_y)
+        y1 = round(offset_y + (float(corners[:, 1].max()) - origin_y) * scale_y)
         marker_width = max(1, x1 - x0)
         marker_height = max(1, y1 - y0)
 

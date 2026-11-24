@@ -76,6 +76,7 @@ nav:
       - Architecture and boundaries: concepts/architecture.md
       - Runs and artifact lineage: concepts/runs-and-artifacts.md
       - Robot consistency metric: concepts/robot-consistency.md
+      - Depth quality and finishes: concepts/depth-evaluation.md
       - Safety and authorization: concepts/safety.md
   - HTTP API:
       - API conventions: reference/http-api.md
@@ -86,6 +87,7 @@ nav:
       - Calibration: reference/api/calibration.md
       - Workpieces and pose templates: reference/api/catalogs.md
       - BOP and cluster boundary: reference/api/bop-cluster.md
+      - Inspect depth evaluation: reference/api/depth-evaluation.md
   - File and command reference:
       - Run configuration: reference/run-config.md
       - Artifact index: reference/artifacts.md

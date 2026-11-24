@@ -12,6 +12,20 @@ export class ApiError extends Error {
   }
 }
 
+/** The most specific message a JSON error body carries, if any. */
+function structuredErrorMessage(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null
+  const value = body as { output?: unknown; error?: unknown; errors?: unknown }
+  const first = Array.isArray(value.errors) ? value.errors[0] : null
+  const detail = typeof first === "string"
+    ? first
+    : first && typeof first === "object" && typeof (first as { message?: unknown }).message === "string"
+      ? (first as { message: string }).message
+      : typeof value.error === "string" ? value.error : null
+  const output = typeof value.output === "string" ? value.output : null
+  return output && detail ? `${output} — ${detail}` : output ?? detail
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers)
   if (init?.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json")
@@ -23,9 +37,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     const message = typeof body === "string"
       ? body
-      : body && typeof body === "object" && "output" in body && typeof body.output === "string"
-        ? body.output
-        : `Request failed (${response.status})`
+      : structuredErrorMessage(body) ?? `Request failed (${response.status})`
     throw new ApiError(response.status, message, body as ApiErrorBody | string)
   }
   return body as T

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import numpy as np
 
@@ -19,6 +19,7 @@ from posetestbot.sensors.frame_writer import (
 
 CAPTURE_SUMMARY_SCHEMA_VERSION = "zed_2i_capture_summary.v1"
 SUPPORTED_RESOLUTIONS = ("720p", "360p")
+GRAB_STALL_TIMEOUT_S = 5.0
 
 
 class ZED2iCaptureError(RuntimeError):
@@ -128,8 +129,9 @@ def _depth_uint16(depth: Any) -> np.ndarray:
     if values.ndim != 2:
         raise ZED2iCaptureError(f"ZED depth image has invalid shape: {values.shape}")
     values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+    # Round to the nearest millimetre: truncating would bias every pixel short.
     return np.ascontiguousarray(
-        np.clip(values, 0, np.iinfo(np.uint16).max).astype(np.uint16)
+        np.clip(np.rint(values), 0, np.iinfo(np.uint16).max).astype(np.uint16)
     )
 
 
@@ -143,10 +145,18 @@ def capture_zed_2i_rgbd(
     resolution: str = "720p",
     preview: bool = False,
     record: bool = True,
+    stop_requested: Callable[[], bool] | None = None,
+    stall_timeout_s: float = GRAB_STALL_TIMEOUT_S,
     sl_module: Any | None = None,
     cv2_module: Any | None = None,
 ) -> dict[str, Any]:
-    """Capture left RGB and aligned millimetre depth through shared writers."""
+    """Capture left RGB and aligned millimetre depth through shared writers.
+
+    ``stop_requested`` is polled between frames so a stop never lands inside a
+    frame write. A camera that delivers nothing for ``stall_timeout_s`` raises:
+    its process would otherwise stay alive and the run would pass every check
+    while missing this camera's frames.
+    """
 
     if fps <= 0:
         raise ValueError("fps must be positive")
@@ -209,10 +219,19 @@ def capture_zed_2i_rgbd(
         runtime_parameters = sl.RuntimeParameters()
         image = sl.Mat()
         depth = sl.Mat()
-        while max_frames <= 0 or captured_frames < max_frames:
+        last_grab_at = time.monotonic()
+        while (max_frames <= 0 or captured_frames < max_frames) and not (
+            stop_requested and stop_requested()
+        ):
             if zed.grab(runtime_parameters) != sl.ERROR_CODE.SUCCESS:
                 grab_failures += 1
+                if time.monotonic() - last_grab_at > stall_timeout_s:
+                    raise ZED2iCaptureError(
+                        f"ZED delivered no frame for {stall_timeout_s:g} s "
+                        f"({grab_failures} failed grabs)"
+                    )
                 continue
+            last_grab_at = time.monotonic()
             host_wall_timestamp_ns = time.time_ns()
             host_received_timestamp_ns = time.monotonic_ns()
             zed.retrieve_image(image, sl.VIEW.LEFT)

@@ -17,7 +17,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 from posetestbot.io.manifest import utc_now_iso
 from posetestbot.io.atomic import atomic_write_json
@@ -157,7 +157,10 @@ class LocalJobRunner:
         scope_kind: str,
         run_root: str | Path | None = None,
         visibility: str = OPERATOR_VISIBILITY,
+        before_start: Callable[[str], None] | None = None,
     ) -> JobRecord:
+        """Reserve and persist a job, then bind any caller evidence before launch."""
+
         if not command:
             raise ValueError("Job command must not be empty")
         if visibility not in JOB_VISIBILITIES:
@@ -171,7 +174,6 @@ class LocalJobRunner:
             self._check_resources_available(requested_resources)
             job_id = uuid.uuid4().hex[:12]
             job_dir = self.job_root / job_id
-            job_dir.mkdir(parents=True, exist_ok=False)
             job = JobRecord(
                 id=job_id,
                 name=name,
@@ -188,20 +190,53 @@ class LocalJobRunner:
                 scope_kind=scope_kind,
                 run_root=normalized_run_root,
             )
-            self._jobs[job_id] = job
-            self._local_job_ids.add(job_id)
-            self._persist_job(job)
+            thread = threading.Thread(
+                target=self._run_job,
+                args=(job_id, dict(env or {})),
+                name=f"posetestbot-job-{job_id}",
+                daemon=True,
+            )
+            job_dir.mkdir(parents=True, exist_ok=False)
+            try:
+                self._jobs[job_id] = job
+                self._local_job_ids.add(job_id)
+                self._persist_job(job)
+                if before_start is not None:
+                    before_start(job_id)
+                snapshot = JobRecord(**job.to_dict())
+                self._threads[job_id] = thread
+                thread.start()
+            except BaseException:
+                self._jobs.pop(job_id, None)
+                self._local_job_ids.discard(job_id)
+                self._threads.pop(job_id, None)
+                try:
+                    shutil.rmtree(job_dir)
+                finally:
+                    try:
+                        with self._index_connection() as connection:
+                            connection.execute(
+                                "DELETE FROM jobs WHERE id = ?", (job_id,)
+                            )
+                    except sqlite3.DatabaseError:
+                        self._rebuild_index()
+                raise
+            return snapshot
 
-        thread = threading.Thread(
-            target=self._run_job,
-            args=(job_id, dict(env or {})),
-            name=f"posetestbot-job-{job_id}",
-            daemon=True,
-        )
+    def active_jobs(self, *, include_services: bool = True) -> list[JobRecord]:
+        """Snapshot active work without consulting terminal history on disk."""
+
         with self._lock:
-            self._threads[job_id] = thread
-        thread.start()
-        return self.get(job_id)
+            return sorted(
+                (
+                    JobRecord(**job.to_dict())
+                    for job in self._jobs.values()
+                    if job.status not in TERMINAL_STATUSES
+                    and (include_services or job.visibility != SERVICE_VISIBILITY)
+                ),
+                key=lambda job: (job.created_at, job.id),
+                reverse=True,
+            )
 
     def resource_holders(self, *, include_services: bool = False) -> dict[str, str]:
         with self._lock:
@@ -451,7 +486,9 @@ class LocalJobRunner:
 
     def _run_job(self, job_id: str, env: dict[str, str]) -> None:
         with self._lock:
-            job = self._jobs[job_id]
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
             if job.status in {CANCELED, CANCELING}:
                 if job.status == CANCELING:
                     job.status = CANCELED
@@ -539,86 +576,114 @@ class LocalJobRunner:
                     self._threads.pop(job_id, None)
                 return
 
-            with self._lock:
-                self._processes[job_id] = process
-                current = self._jobs[job_id]
-                current.supervisor_pid = process.pid
-                current.supervisor_process_group_id = (
-                    os.getpgid(process.pid) if os.name != "nt" else process.pid
-                )
-                current.supervisor_start_time = self._read_process_start_time(
-                    process.pid
-                )
-                self._persist_job(current)
-                should_terminate = self._jobs[job_id].status in {
-                    CANCELED,
-                    CANCELING,
-                }
+            try:
+                with self._lock:
+                    self._processes[job_id] = process
+                    current = self._jobs[job_id]
+                    current.supervisor_pid = process.pid
+                    current.supervisor_process_group_id = (
+                        os.getpgid(process.pid) if os.name != "nt" else process.pid
+                    )
+                    current.supervisor_start_time = self._read_process_start_time(
+                        process.pid
+                    )
+                    self._persist_job(current)
+                    should_terminate = self._jobs[job_id].status in {
+                        CANCELED,
+                        CANCELING,
+                    }
 
-            if should_terminate:
-                self._terminate_process_group(process)
+                if should_terminate:
+                    self._terminate_process_group(process)
 
-            self._refresh_supervisor_identity(job_id, wait_s=2.0)
+                self._refresh_supervisor_identity(job_id, wait_s=2.0)
 
-            assert process.stdout is not None
-            pending_tail = ""
-            pending_tail_truncated = False
-            last_tail_persisted_at = time.monotonic()
-            while True:
-                fragment = process.stdout.readline(OUTPUT_READ_CHARS)
-                if not fragment:
-                    break
-                write_log(fragment)
-                room = self.max_tail_line_chars - len(pending_tail)
-                if room > 0:
-                    pending_tail += fragment[:room]
-                if len(fragment) > room:
-                    pending_tail_truncated = True
-                if fragment.endswith("\n"):
+                assert process.stdout is not None
+                pending_tail = ""
+                pending_tail_truncated = False
+                last_tail_persisted_at = time.monotonic()
+                while True:
+                    fragment = process.stdout.readline(OUTPUT_READ_CHARS)
+                    if not fragment:
+                        break
+                    write_log(fragment)
+                    room = self.max_tail_line_chars - len(pending_tail)
+                    if room > 0:
+                        pending_tail += fragment[:room]
+                    if len(fragment) > room:
+                        pending_tail_truncated = True
+                    if fragment.endswith("\n"):
+                        line = pending_tail.rstrip("\r\n")
+                        if pending_tail_truncated:
+                            line += "… [line truncated]"
+                        with self._lock:
+                            current = self._jobs[job_id]
+                            self._append_tail(current, line)
+                            now = time.monotonic()
+                            if (
+                                now - last_tail_persisted_at
+                                >= TAIL_PERSIST_INTERVAL_SECONDS
+                            ):
+                                self._persist_job(current)
+                                last_tail_persisted_at = now
+                        pending_tail = ""
+                        pending_tail_truncated = False
+
+                if pending_tail or pending_tail_truncated:
                     line = pending_tail.rstrip("\r\n")
                     if pending_tail_truncated:
                         line += "… [line truncated]"
                     with self._lock:
                         current = self._jobs[job_id]
                         self._append_tail(current, line)
-                        now = time.monotonic()
-                        if (
-                            now - last_tail_persisted_at
-                            >= TAIL_PERSIST_INTERVAL_SECONDS
-                        ):
-                            self._persist_job(current)
-                            last_tail_persisted_at = now
-                    pending_tail = ""
-                    pending_tail_truncated = False
 
-            if pending_tail or pending_tail_truncated:
-                line = pending_tail.rstrip("\r\n")
-                if pending_tail_truncated:
-                    line += "… [line truncated]"
+                returncode = process.wait()
+                self._cleanup_recorded_workload(job_id, timeout_s=1.0)
                 with self._lock:
-                    current = self._jobs[job_id]
-                    self._append_tail(current, line)
-
-            returncode = process.wait()
-            self._cleanup_recorded_workload(job_id, timeout_s=1.0)
-            with self._lock:
-                job = self._jobs[job_id]
-                job.returncode = returncode
-                job.ended_at = utc_now_iso()
-                if job.status in {CANCELED, CANCELING}:
-                    job.status = CANCELED
-                    job.message = "Canceled."
-                elif returncode == 0:
-                    job.status = SUCCEEDED
-                    job.message = "Command completed successfully."
-                else:
-                    job.status = FAILED
-                    job.message = f"Command exited with status {returncode}."
-                self._append_tail(job, job.message)
-                self._persist_job(job)
-                self._processes.pop(job_id, None)
-                self._threads.pop(job_id, None)
-                self._jobs.pop(job_id, None)
+                    job = self._jobs[job_id]
+                    job.returncode = returncode
+                    job.ended_at = utc_now_iso()
+                    if job.status in {CANCELED, CANCELING}:
+                        job.status = CANCELED
+                        job.message = "Canceled."
+                    elif returncode == 0:
+                        job.status = SUCCEEDED
+                        job.message = "Command completed successfully."
+                    else:
+                        job.status = FAILED
+                        job.message = f"Command exited with status {returncode}."
+                    self._append_tail(job, job.message)
+                    self._persist_job(job)
+                    self._processes.pop(job_id, None)
+                    self._threads.pop(job_id, None)
+                    self._jobs.pop(job_id, None)
+            except BaseException as exc:
+                # This thread is the only thing that ends a job. If it dies on
+                # an I/O error (a full disk while persisting the tail, say),
+                # the job would stay running and hold its resources until the
+                # service restarts, so stop the workload and fail it instead.
+                self._terminate_process_group(process)
+                with self._lock:
+                    failed = self._jobs.pop(job_id, None)
+                    self._processes.pop(job_id, None)
+                    self._threads.pop(job_id, None)
+                    if failed is not None:
+                        failed.ended_at = utc_now_iso()
+                        if failed.status in {CANCELED, CANCELING}:
+                            failed.status = CANCELED
+                            failed.message = "Canceled."
+                        else:
+                            failed.status = FAILED
+                            failed.message = (
+                                f"Job monitoring failed: {type(exc).__name__}: {exc}"
+                            )
+                        self._append_tail(failed, failed.message)
+                        try:
+                            self._persist_job(failed)
+                        except (OSError, sqlite3.DatabaseError):
+                            pass
+                if not isinstance(exc, Exception):
+                    raise
 
     def _append_tail(self, job: JobRecord, line: str) -> None:
         job.tail.append(self._bounded_tail_line(line))
@@ -751,7 +816,9 @@ class LocalJobRunner:
 
     def _refresh_supervisor_identity(self, job_id: str, *, wait_s: float = 0.0) -> None:
         with self._lock:
-            job = self._jobs[job_id]
+            job = self._jobs.get(job_id)
+            if job is None or job.status in TERMINAL_STATUSES:
+                return
             path = Path(job.log_path).parent / "supervisor.json"
         deadline = time.monotonic() + max(wait_s, 0.0)
         while True:
@@ -761,7 +828,9 @@ class LocalJobRunner:
                 workload_pid = value.get("workload_pid")
                 if isinstance(workload_pid, int):
                     with self._lock:
-                        job = self._jobs[job_id]
+                        job = self._jobs.get(job_id)
+                        if job is None or job.status in TERMINAL_STATUSES:
+                            return
                         job.process_pid = workload_pid
                         job.process_group_id = value.get("workload_process_group_id")
                         job.process_start_time = value.get("workload_start_time")
@@ -838,10 +907,10 @@ class LocalJobRunner:
         if scope_kind not in JOB_SCOPE_KINDS:
             raise ValueError("Persisted job has no current scope_kind")
         if scope_kind == RUN_SCOPE:
+            # The stored location identifies the original submission after a move.
             run_root = job_data.get("run_root")
-            if not isinstance(run_root, str) or not run_root.strip():
-                raise ValueError("Run-scoped persisted job has no run_root")
-            job_data["run_root"] = Path(run_root).resolve().as_posix()
+            if not isinstance(run_root, str) or not Path(run_root).is_absolute():
+                raise ValueError("Run-scoped persisted job has no absolute run_root")
         elif job_data.get("run_root") is not None:
             raise ValueError("Non-run persisted job contains run_root")
         return JobRecord(**job_data)

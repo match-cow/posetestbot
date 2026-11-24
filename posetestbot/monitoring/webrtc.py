@@ -31,6 +31,7 @@ from av import VideoFrame
 
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.manifest import utc_now_iso
+from posetestbot.web.paths import APP_ROOT
 from posetestbot.sensors.v4l2_preview import (
     V4L2IntegerControl,
     open_v4l2_capture,
@@ -41,7 +42,7 @@ from posetestbot.sensors.v4l2_preview import (
 
 MONITOR_STATUS_NAME = "monitor_webrtc_status.json"
 MONITOR_STATUS_SCHEMA = "monitor_webrtc.v2"
-DEFAULT_MONITOR_ROOT = Path("working_data") / "monitor_webrtc"
+DEFAULT_MONITOR_ROOT = APP_ROOT / "working_data" / "monitor_webrtc"
 UGREEN_USB_VENDOR_ID = "0c45"
 UGREEN_USB_PRODUCT_ID = "2283"
 VIDEO_CLOCK_RATE = 90_000
@@ -564,6 +565,9 @@ class OpenCVVideoTrack(VideoStreamTrack):
         self._on_error = on_error
         self._recv_idle = asyncio.Event()
         self._recv_idle.set()
+        self._capture_lock = threading.Lock()
+        self._reading = False
+        self._released = False
         self._brightness = (
             BrightnessAutoCalibrator(
                 brightness_control,
@@ -589,6 +593,23 @@ class OpenCVVideoTrack(VideoStreamTrack):
         return self._brightness.request()
 
     def _read_frame(self) -> Any:
+        with self._capture_lock:
+            if self.readyState != "live":
+                raise MediaStreamError
+            self._reading = True
+        try:
+            return self._read_live_frame()
+        finally:
+            with self._capture_lock:
+                self._reading = False
+                self._release_if_stopped()
+
+    def _release_if_stopped(self) -> None:
+        if not self._reading and not self._released and self.readyState != "live":
+            self._released = True
+            self.capture.release()
+
+    def _read_live_frame(self) -> Any:
         failure_limit = max(10, self.fps * 5)
         while True:
             if self.readyState != "live":
@@ -607,34 +628,33 @@ class OpenCVVideoTrack(VideoStreamTrack):
             time.sleep(min(0.2, 1.0 / self.fps))
 
     async def recv(self) -> VideoFrame:
-        if self.readyState != "live":
+        if self.readyState != "live" or not self._recv_idle.is_set():
             raise MediaStreamError
         self._recv_idle.clear()
-        try:
-            try:
-                frame = await asyncio.to_thread(self._read_frame)
-                if self.readyState != "live":
-                    raise MediaStreamError
-                video_frame = bgr_frame_to_av(
-                    frame,
-                    frame_index=self.frame_count,
-                    fps=self.fps,
-                )
-                self.frame_count += 1
-                if self._on_frame is not None:
-                    self._on_frame(self.frame_count)
-                return video_frame
-            except asyncio.CancelledError:
-                raise
-            except MediaStreamError:
-                raise
-            except Exception as exc:
-                if self._on_error is not None:
-                    self._on_error(f"{type(exc).__name__}: {exc}")
-                self.stop()
-                raise MediaStreamError from exc
-        finally:
+        read = asyncio.create_task(asyncio.to_thread(self._read_frame))
+
+        def read_done(task: asyncio.Task) -> None:
             self._recv_idle.set()
+            if not task.cancelled():
+                task.exception()
+
+        read.add_done_callback(read_done)
+        try:
+            frame = await asyncio.shield(read)
+            if self.readyState != "live":
+                raise MediaStreamError
+            video_frame = bgr_frame_to_av(frame, frame_index=self.frame_count, fps=self.fps)
+            self.frame_count += 1
+            if self._on_frame is not None:
+                self._on_frame(self.frame_count)
+            return video_frame
+        except MediaStreamError:
+            raise
+        except Exception as exc:
+            if self._on_error is not None:
+                self._on_error(f"{type(exc).__name__}: {exc}")
+            self.stop()
+            raise MediaStreamError from exc
 
     def stop(self) -> None:
         if self.readyState == "live":
@@ -643,7 +663,8 @@ class OpenCVVideoTrack(VideoStreamTrack):
                     "Camera closed before brightness calibration completed."
                 )
             super().stop()
-            self.capture.release()
+            with self._capture_lock:
+                self._release_if_stopped()
 
     async def wait_stopped(self) -> None:
         await self._recv_idle.wait()

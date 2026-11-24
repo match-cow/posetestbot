@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -33,9 +34,7 @@ from posetestbot.sensors.contracts import MountingMode, SensorType
 
 
 SCHEMA_VERSION = "run_config.v4"
-SUPPORTED_SCHEMA_VERSIONS = {SCHEMA_VERSION}
 CAPTURE_SYNCHRONIZATION_SCHEMA_VERSION = "capture_synchronization.v1"
-CAPTURE_SYNCHRONIZATION_MODES = {"timestamp_aligned"}
 CAPTURE_INTENTS = {"calibration", "dataset"}
 BOP_ANNOTATION_MODES = {"none", "pose", "pose_and_masks"}
 DATASET_MODES = {"objectless", "pose_template"}
@@ -1268,13 +1267,35 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
     return value
 
 
-def load_run_config_for_run_root(run_root: str | Path) -> dict[str, Any]:
+def run_config_sha256(config: Mapping[str, Any]) -> str:
+    """Hash the configuration independently of JSON whitespace and key order."""
+
+    serialized = json.dumps(
+        config, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def load_run_config_for_run_root(
+    run_root: str | Path, *, approved_sha256: str | None = None
+) -> dict[str, Any]:
     run_root_path = Path(run_root)
-    config = load_run_config(run_root_path / RUN_CONFIG)
+    from posetestbot.calibration.promotion_transaction import JOURNAL, recover_promotion_transaction
+
+    if os.path.lexists(run_root_path / JOURNAL):
+        with run_config_lock(run_root_path) as root:
+            recover_promotion_transaction(root)
+            config = load_run_config(root / RUN_CONFIG)
+    else:
+        config = load_run_config(run_root_path / RUN_CONFIG)
     config_run_root = Path(str(config["run_root"])).resolve()
     if config_run_root != run_root_path.resolve():
         raise ValueError(
             "Run config run_root does not match requested run_root: "
             f"{config['run_root']} != {run_root_path.as_posix()}"
+        )
+    if approved_sha256 is not None and run_config_sha256(config) != approved_sha256:
+        raise ValueError(
+            "Run configuration changed since capture approval. Run preflight again."
         )
     return config

@@ -19,6 +19,8 @@ from posetestbot.web.routes import workpieces as routes
 
 @dataclass
 class FakeJob:
+    status = "queued"
+
     id: str
 
     def to_dict(self) -> dict:
@@ -267,10 +269,10 @@ def test_workpiece_upload_queues_validated_metadata_and_catalog_resource(
     assert len(runner.submissions) == 1
 
 
-def test_workpiece_patch_archive_restore_and_direct_confirmed_delete(
+def test_workpiece_patch_archive_restore_and_queued_confirmed_delete(
     workpiece_client,
 ) -> None:
-    client, _runner, working, record = workpiece_client
+    client, runner, working, record = workpiece_client
     endpoint = f"/workpieces/catalog/{record['catalog_uuid']}"
 
     updated = client.patch(
@@ -304,8 +306,12 @@ def test_workpiece_patch_archive_restore_and_direct_confirmed_delete(
     assert "confirm must be true" in unconfirmed.get_json()["output"]
     assert client.get(endpoint).get_json()["state"] == "active"
     deleted = client.delete(endpoint, json={"confirm": True})
-    assert deleted.status_code == 200
-    assert deleted.get_json()["status"] == "deleted"
+    assert deleted.status_code == 202, deleted.get_json()
+    assert deleted.get_json()["status"] == "queued"
+    submission = runner.submissions[-1]
+    assert submission["scope_kind"] == "library"
+    assert {"cpu", "disk_io"} <= set(submission["resources"])
+    catalog_module.delete_catalog_object(record["catalog_uuid"])
     catalog = load_catalog(working / "object_catalog")
     assert catalog["objects"] == []
     assert catalog["tombstones"][0]["catalog_uuid"] == record["catalog_uuid"]
@@ -348,7 +354,7 @@ def test_workpiece_json_export_and_metadata_import_round_trip(workpiece_client) 
     assert "must be a JSON file" in wrong_extension.get_json()["output"]
 
 
-def test_workpiece_delete_reports_pose_template_references_as_conflict(
+def test_workpiece_delete_worker_reports_pose_template_references(
     workpiece_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, _runner, working, record = workpiece_client
@@ -369,9 +375,11 @@ def test_workpiece_delete_reports_pose_template_references_as_conflict(
 
     response = client.delete(endpoint, json={"confirm": True})
 
-    assert response.status_code == 409
-    assert "pose-template bundles" in response.get_json()["output"]
-    assert response.get_json()["blockers"] == blockers
+    assert response.status_code == 202
+    from scripts import run_workpiece_delete
+    monkeypatch.setattr("sys.argv", ["run_workpiece_delete.py", record["catalog_uuid"], "--confirm-delete"])
+    with pytest.raises(SystemExit, match="pose-template bundles"):
+        run_workpiece_delete.main()
     catalog = load_catalog(working / "object_catalog")
     assert catalog["objects"][0]["catalog_uuid"] == record["catalog_uuid"]
     assert catalog["objects"][0]["state"] == "active"

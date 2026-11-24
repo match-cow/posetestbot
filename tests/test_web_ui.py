@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from importlib.resources import files
@@ -11,7 +12,7 @@ import pytest
 from posetestbot.pipeline.run_config import create_run_config, write_run_config
 from posetestbot.web.app import create_app
 from posetestbot.web.routes import ui as web_ui
-from posetestbot.web.security import DEFAULT_RUN_ROOTS
+from posetestbot.web import security
 
 
 def _write_valid_run(
@@ -110,8 +111,8 @@ def test_ui_bootstrap_and_run_query_reject_outside_paths(
 
     assert bootstrap["schema_version"] == "web_bootstrap.v1"
     assert bootstrap["default_run_root"] == (allowed / "console-default").as_posix()
-    assert bootstrap["allowed_run_roots"][: len(DEFAULT_RUN_ROOTS)] == [
-        root.resolve().as_posix() for root in DEFAULT_RUN_ROOTS
+    assert bootstrap["allowed_run_roots"][: len(security.DEFAULT_RUN_ROOTS)] == [
+        root.resolve().as_posix() for root in security.DEFAULT_RUN_ROOTS
     ]
     assert allowed.as_posix() in bootstrap["allowed_run_roots"]
     assert outside.status_code == 400
@@ -171,23 +172,16 @@ def test_cell_pose_template_assets_reject_unknown_kinds(
     texture = snapshot / "texture.png"
     mesh.write_bytes(b"ply\nmesh")
     texture.write_bytes(b"\x89PNG\r\n\x1a\ntexture")
-    selection = {
-        "bundle_snapshot": "processed/pose_template_selection",
-        "instances": [
-            {
-                "instance_uuid": "instance-1",
-                "assets": {
-                    "canonical_ply": {"path": mesh.name},
-                    "texture": {"path": texture.name},
-                },
-            }
-        ],
-    }
+    def open_asset(root, instance, kind):
+        assert (root, instance) == (run_root, "instance-1")
+        path = {"canonical_ply": mesh, "texture": texture}[kind]
+        return path.open("rb"), hashlib.sha256(path.read_bytes()).hexdigest()
+
     monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", tmp_path.as_posix())
     monkeypatch.setattr(
         web_ui,
-        "load_pose_template_selection",
-        lambda _run_root: selection,
+        "open_pose_template_preview_asset",
+        open_asset,
     )
     client = create_app().test_client()
     query = {"run_root": run_root.as_posix()}

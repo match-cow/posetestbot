@@ -12,6 +12,8 @@ import csv
 import hashlib
 import io
 import json
+import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -200,7 +202,7 @@ def _load_source(
                 3, 3
             )
             pose[:3, 3] = [float(v) for v in row["t"].split()]
-            estimates[key] = rc._rigid(pose)
+            estimates[key] = rc._estimated_pose(pose)
     config = (
         _read(root, "run_config.json", hashes)
         if (root / "run_config.json").exists()
@@ -828,70 +830,75 @@ def create_comparison(
     }
     report["examples"] = _examples(conditions, internals, reference_frame)
     report["overview"] = interpretation(conditions)
-    # Validate every exact input again before publishing any report artifacts.
-    for data in internals:
-        for relative, expected in data["hashes"].items():
-            path = rc._path(data["root"], relative)
-            if (
-                not ev._plain_file(path, root=data["root"])
-                or ev._sha256_file(path) != expected
-            ):
-                raise ValueError(
-                    "Comparison input changed during analysis: " + relative
-                )
-        dataset = ev.inspect_dataset(data["root"], include_depth_content=True)
-        if any(
-            dataset[key] != data["dataset"][key]
-            for key in ("dataset_sha256", "dataset_content_sha256")
-        ):
-            raise ValueError("Comparison dataset changed during analysis")
     comparison_id = "comparison-" + uuid4().hex[:12]
     report["comparison_id"] = comparison_id
-    folder = rc._path(
+    destination = rc._path(
         output_run, "processed/bop_evaluation/comparisons/" + comparison_id
     )
+    folder = destination.with_name(f".{destination.name}.work")
     folder.mkdir(parents=True, exist_ok=False)
-    request = {
-        "schema_version": "bop_consistency_gt_comparison_request.v1",
-        "comparison_id": comparison_id,
-        "implementation_revision": REVISION,
-        "title": title,
-        "reference_frame": reference_frame,
-        "sources": [
-            {
-                "label": label,
-                "run_root": str(root),
-                "evaluation_id": identifier,
-                "source_sha256": internal["hashes"],
-            }
-            for (label, root, identifier), internal in zip(
-                normalized, internals, strict=True
-            )
-        ],
-    }
-    atomic_write_json(folder / "request.json", request)
-    (folder / "request.json").chmod(0o444)
-    atomic_write_json(folder / "comparison.json", report)
-    rows = [r for condition in conditions for r in condition["rows"]]
-    with (folder / "frames.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["condition_label", *rows[0]])
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(
-                {"condition_label": conditions[row["condition"]]["label"], **row}
-            )
-    from posetestbot.bop.consistency_comparison_html import render_html
-
-    (folder / "index.html").write_text(render_html(report), encoding="utf-8")
-    scientific_plots(report, folder)
-    artifacts = {p.name: ev._sha256_file(p) for p in folder.iterdir() if p.is_file()}
-    atomic_write_json(
-        folder / "manifest.json",
-        {
-            "schema_version": "bop_consistency_gt_comparison_manifest.v1",
+    try:
+        request = {
+            "schema_version": "bop_consistency_gt_comparison_request.v1",
             "comparison_id": comparison_id,
-            "status": "succeeded",
-            "artifacts_sha256": artifacts,
-        },
-    )
-    return folder / "index.html"
+            "implementation_revision": REVISION,
+            "title": title,
+            "reference_frame": reference_frame,
+            "sources": [
+                {
+                    "label": label,
+                    "run_root": str(root),
+                    "evaluation_id": identifier,
+                    "source_sha256": internal["hashes"],
+                }
+                for (label, root, identifier), internal in zip(
+                    normalized, internals, strict=True
+                )
+            ],
+        }
+        atomic_write_json(folder / "request.json", request)
+        (folder / "request.json").chmod(0o444)
+        atomic_write_json(folder / "comparison.json", report)
+        rows = [r for condition in conditions for r in condition["rows"]]
+        with (folder / "frames.csv").open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["condition_label", *rows[0]])
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(
+                    {"condition_label": conditions[row["condition"]]["label"], **row}
+                )
+        from posetestbot.bop.consistency_comparison_html import render_html
+
+        (folder / "index.html").write_text(render_html(report), encoding="utf-8")
+        scientific_plots(report, folder)
+        artifacts = {p.name: ev._sha256_file(p) for p in folder.iterdir() if p.is_file()}
+        atomic_write_json(
+            folder / "manifest.json",
+            {
+                "schema_version": "bop_consistency_gt_comparison_manifest.v1",
+                "comparison_id": comparison_id,
+                "status": "succeeded",
+                "artifacts_sha256": artifacts,
+            },
+        )
+        # Validate every exact input again before publishing any report artifacts.
+        for data in internals:
+            for relative, expected in data["hashes"].items():
+                path = rc._path(data["root"], relative)
+                if (
+                    not ev._plain_file(path, root=data["root"])
+                    or ev._sha256_file(path) != expected
+                ):
+                    raise ValueError(
+                        "Comparison input changed during analysis: " + relative
+                    )
+            dataset = ev.inspect_dataset(data["root"], include_depth_content=True)
+            if any(
+                dataset[key] != data["dataset"][key]
+                for key in ("dataset_sha256", "dataset_content_sha256")
+            ):
+                raise ValueError("Comparison dataset changed during analysis")
+        os.replace(folder, destination)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    return destination / "index.html"

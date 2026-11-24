@@ -164,14 +164,13 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Ignore all images in output and input folders
+# Local run data and output
 working_data/
 output
 .vscode/
 
-# ignore nohup output and logs
+# Local nohup output
 nohup.out
-*.log
 
 # ruff
 .ruff_cache

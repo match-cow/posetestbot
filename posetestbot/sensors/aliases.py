@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 from pathlib import Path
 from typing import Any, Mapping
@@ -85,10 +86,26 @@ def load_sensor_aliases(
 def save_sensor_aliases(
     aliases: Mapping[str, Any],
     path: str | Path = DEFAULT_SENSOR_ALIASES_PATH,
+    *,
+    merge: bool = False,
 ) -> Path:
     alias_path = Path(path)
-    normalized = normalize_sensor_aliases(aliases)
-    return atomic_write_json(alias_path, normalized)
+    alias_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = alias_path.with_name(f".{alias_path.name}.lock")
+    descriptor = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if merge:
+            current = load_sensor_aliases(alias_path, tolerate_errors=False)
+            for raw_key, fields in aliases.items():
+                if not isinstance(fields, Mapping) or set(fields) - {"alias", "mounting_mode", "inverted"}:
+                    raise ValueError("Unsupported device default fields")
+                key = next(iter(normalize_sensor_aliases({raw_key: fields})))
+                current[key] = {**current.get(key, {}), **fields}
+            aliases = current
+        return atomic_write_json(alias_path, normalize_sensor_aliases(aliases))
+    finally:
+        os.close(descriptor)
 
 
 def sensor_alias_file_state(path: str | Path = DEFAULT_SENSOR_ALIASES_PATH) -> dict[str, Any]:

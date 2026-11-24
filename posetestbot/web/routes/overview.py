@@ -8,6 +8,8 @@ from typing import Any, Mapping
 
 from flask import Blueprint, jsonify, request
 
+from posetestbot.web.security import resolve_web_run_root
+
 from posetestbot.io.artifacts import (
     BLENDERPROC_RENDER_PLAN,
     BOP_DIR,
@@ -284,7 +286,10 @@ def ui_overview():
     run_root = request.args.get("run_root")
     if not run_root:
         return jsonify({"output": "Missing run_root"}), 400
-    root = Path(run_root)
+    try:
+        root = resolve_web_run_root(run_root)
+    except ValueError as exc:
+        return jsonify({"output": str(exc)}), 400
     config = None
     config_error = None
     if root.exists():

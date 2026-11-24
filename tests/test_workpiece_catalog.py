@@ -26,7 +26,7 @@ from posetestbot.pose_templates.catalog import (
     set_catalog_object_state,
     update_catalog_object_metadata,
 )
-from posetestbot.pose_templates.library import generate_template_bundle
+from posetestbot.pose_templates.library import delete_template_bundle, generate_template_bundle
 from posetestbot.pose_templates.orientations import analyze_catalog_orientations
 
 
@@ -393,6 +393,12 @@ def test_direct_delete_fails_closed_when_a_template_bundle_cannot_be_validated(
     assert (root / "objects" / record["catalog_uuid"]).is_dir()
     assert load_catalog(root)["objects"][0]["catalog_uuid"] == record["catalog_uuid"]
 
+    deleted = delete_template_bundle(bundle_uuid, library_root=library)
+    assert deleted["status"] == "deleted"
+    assert not bundle_folder.exists()
+    delete_catalog_object(record["catalog_uuid"], catalog_root=root, template_library_root=library)
+    assert not (root / "objects" / record["catalog_uuid"]).exists()
+
 
 def test_direct_delete_fails_closed_for_unexpected_library_file(
     tmp_path: Path,
@@ -700,7 +706,7 @@ def test_metadata_import_skips_record_with_missing_retained_geometry(
     assert loaded_without_verification["objects"][0]["alias"] == "Keep local"
 
 
-def test_unit_correction_rejects_stale_intent_and_retry_survives_commit_orphan(
+def test_unit_correction_rejects_stale_intent_and_cleans_failed_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "object_catalog"
@@ -763,7 +769,7 @@ def test_unit_correction_rejects_stale_intent_and_retry_survives_commit_orphan(
                 (root / "objects" / record["catalog_uuid"] / "derived").glob("000002-*")
             )
         )
-        == 2
+        == 1
     )
     with pytest.raises(CatalogGeometryRevisionConflict):
         correct_catalog_object_units(

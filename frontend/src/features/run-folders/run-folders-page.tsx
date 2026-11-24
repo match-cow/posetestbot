@@ -36,7 +36,7 @@ import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
-import { api, errorMessage } from "@/lib/api"
+import { ApiError, api, errorMessage } from "@/lib/api"
 import type { ClusterArchive, ClusterCapabilityDomain, ClusterJob, Job, RunFolder, RunFolderInventory, RunFolderInventory as Inventory } from "@/lib/contracts"
 import { cn, formatDate, titleCase } from "@/lib/utils"
 import { activeWorkflowHref } from "@/lib/workflow-session"
@@ -123,7 +123,8 @@ function runFolderPath(root: string, name: string) {
 
 function validRunFolderName(name: string) {
   const value = name.trim()
-  return Boolean(value) && value !== "." && value !== ".." && !/[\\/\0]/.test(value)
+  const reserved = ["jobs", "object_catalog", "pose_templates", "calibration_targets", "calibration_library", "sensor_previews", "sensor_snapshots", "monitor_webrtc"]
+  return Boolean(value) && !value.startsWith(".") && !reserved.includes(value) && !/[\\/\0]/.test(value)
 }
 
 function runDisplayName(run: RunFolder) {
@@ -218,7 +219,7 @@ function RootCapacity({ root }: { root: RunFolderInventory["roots"][number] }) {
   const usedPercent = storage.free_fraction === null
     ? null
     : Math.max(0, Math.min(100, Math.round((1 - storage.free_fraction) * 100)))
-  const detail = storage.error
+  const detail = root.unavailable_reason ?? storage.error
     ?? (usedPercent === null
       ? "Filesystem capacity is unavailable."
       : `${formatBytes(storage.free_bytes)} free of ${formatBytes(storage.total_bytes)}`)
@@ -233,7 +234,7 @@ function RootCapacity({ root }: { root: RunFolderInventory["roots"][number] }) {
             <div className="mt-1 truncate font-mono text-[11px] font-semibold" title={root.path}>{root.path}</div>
           </div>
         </div>
-        <StatusBadge status={root.exists ? storage.status : "missing"} tone={root.exists ? storageTone(storage.status) : "destructive"} />
+        <StatusBadge status={root.unavailable_reason ? "unavailable" : storage.status} tone={root.unavailable_reason ? "destructive" : storageTone(storage.status)} />
       </div>
       <div className="mt-4 flex items-end justify-between gap-3">
         <div><div className="font-display text-lg font-semibold">{formatBytes(storage.free_bytes)} free</div><div className="mt-0.5 text-[10px] text-muted-foreground">{detail}</div></div>
@@ -296,8 +297,7 @@ function archiveTone(state: string) {
 
 function ClusterStorageSection({ inventory }: { inventory: RunFolderInventory }) {
   const queryClient = useQueryClient()
-  const { selectedRun } = useOperator()
-  const [sourcePath, setSourcePath] = useState("")
+    const [sourcePath, setSourcePath] = useState("")
   const [operator, setOperator] = useState(() => localStorage.getItem("posetestbot.clusterOperator") ?? "")
   const [restoreArchive, setRestoreArchive] = useState<ClusterArchive | null>(null)
   const [deleteArchive, setDeleteArchive] = useState<ClusterArchive | null>(null)
@@ -307,9 +307,11 @@ function ClusterStorageSection({ inventory }: { inventory: RunFolderInventory })
   const [remoteOperation, setRemoteOperation] = useState<RemoteArchiveOperation | null>(null)
   const notifiedRemoteJobs = useRef(new Set<string>())
   const runs = inventory.runs
-  const effectiveSourcePath = runs.some((run) => run.path === sourcePath)
+  const effectiveSourcePath = runs.some(run => run.path === sourcePath)
     ? sourcePath
-    : runs.find((run) => isSelectedRunFolder(run, selectedRun))?.path ?? runs[0]?.path ?? ""
+    : runs.length === 1 ? runs[0].path : ""
+  const restoreRoots = inventory.roots.filter(root => root.exists && !root.unavailable_reason)
+  const missingOperator = operator.trim().length < 2
 
   const archives = useQuery({
     queryKey: ["cluster-archives"],
@@ -345,6 +347,7 @@ function ClusterStorageSection({ inventory }: { inventory: RunFolderInventory })
       localStorage.setItem("posetestbot.clusterOperator", operator.trim())
       toast.success("Archive copy queued", { description: `${archive.archive_id} continues after navigation.` })
       queryClient.invalidateQueries({ queryKey: ["cluster-archives"] })
+      void queryClient.invalidateQueries({ queryKey: ["run-folder-cluster-activity"] })
     },
     onError: (error) => toast.error("Archive request was refused", { description: errorMessage(error) }),
   })
@@ -406,38 +409,40 @@ function ClusterStorageSection({ inventory }: { inventory: RunFolderInventory })
     </CardHeader>
     <CardContent className="space-y-4">
       {archives.isError
-        ? <div className="rounded-lg border bg-muted/25 p-3 text-xs text-muted-foreground">Cluster storage is unavailable: {errorMessage(archives.error)}. Local run-folder controls remain available.</div>
+        ? <div className="rounded-lg border bg-muted/25 p-3 text-xs text-muted-foreground">{archives.error instanceof ApiError && archives.error.status === 403 ? "Cluster integration is disabled. Configure the companion from Dashboard." : errorMessage(archives.error)}</div>
         : <>
-          {integration && !integration.enabled && <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/35 bg-warning/5 p-3 text-xs text-warning-foreground"><div><div className="font-semibold">Cluster integration is disabled</div><div className="mt-1">Configure or start the fixed companion from Dashboard before archive copy, restore, or deletion.</div></div><Button asChild size="sm" variant="outline"><Link to="/dashboard">Open Dashboard</Link></Button></div>}
+
           {storage && !storageMutationEnabled && <div className="rounded-lg border border-warning/35 bg-warning/5 p-3 text-xs text-warning-foreground"><div className="font-semibold">Archive mutation is disabled</div><div className="mt-1">{storage.blockers.join(" ") || "Enable archive mutation in the controller; estimator qualification is not required."}</div></div>}
           {storage && !storage.ready && <div className="rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs text-destructive"><div className="font-semibold">Cluster storage is not ready</div><div className="mt-1">{storage.blockers.join(" ") || "The transfer connection or project quota check is unavailable."}</div></div>}
           <div className="grid gap-3 xl:grid-cols-[minmax(260px,1fr)_minmax(220px,0.65fr)_auto]">
             <div className="space-y-1.5"><Label>Local archive source</Label><Select value={effectiveSourcePath} onValueChange={setSourcePath}><SelectTrigger aria-label="Local archive source"><SelectValue placeholder="Choose a local run" /></SelectTrigger><SelectContent>{runs.map((run) => <SelectItem value={run.path} key={run.path}>{run.name} · {formatBytes(run.size_bytes)}</SelectItem>)}</SelectContent></Select></div>
-            <div className="space-y-1.5"><Label htmlFor="archive-operator">Operator</Label><Input id="archive-operator" value={operator} onChange={(event) => setOperator(event.target.value)} placeholder="Name or lab account" maxLength={120} /></div>
-            <div className="flex items-end"><Button variant="outline" disabled={!source || !mutationReady || createArchive.isPending} onClick={() => source && createArchive.mutate(source)}><CloudUpload />Archive copy</Button></div>
+            <div className="space-y-1.5"><Label htmlFor="archive-operator">Operator</Label><Input id="archive-operator" value={operator} onChange={(event) => setOperator(event.target.value)} placeholder="Name or lab account" maxLength={120} />{missingOperator && <p id="archive-operator-required" className="text-xs text-destructive">Enter your name (2+ characters).</p>}</div>
+            <div className="flex items-end"><Button variant="outline" aria-describedby={missingOperator ? "archive-operator-required" : !source ? "archive-source-required" : undefined} disabled={!source || !mutationReady || createArchive.isPending} onClick={() => source && createArchive.mutate(source)}><CloudUpload />Archive copy</Button></div>
           </div>
+          {!source && <p id="archive-source-required" className="text-xs text-muted-foreground">Choose a local run to archive.</p>}
           <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground"><span>{(archives.data?.archives.length ?? 0)} remote archives</span><span>·</span><span>{remoteOnlyCount} remote-only</span><span>·</span><span>PROJECT is durable project storage, not a backup tier</span></div>
           {remoteOperationActive && <div className="flex items-center justify-between gap-3 rounded-lg border border-warning/35 bg-warning/5 p-3 text-xs"><span className="flex items-center gap-2"><LoaderCircle className="size-4 animate-spin text-warning-foreground" />{remoteOperation?.kind === "delete" ? "Archive deletion" : "Verified restore"} is running in the controller.</span><Button asChild variant="outline" size="sm"><Link to="/jobs">Open Jobs</Link></Button></div>}
           <div className="max-h-[400px] overflow-auto rounded-lg border">
             <table className="w-full min-w-[1040px] text-left text-xs"><thead className="sticky top-0 border-b bg-muted text-[9px] font-bold uppercase tracking-wider text-muted-foreground"><tr><th className="px-3 py-2">Archive</th><th className="px-3 py-2">Source identity</th><th className="px-3 py-2">Verification</th><th className="px-3 py-2">Created</th><th className="px-3 py-2 text-right">Actions</th></tr></thead><tbody className="divide-y">{(archives.data?.archives ?? []).map((archive) => {
               const local = runs.find((run) => run.path === archive.source_run_root && run.identity.device === archive.source_identity.device && run.identity.inode === archive.source_identity.inode)
-              return <tr key={archive.archive_id}><td className="px-3 py-3"><div className="font-mono font-semibold">{archive.archive_id}</div><div className="mt-1 max-w-[360px] truncate font-mono text-[10px] text-muted-foreground" title={archive.source_run_root}>{archive.source_run_root}</div></td><td className="px-3 py-3"><div>{local ? "Exact local source present" : "Remote-only or local identity changed"}</div><div className="mt-1 font-mono text-[10px] text-muted-foreground">dev {archive.source_identity.device} · ino {archive.source_identity.inode}</div></td><td className="px-3 py-3"><StatusBadge status={archive.state} tone={archiveTone(archive.state)} />{archive.verified && <div className="mt-1 flex items-center gap-1 text-[10px] text-success"><ShieldCheck className="size-3" />Receipt and hashes verified</div>}</td><td className="px-3 py-3">{formatDate(archive.created_at)}</td><td className="px-3 py-3"><div className="flex justify-end gap-2"><Button variant="outline" size="sm" disabled={!archive.verified || !mutationReady || remoteOperationActive} onClick={() => { setRestoreArchive(archive); setDestinationRoot(inventory.roots.find((root) => root.exists)?.path ?? ""); setDestinationName(archive.source_run_root.split("/").at(-1) ?? "") }}><CloudDownload />Restore</Button><Button variant="destructive" size="sm" disabled={!archive.verified || !mutationReady || remoteOperationActive || removeArchive.isPending} onClick={() => { setDeleteArchive(archive); setDeleteArchiveConfirmed(false) }}><Trash2 />Delete</Button></div></td></tr>
+              return <tr key={archive.archive_id}><td className="px-3 py-3"><div className="font-mono font-semibold">{archive.archive_id}</div><div className="mt-1 max-w-[360px] truncate font-mono text-[10px] text-muted-foreground" title={archive.source_run_root}>{archive.source_run_root}</div></td><td className="px-3 py-3"><div>{local ? "Exact local source present" : "Remote-only or local identity changed"}</div><div className="mt-1 font-mono text-[10px] text-muted-foreground">dev {archive.source_identity.device} · ino {archive.source_identity.inode}</div></td><td className="px-3 py-3"><StatusBadge status={archive.state} tone={archiveTone(archive.state)} />{archive.verified && <div className="mt-1 flex items-center gap-1 text-[10px] text-success"><ShieldCheck className="size-3" />Receipt and hashes verified</div>}</td><td className="px-3 py-3">{formatDate(archive.created_at)}</td><td className="px-3 py-3"><div className="flex justify-end gap-2"><Button variant="outline" size="sm" aria-describedby={missingOperator ? "archive-operator-required" : undefined} disabled={!archive.verified || !mutationReady || remoteOperationActive} onClick={() => { setRestoreArchive(archive); setDestinationRoot(restoreRoots.length === 1 ? restoreRoots[0].path : ""); setDestinationName(archive.source_run_root.split("/").at(-1) ?? "") }}><CloudDownload />Restore</Button><Button variant="destructive" size="sm" aria-describedby={missingOperator ? "archive-operator-required" : undefined} disabled={(!archive.verified && archive.state !== "deleting") || !mutationReady || remoteOperationActive || removeArchive.isPending} onClick={() => { setDeleteArchive(archive); setDeleteArchiveConfirmed(false) }}><Trash2 />{archive.state === "deleting" ? "Retry deletion" : "Delete"}</Button></div>{archive.state === "deleting" && <p className="mt-2 max-w-[300px] text-warning-foreground">Deletion has begun; restore is unavailable. Check Jobs, then retry if cleanup failed.</p>}</td></tr>
             })}{!archives.isPending && !(archives.data?.archives.length) && <tr><td className="px-3 py-6 text-center text-muted-foreground" colSpan={5}>No remote archives yet.</td></tr>}</tbody></table>
           </div>
           <p className="text-[10px] text-muted-foreground">Archive, restore, and deletion jobs continue after navigation. Monitor their controller-owned status from Jobs.</p>
         </>}
     </CardContent>
 
-    <Dialog open={Boolean(restoreArchive)} onOpenChange={(open) => !open && !restore.isPending && setRestoreArchive(null)}><DialogContent data-testid="cluster-archive-restore-dialog"><DialogHeader><DialogTitle>Restore verified archive</DialogTitle><DialogDescription>The controller downloads into temporary storage, verifies the archive and every regular file, then atomically publishes the run below an approved root.</DialogDescription></DialogHeader><div className="space-y-3"><div className="space-y-1.5"><Label htmlFor="restore-destination-root">Destination root</Label><Select value={destinationRoot} onValueChange={setDestinationRoot}><SelectTrigger id="restore-destination-root" aria-label="Destination root"><SelectValue /></SelectTrigger><SelectContent>{inventory.roots.filter((root) => root.exists).map((root) => <SelectItem value={root.path} key={root.path}>{root.path} · {formatBytes(root.storage.free_bytes)} free</SelectItem>)}</SelectContent></Select></div><div className="space-y-1.5"><Label htmlFor="restore-name">Run folder name</Label><Input id="restore-name" aria-invalid={!restoreNameValid || restoreCollision} aria-describedby={!restoreNameValid || restoreCollision ? "restore-name-error" : undefined} value={destinationName} onChange={(event) => setDestinationName(event.target.value)} />{(!restoreNameValid || restoreCollision) && <p id="restore-name-error" role="alert" className="text-xs text-destructive">{restoreCollision ? "This destination run folder already exists. Choose another name or use the local run." : "Use one folder name only; paths, “.”, and “..” are not allowed."}</p>}</div></div><DialogFooter><Button variant="outline" onClick={() => setRestoreArchive(null)} disabled={restore.isPending}>Cancel</Button><Button onClick={() => restoreArchive && restore.mutate(restoreArchive)} disabled={!restoreArchive || !destinationRoot || !restoreNameValid || restoreCollision || !mutationReady || restore.isPending}>{restore.isPending ? <LoaderCircle className="animate-spin" /> : <CloudDownload />}Queue verified restore</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={Boolean(restoreArchive)} onOpenChange={(open) => !open && !restore.isPending && setRestoreArchive(null)}><DialogContent data-testid="cluster-archive-restore-dialog"><DialogHeader><DialogTitle>Restore verified archive</DialogTitle><DialogDescription>The controller downloads into temporary storage, verifies the archive and every regular file, then atomically publishes the run below an approved root.</DialogDescription></DialogHeader><div className="space-y-3"><div className="space-y-1.5"><Label htmlFor="restore-destination-root">Destination root</Label><Select value={destinationRoot} onValueChange={setDestinationRoot}><SelectTrigger id="restore-destination-root" aria-label="Destination root"><SelectValue placeholder="Choose a storage root" /></SelectTrigger><SelectContent>{restoreRoots.map((root) => <SelectItem value={root.path} key={root.path}>{root.path} · {formatBytes(root.storage.free_bytes)} free</SelectItem>)}</SelectContent></Select>{!destinationRoot && <p id="restore-root-required" className="text-xs text-destructive">Choose a destination root.</p>}</div><div className="space-y-1.5"><Label htmlFor="restore-name">Run folder name</Label><Input id="restore-name" aria-invalid={!restoreNameValid || restoreCollision} aria-describedby={!restoreNameValid || restoreCollision ? "restore-name-error" : undefined} value={destinationName} onChange={(event) => setDestinationName(event.target.value)} />{(!restoreNameValid || restoreCollision) && <p id="restore-name-error" role="alert" className="text-xs text-destructive">{restoreCollision ? "This destination run folder already exists. Choose another name or use the local run." : "Use one folder name only; paths, “.”, and “..” are not allowed."}</p>}</div></div><DialogFooter><Button variant="outline" onClick={() => setRestoreArchive(null)} disabled={restore.isPending}>Cancel</Button><Button onClick={() => restoreArchive && restore.mutate(restoreArchive)} aria-describedby={!destinationRoot ? "restore-root-required" : undefined} disabled={!restoreArchive || !destinationRoot || !restoreNameValid || restoreCollision || !mutationReady || restore.isPending}>{restore.isPending ? <LoaderCircle className="animate-spin" /> : <CloudDownload />}Queue verified restore</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={Boolean(deleteArchive)} onOpenChange={(open) => { if (!open && !removeArchive.isPending) { setDeleteArchive(null); setDeleteArchiveConfirmed(false) } }}>
       <DialogContent data-testid="cluster-archive-delete-dialog">
         <DialogHeader>
-          <DialogTitle>Permanently delete cluster archive?</DialogTitle>
-          <DialogDescription>This removes the selected archived run from cluster PROJECT storage. It does not delete the local acquisition folder. The archive can no longer be restored after the queued controller job succeeds.</DialogDescription>
+          <DialogTitle>{deleteArchive?.state === "deleting" ? "Retry permanent cluster archive deletion?" : "Permanently delete cluster archive?"}</DialogTitle>
+          <DialogDescription>This removes the selected archived run from cluster PROJECT storage. It does not delete the local acquisition folder. Once remote removal begins, restore and cancellation are unavailable.</DialogDescription>
         </DialogHeader>
         {deleteArchive && <div className="space-y-3">
           <div className="flex items-start gap-3 rounded-lg border border-destructive/45 bg-destructive/10 p-4"><AlertTriangle aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-destructive" /><div className="min-w-0"><div className="font-semibold text-destructive">Permanent remote-data deletion</div><div className="mt-2 break-all font-mono text-[10px] font-semibold">{deleteArchive.archive_id}</div><div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">Source: {deleteArchive.source_run_root}</div></div></div>
-          <Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox data-testid="cluster-archive-delete-confirmation" checked={deleteArchiveConfirmed} onCheckedChange={(checked) => setDeleteArchiveConfirmed(checked === true)} /><span>I confirm that this verified cluster archive should be permanently deleted and will no longer be available for restore.</span></Label>
+          {deleteArchive.state === "deleting" && <p className="text-xs text-warning-foreground">The previously confirmed deletion may have removed some remote files. This queues the remaining cleanup; restore is unavailable.</p>}
+          <Label className="flex items-start gap-3 rounded-lg border p-3"><Checkbox data-testid="cluster-archive-delete-confirmation" checked={deleteArchiveConfirmed} onCheckedChange={(checked) => setDeleteArchiveConfirmed(checked === true)} /><span>I confirm that this previously verified cluster archive should be permanently deleted and will no longer be available for restore.</span></Label>
         </div>}
         <DialogFooter><Button variant="outline" onClick={() => { setDeleteArchive(null); setDeleteArchiveConfirmed(false) }} disabled={removeArchive.isPending}>Cancel</Button><Button variant="destructive" onClick={() => deleteArchive && removeArchive.mutate(deleteArchive)} disabled={!deleteArchive || !deleteArchiveConfirmed || !mutationReady || removeArchive.isPending}>{removeArchive.isPending ? <LoaderCircle className="animate-spin" /> : <Trash2 />}Queue archive deletion</Button></DialogFooter>
       </DialogContent>
@@ -470,11 +475,12 @@ export function RunFoldersPage() {
   const { bootstrap, currentWorkflow, runs: indexedRuns, selectedRun, selectRun } = useOperator()
   const [moveTarget, setMoveTarget] = useState<RunFolder | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<RunFolder | null>(null)
+  // null until the operator chooses: neither outcome of deleting a calibration run is a safe default.
+  const [retainCalibration, setRetainCalibration] = useState<boolean | null>(null)
   const [destinationRoot, setDestinationRoot] = useState("")
   const [runSearch, setRunSearch] = useState("")
   const [runRootFilter, setRunRootFilter] = useState("all")
   const [runSort, setRunSort] = useState("recent")
-  const [storageSearch, setStorageSearch] = useState("")
   const [newRunRoot, setNewRunRoot] = useState(() => runRootForPath(selectedRun, bootstrap.allowed_run_roots))
   const [newRunFolderName, setNewRunFolderName] = useState("")
   const [trackedOperation, setTrackedOperation] = useState<TrackedOperation | null>(null)
@@ -550,6 +556,10 @@ export function RunFoldersPage() {
             ? `${result.source_cleanup_warning} Recovery will retry during the next inventory refresh.`
             : "Recovery will retry during the next inventory refresh.",
         })
+      } else if (effectiveOperation.kind === "delete" && result?.retained_calibration) {
+        toast.success("Run folder deleted; calibration kept", { description: `${effectiveOperation.runName ?? "Its calibration"} stays selectable from the calibration library.` })
+        void queryClient.invalidateQueries({ queryKey: ["calibration-overview"] })
+        void queryClient.invalidateQueries({ queryKey: ["calibration-library"] })
       } else {
         toast.success(
           effectiveOperation.kind === "refresh" ? "Run-folder inventory refreshed" : effectiveOperation.kind === "move" ? "Run folder moved" : "Run folder deleted",
@@ -593,25 +603,34 @@ export function RunFoldersPage() {
       toast.success("Run-folder move queued", { description: `Job ${result.job_id} continues in the background and is visible in Jobs.` })
       void queryClient.invalidateQueries({ queryKey: ["jobs"] })
     },
-    onError: (error) => toast.error("Run folder could not be moved", { description: errorMessage(error) }),
+    onError: (error) => {
+      toast.error("Run folder could not be moved", { description: errorMessage(error) })
+      setMoveTarget(null)
+      void queryClient.invalidateQueries({ queryKey: ["run-folders"] })
+    },
   })
 
   const deleteRun = useMutation({
-    mutationFn: (run: RunFolder) => api<RunFolderMutationResponse>("/ui/run-folders", {
+    mutationFn: ({ run, retain }: { run: RunFolder; retain: boolean | null }) => api<RunFolderMutationResponse>("/ui/run-folders", {
       method: "DELETE",
       body: JSON.stringify({
         run_root: run.path,
         confirm: true,
         expected_identity: run.identity,
+        ...((run.calibration_retention ?? run.contents.evidence.calibration) ? { retain_calibration: retain } : {}),
       }),
     }),
-    onSuccess: (result, run) => {
+    onSuccess: (result, { run }) => {
       setTrackedOperation({ kind: "delete", runName: run.name, sourceRunRoot: result.source_run_root, job: result.job })
       setDeleteTarget(null)
       toast.success("Run-folder deletion queued", { description: `Job ${result.job_id} continues in the background and is visible in Jobs.` })
       void queryClient.invalidateQueries({ queryKey: ["jobs"] })
     },
-    onError: (error) => toast.error("Run folder could not be deleted", { description: errorMessage(error) }),
+    onError: (error) => {
+      toast.error("Run folder could not be deleted", { description: errorMessage(error) })
+      setDeleteTarget(null)
+      void queryClient.invalidateQueries({ queryKey: ["run-folders"] })
+    },
   })
 
   const runs = useMemo(
@@ -629,10 +648,6 @@ export function RunFoldersPage() {
       return right.modified_at.localeCompare(left.modified_at) || left.path.localeCompare(right.path)
     })
   }, [inventory.data?.runs, runRootFilter, runSearch, runSort])
-  const storageRuns = useMemo(
-    () => runs.filter((run) => runMatchesSearch(run, storageSearch)),
-    [runs, storageSearch],
-  )
   const totalSize = runs.reduce((total, run) => total + run.size_bytes, 0)
   const totalFiles = runs.reduce((total, run) => total + run.file_count, 0)
   const activeInventoryRun = runs.find((run) => isSelectedRunFolder(run, selectedRun))
@@ -641,7 +656,16 @@ export function RunFoldersPage() {
   const activeRunName = activeInventoryRun?.config.run_name ?? activeIndexedRun?.run_name ?? activeFolderName
   const activeConfigured = activeInventoryRun?.config.valid ?? activeIndexedRun?.config_valid ?? false
   const maintenanceBlocking = (inventory.data?.maintenance?.unresolved_count ?? 0) > 0
-  const destinationRoots = (inventory.data?.roots ?? []).filter((root) => root.path !== moveTarget?.root)
+  const clusterActivity = useQuery({
+    queryKey: ["run-folder-cluster-activity"],
+    queryFn: () => api<{ available: boolean; active_run_roots: string[]; reason: string | null }>("/ui/run-folders/cluster-activity"),
+    refetchInterval: 5000,
+  })
+  const clusterBlocker = (run: RunFolder) => clusterActivity.data?.active_run_roots.includes(run.path)
+    ? "A cluster archive or estimation job is using this run."
+    : clusterActivity.data?.available ? null : clusterActivity.data?.reason ?? "Waiting to verify cluster activity."
+  const requiresRetention = (run: RunFolder) => Boolean(run.calibration_retention ?? run.contents.evidence.calibration)
+  const destinationRoots = (inventory.data?.roots ?? []).filter((root) => root.path !== moveTarget?.root && !root.unavailable_reason)
   const inventoryRefreshing = inventory.data?.inventory_state === "refreshing"
     || Boolean(inventory.data?.refresh_job && ACTIVE_JOB_STATUSES.has(inventory.data.refresh_job.status))
     || refreshInventory.isPending
@@ -664,7 +688,7 @@ export function RunFoldersPage() {
   const newRunCollision = Boolean(normalizedProposedNewRunPath && knownRunPaths.some((path) => normalizeRunPath(path) === normalizedProposedNewRunPath))
 
   const openMove = (run: RunFolder) => {
-    const target = (inventory.data?.roots ?? []).find((root) => root.path !== run.root && root.exists && root.identity)
+    const target = (inventory.data?.roots ?? []).find((root) => root.path !== run.root && root.exists && root.identity && !root.unavailable_reason)
     setDestinationRoot(target?.path ?? "")
     setMoveTarget(run)
   }
@@ -705,15 +729,6 @@ export function RunFoldersPage() {
       description="Choose the acquisition folder used by every run-owned page, start a fresh folder for the next capture, and manage existing run storage."
       actions={<Button variant="outline" onClick={() => refreshInventory.mutate(false)} disabled={inventoryRefreshing || operationBlocking}><RefreshCw className={inventoryRefreshing ? "animate-spin" : undefined} />Refresh inventory</Button>}
     />
-    {inventory.data
-      ? <ClusterStorageSection inventory={inventory.data} />
-      : <Card data-testid="cluster-storage-section" className="border-primary/25">
-          <CardHeader><CardTitle className="flex items-center gap-2"><Archive className="size-5 text-primary-strong" />Cluster storage</CardTitle><CardDescription>Copy complete runs to durable PROJECT storage, restore verified archives, or permanently remove an archive. This capability is independent of every pose-estimator runtime.</CardDescription></CardHeader>
-          <CardContent>{inventory.isPending
-            ? <div className="space-y-2" aria-label="Loading local run inventory for cluster storage"><Skeleton className="h-10 w-full" /><Skeleton className="h-16 w-full" /></div>
-            : <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs text-destructive"><span>Cluster storage cannot select a local source because run-folder inventory is unavailable: {errorMessage(inventory.error)}</span><Button variant="outline" size="sm" onClick={() => inventory.refetch()}><RefreshCw />Retry inventory</Button></div>}
-          </CardContent>
-        </Card>}
     <Card data-testid="active-run-selection" className="border-primary/35 bg-primary/5">
       <CardHeader>
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -727,7 +742,7 @@ export function RunFoldersPage() {
             <div><div className="text-[9px] font-bold uppercase tracking-[0.13em] text-muted-foreground">Run name</div><div className="mt-1 break-words font-display text-xl font-semibold" data-testid="run-folder-active-name">{activeRunName}</div><p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">Human-readable metadata. It defaults to the folder name when Workflow setup is saved.</p></div>
             <div><div className="text-[9px] font-bold uppercase tracking-[0.13em] text-muted-foreground">Run folder</div><div className="mt-1 font-mono text-sm font-semibold">{activeFolderName}</div><div className="mt-1 break-all font-mono text-[10px] leading-relaxed text-muted-foreground" data-testid="run-folder-active-path">{selectedRun}</div><p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">Filesystem boundary for one acquisition and all of its raw and derived evidence.</p></div>
           </div>
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-4"><p className="max-w-2xl text-[11px] leading-relaxed text-muted-foreground">Use one sibling folder per physical acquisition. A multi-object template may place several objects in that single capture.</p><Button asChild size="sm"><Link to={workflowHref}>Open active run in Workflow</Link></Button></div>
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-4"><p className="max-w-2xl text-[11px] leading-relaxed text-muted-foreground">Use one sibling folder per physical acquisition. A multi-object template may place several objects in that single capture.</p><Button asChild size="sm"><Link to={workflowHref}>{activeConfigured ? "Open active run in Workflow" : "Open Workflow setup"}</Link></Button></div>
         </div>
         <form className="rounded-lg border bg-card p-4" onSubmit={(event) => { event.preventDefault(); activateNewRun() }}>
           <div className="flex items-start gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10"><FolderPlus className="size-4 text-primary-strong" /></span><div><h2 className="text-sm font-semibold">Start another acquisition</h2><p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">Select a new sibling folder now. It remains unconfigured until you save setup in Workflow; its run name will initially default to this folder name.</p></div></div>
@@ -744,34 +759,6 @@ export function RunFoldersPage() {
       </CardContent>
     </Card>
 
-    <Card data-testid="run-folder-chooser">
-      <CardHeader className="border-b bg-muted/20">
-        <div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle>Choose an existing run</CardTitle><CardDescription className="mt-1">Search by run name, folder, path, object, sensor, or acquisition intent. Selecting a run changes browser-local context; it does not modify that run.</CardDescription></div><div className="text-[10px] text-muted-foreground">{selectableRuns.length.toLocaleString()} of {runs.length.toLocaleString()} folders shown</div></div>
-        <div className="mt-4 grid gap-3 md:grid-cols-[minmax(280px,1fr)_minmax(220px,0.55fr)_180px]">
-          <div className="relative"><Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input aria-label="Search run folders" className="pl-9" value={runSearch} onChange={(event) => setRunSearch(event.target.value)} placeholder="Search runs, objects, sensors…" /></div>
-          <Select value={runRootFilter} onValueChange={setRunRootFilter}><SelectTrigger aria-label="Filter run folders by storage root"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All storage roots</SelectItem>{bootstrap.allowed_run_roots.map((root) => <SelectItem value={root} key={root}>{root}</SelectItem>)}</SelectContent></Select>
-          <Select value={runSort} onValueChange={setRunSort}><SelectTrigger aria-label="Sort run folders"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="recent">Recently changed</SelectItem><SelectItem value="name">Run name</SelectItem><SelectItem value="size">Largest first</SelectItem></SelectContent></Select>
-        </div>
-      </CardHeader>
-      <CardContent className="p-0">
-        {inventory.isPending
-          ? <div className="space-y-2 p-4"><Skeleton className="h-16" /><Skeleton className="h-16" /><Skeleton className="h-16" /></div>
-          : inventory.isError
-            ? <div className="p-5 text-sm text-destructive">Run-folder inventory is unavailable: {errorMessage(inventory.error)}</div>
-            : selectableRuns.length === 0
-              ? <div className="p-6 text-center text-sm text-muted-foreground">{runs.length ? "No run folders match these filters." : "No configured run folders have been discovered yet. Start a new acquisition above."}</div>
-              : <div className="max-h-[430px] overflow-auto" data-testid="run-folder-selection-list"><table className="w-full min-w-[980px] text-left text-xs"><thead className="sticky top-0 z-10 border-b bg-muted text-[9px] font-bold uppercase tracking-wider text-muted-foreground"><tr><th className="px-4 py-2.5">Run</th><th className="px-4 py-2.5">Capture contents</th><th className="px-4 py-2.5">Evidence</th><th className="px-4 py-2.5">Last changed</th><th className="px-4 py-2.5 text-right">Selection</th></tr></thead><tbody className="divide-y">{selectableRuns.map((run) => {
-                const active = isSelectedRunFolder(run, selectedRun)
-                return <tr className={cn(active && "bg-primary/5")} data-testid="run-selection-row" data-run-path={run.path} key={run.path}>
-                  <td className="px-4 py-3"><div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{runDisplayName(run)}</span>{active && <StatusBadge status="active" tone="informational">Active run</StatusBadge>}{!run.config.valid && <StatusBadge status="invalid" tone="destructive" />}</div><div className="mt-1 text-[10px] text-muted-foreground">Folder <span className="font-mono">{run.name}</span></div><div className="mt-1 max-w-[420px] truncate font-mono text-[9px] text-muted-foreground" title={run.path}>{run.path}</div></td>
-                  <td className="px-4 py-3"><div>{plural(run.contents.object_count, "object instance")} · {run.contents.enabled_sensor_count}/{run.contents.sensor_count} sensors enabled</div><div className="mt-1 max-w-[320px] truncate text-[10px] text-muted-foreground" title={run.contents.object_names.join(" · ")}>{run.contents.object_names.length ? run.contents.object_names.join(" · ") : run.contents.dataset_mode === "objectless" ? "Objectless recording" : "No selected objects"}</div></td>
-                  <td className="px-4 py-3"><EvidenceSummary run={run} /></td>
-                  <td className="px-4 py-3"><div>{formatDate(run.modified_at)}</div><div className="mt-1 font-mono text-[9px] text-muted-foreground">{formatBytes(run.size_bytes)}</div></td>
-                  <td className="px-4 py-3 text-right"><Button size="sm" variant={active ? "secondary" : "outline"} disabled={active} aria-label={active ? `${run.name} is the active run` : `Use ${run.name} as active run`} onClick={() => activateRun(run.path, runDisplayName(run))}>{active ? "Current run" : "Use this run"}</Button></td>
-                </tr>
-              })}</tbody></table></div>}
-      </CardContent>
-    </Card>
     <ProcessHandoff
       title="Manage storage here; acquire and process data in Workflow"
       description="Moving or deleting a run changes its managed storage, not its captured configuration. Return to the guided workflow to configure, record, synchronize, or export the active run."
@@ -839,10 +826,14 @@ export function RunFoldersPage() {
         ? <Card className="border-destructive/40"><CardHeader><CardTitle>Run-folder inventory unavailable</CardTitle><CardDescription>{errorMessage(inventory.error)}</CardDescription></CardHeader><CardContent><Button variant="outline" onClick={() => inventory.refetch()}><RefreshCw />Try again</Button></CardContent></Card>
         : runs.length === 0
           ? <EmptyState icon={FolderOpen} title={inventoryRefreshing ? "Run-folder inventory is being measured" : "No run folders found"} description={inventoryRefreshing ? "The background inventory job is measuring allowed roots. This page updates when it completes." : "Configured acquisition runs will appear after they contain a run configuration or dataset manifest and the inventory is refreshed."} />
-          : <Card>
+          : <Card data-testid="run-folder-chooser">
             <CardHeader className="border-b bg-muted/20">
-              <div className="flex flex-wrap items-end justify-between gap-3"><div><CardTitle>Storage inventory and actions</CardTitle><CardDescription className="mt-1">Detailed folders are shown largest first. Select the active run in the chooser above; move and delete remain unavailable for that active folder.</CardDescription></div><div className="font-mono text-[10px] text-muted-foreground">{storageRuns.length.toLocaleString()} of {runs.length.toLocaleString()} folders · {formatBytes(totalSize)} · {plural(totalFiles, "file")}</div></div>
-              <div className="relative mt-4 max-w-2xl"><Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input aria-label="Search storage inventory" className="bg-card pl-9" value={storageSearch} onChange={(event) => setStorageSearch(event.target.value)} placeholder="Search run name, folder, path, object, sensor, or evidence…" /></div>
+              <div className="flex flex-wrap items-end justify-between gap-3"><div><CardTitle>Choose and manage existing runs</CardTitle><CardDescription className="mt-1">Search and select your active run, or manage storage for another run.</CardDescription></div><div className="font-mono text-[10px] text-muted-foreground">{selectableRuns.length.toLocaleString()} of {runs.length.toLocaleString()} folders · {formatBytes(totalSize)} · {plural(totalFiles, "file")}</div></div>
+        <div className="mt-4 grid gap-3 md:grid-cols-[minmax(280px,1fr)_minmax(220px,0.55fr)_180px]">
+          <div className="relative"><Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input aria-label="Search run folders" className="pl-9" value={runSearch} onChange={(event) => setRunSearch(event.target.value)} placeholder="Search runs, objects, sensors…" /></div>
+          <Select value={runRootFilter} onValueChange={setRunRootFilter}><SelectTrigger aria-label="Filter run folders by storage root"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All storage roots</SelectItem>{bootstrap.allowed_run_roots.map((root) => <SelectItem value={root} key={root}>{root}</SelectItem>)}</SelectContent></Select>
+          <Select value={runSort} onValueChange={setRunSort}><SelectTrigger aria-label="Sort run folders"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="recent">Recently changed</SelectItem><SelectItem value="name">Run name</SelectItem><SelectItem value="size">Largest first</SelectItem></SelectContent></Select>
+        </div>
             </CardHeader>
             <CardContent className="p-0">
               <div data-testid="run-folders-table" className="max-h-[720px] overflow-auto">
@@ -851,10 +842,11 @@ export function RunFoldersPage() {
                     <tr><th className="w-[19%] px-4 py-3">Run</th><th className="w-[15%] px-4 py-3">Measured size</th><th className="w-[25%] px-4 py-3">Configuration and contents</th><th className="w-[16%] px-4 py-3">Evidence</th><th className="w-[14%] px-4 py-3">Location</th><th className="w-[11%] px-4 py-3 text-right">Actions</th></tr>
                   </thead>
                   <tbody className="divide-y divide-border">
-                    {storageRuns.map((run) => {
+                    {selectableRuns.map((run) => {
                       const active = isSelectedRunFolder(run, selectedRun)
-                      const actionDisabled = active || operationBlocking || maintenanceBlocking || !inventoryReadyForMutation
-                      const hasDestination = (inventory.data?.roots ?? []).some((root) => root.exists && root.identity && root.path !== run.root)
+                      const clusterReason = clusterBlocker(run)
+                      const actionDisabled = active || operationBlocking || maintenanceBlocking || !inventoryReadyForMutation || Boolean(clusterReason)
+                      const hasDestination = (inventory.data?.roots ?? []).some((root) => root.exists && root.identity && !root.unavailable_reason && root.path !== run.root)
                       const canMove = hasDestination && !actionDisabled
                       return <tr data-testid="run-folder-row" data-run-path={run.path} className="align-top" key={run.path}>
                         <td className="px-4 py-4">
@@ -884,23 +876,33 @@ export function RunFoldersPage() {
                         </td>
                         <td className="px-4 py-4">
                           <div className="flex flex-col items-stretch gap-2">
+                            <Button size="sm" variant={active ? "secondary" : "outline"} disabled={active} aria-label={active ? `${run.name} is the active run` : `Use ${run.name} as active run`} onClick={() => activateRun(run.path, runDisplayName(run))}>{active ? "Current run" : "Use this run"}</Button>
                             <Button size="sm" variant="outline" aria-label={`Move ${run.name}`} disabled={!canMove} onClick={() => openMove(run)}><MoveRight />Move</Button>
-                            <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" aria-label={`Delete ${run.name}`} disabled={actionDisabled} onClick={() => setDeleteTarget(run)}><Trash2 />Delete</Button>
+                            <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" aria-label={`Delete ${run.name}`} disabled={actionDisabled} onClick={() => { setRetainCalibration(null); setDeleteTarget(run) }}><Trash2 />Delete</Button>
                             {active && <p data-testid="run-folder-active-action-reason" className="text-left text-[10px] leading-relaxed text-warning-foreground">Switch the active run folder before moving or deleting this folder.</p>}
-                            {!active && maintenanceBlocking && <p className="text-left text-[10px] leading-relaxed text-destructive">Resolve the storage-recovery issue above before changing run folders.</p>}
+                            {!active && clusterReason && <p className="text-left text-[10px] text-warning-foreground">{clusterReason}</p>}{!active && maintenanceBlocking && <p className="text-left text-[10px] leading-relaxed text-destructive">Resolve the storage-recovery issue above before changing run folders.</p>}
                             {!active && !maintenanceBlocking && !inventoryReadyForMutation && <p data-testid="run-folder-inventory-action-reason" className="text-left text-[10px] leading-relaxed text-warning-foreground">Wait for a current inventory before moving or deleting this folder.</p>}
                             {!active && !hasDestination && <p className="text-left text-[10px] leading-relaxed text-muted-foreground">No other available allowed root.</p>}
                           </div>
                         </td>
                       </tr>
                     })}
-                    {storageRuns.length === 0 && <tr><td className="px-4 py-10 text-center text-sm text-muted-foreground" colSpan={6}>No storage rows match this search.</td></tr>}
+                    {selectableRuns.length === 0 && <tr><td className="px-4 py-10 text-center text-sm text-muted-foreground" colSpan={6}>No run folders match these filters.</td></tr>}
                   </tbody>
                 </table>
               </div>
             </CardContent>
           </Card>}
 
+    {inventory.data
+      ? <ClusterStorageSection inventory={inventory.data} />
+      : <Card data-testid="cluster-storage-section" className="border-primary/25">
+          <CardHeader><CardTitle className="flex items-center gap-2"><Archive className="size-5 text-primary-strong" />Cluster storage</CardTitle><CardDescription>Copy complete runs to durable PROJECT storage, restore verified archives, or permanently remove an archive. This capability is independent of every pose-estimator runtime.</CardDescription></CardHeader>
+          <CardContent>{inventory.isPending
+            ? <div className="space-y-2" aria-label="Loading local run inventory for cluster storage"><Skeleton className="h-10 w-full" /><Skeleton className="h-16 w-full" /></div>
+            : <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/35 bg-destructive/5 p-3 text-xs text-destructive"><span>Cluster storage cannot select a local source because run-folder inventory is unavailable: {errorMessage(inventory.error)}</span><Button variant="outline" size="sm" onClick={() => inventory.refetch()}><RefreshCw />Retry inventory</Button></div>}
+          </CardContent>
+        </Card>}
     <Dialog open={moveTarget !== null} onOpenChange={(open) => { if (!open && !moveRun.isPending) setMoveTarget(null) }}>
       <DialogContent data-testid="run-folder-move-dialog">
         <DialogHeader>
@@ -923,7 +925,7 @@ export function RunFoldersPage() {
           {destinationRoot && <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 text-xs"><div className="text-[9px] font-bold uppercase tracking-[0.12em] text-muted-foreground">Resulting path</div><div className="mt-1 break-all font-mono font-semibold">{destinationRoot.replace(/\/+$/, "")}/{moveTarget.name}</div></div>}
           <div className="flex items-start gap-3 rounded-lg border border-warning/35 bg-warning/5 p-3 text-xs leading-relaxed"><MoveRight aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning-foreground" /><p>The folder name stays the same. The old path is removed after the destination is durably published, so update any external references.</p></div>
         </div>}
-        <DialogFooter><Button variant="outline" onClick={() => setMoveTarget(null)} disabled={moveRun.isPending}>Cancel</Button><Button onClick={() => moveTarget && destinationRoot && moveRun.mutate({ run: moveTarget, root: destinationRoot })} disabled={!moveTarget || !destinationRoot || moveRun.isPending}>{moveRun.isPending ? <LoaderCircle className="animate-spin" /> : <MoveRight />}Queue move</Button></DialogFooter>
+        <DialogFooter><Button variant="outline" onClick={() => setMoveTarget(null)} disabled={moveRun.isPending}>Cancel</Button><Button onClick={() => moveTarget && destinationRoot && moveRun.mutate({ run: moveTarget, root: destinationRoot })} disabled={!moveTarget || !destinationRoot || Boolean(clusterBlocker(moveTarget)) || moveRun.isPending}>{moveRun.isPending ? <LoaderCircle className="animate-spin" /> : <MoveRight />}Queue move</Button></DialogFooter>
       </DialogContent>
     </Dialog>
 
@@ -936,8 +938,14 @@ export function RunFoldersPage() {
         {deleteTarget && <div className="space-y-3">
           <div className="flex items-start gap-3 rounded-lg border border-destructive/45 bg-destructive/10 p-4"><AlertTriangle aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-destructive" /><div><div className="font-semibold text-destructive">Permanent acquisition-data deletion</div><p className="mt-1 text-xs leading-relaxed text-muted-foreground">The background job removes {formatBytes(deleteTarget.size_bytes)} across {plural(deleteTarget.file_count, "file")} from this exact folder:</p><div className="mt-2 break-all font-mono text-[10px] font-semibold">{deleteTarget.path}</div></div></div>
           {deleteTarget.scan_complete || <div className="flex items-start gap-2 rounded border border-warning/35 bg-warning/5 p-3 text-xs"><FileWarning aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning-foreground" /><span>The last inventory scan was incomplete. The deletion target remains the entire folder, not only the measured files.</span></div>}
+          {requiresRetention(deleteTarget) && <fieldset data-testid="run-folder-delete-calibration-choice" className="space-y-2 rounded-lg border border-primary/35 bg-primary/5 p-3 text-xs">
+            <legend className="px-1 text-sm font-semibold">{deleteTarget.calibration_retention === "last_snapshot" ? "This run holds the last verified copy of a calibration" : "This run holds a promoted calibration"} <span className="text-destructive">Choice required</span></legend>
+            <Label className="flex cursor-pointer items-start gap-3 rounded-md border bg-card p-3 font-normal"><input type="radio" name="run-folder-delete-calibration" className="mt-1" checked={retainCalibration === true} onChange={() => setRetainCalibration(true)} /><span><span className="block font-semibold">Keep the calibration in the library</span><span className="mt-1 block leading-relaxed text-muted-foreground">The job verifies the library copy before removing the run. Dataset setup can select the retained copy.</span></span></Label>
+            <Label className="flex cursor-pointer items-start gap-3 rounded-md border bg-card p-3 font-normal"><input type="radio" name="run-folder-delete-calibration" className="mt-1" checked={retainCalibration === false} onChange={() => setRetainCalibration(false)} /><span><span className="block font-semibold">Delete this run’s calibration evidence</span><span className="mt-1 block leading-relaxed text-muted-foreground">This deletes the calibration evidence stored in this folder.</span></span></Label>
+            {retainCalibration === null && <p className="font-medium text-destructive">Choose one before confirming. A retention decision is required.</p>}
+          </fieldset>}
         </div>}
-        <DialogFooter><Button variant="outline" onClick={() => setDeleteTarget(null)} disabled={deleteRun.isPending}>Cancel</Button><Button variant="destructive" onClick={() => deleteTarget && deleteRun.mutate(deleteTarget)} disabled={!deleteTarget || deleteRun.isPending}>{deleteRun.isPending ? <LoaderCircle className="animate-spin" /> : <Trash2 />}Confirm delete</Button></DialogFooter>
+        <DialogFooter><Button variant="outline" onClick={() => setDeleteTarget(null)} disabled={deleteRun.isPending}>Cancel</Button><Button variant="destructive" onClick={() => deleteTarget && deleteRun.mutate({ run: deleteTarget, retain: retainCalibration })} disabled={!deleteTarget || deleteRun.isPending || Boolean(clusterBlocker(deleteTarget)) || (requiresRetention(deleteTarget) && retainCalibration === null)}>{deleteRun.isPending ? <LoaderCircle className="animate-spin" /> : <Trash2 />}Confirm delete</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   </div>

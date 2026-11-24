@@ -131,12 +131,13 @@ def rgbd_camera_artifact_fingerprint(
 
 
 def validate_rectification_provenance(
-    source_sensor: str | Path,
+    source_sensor: str | Path | None,
     rectified_sensor: str | Path,
+    *,
+    source_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Prove a rectified sensor is current for one exact source sensor."""
 
-    source = Path(source_sensor)
     output = Path(rectified_sensor)
     provenance_path = output / RECTIFICATION_PROVENANCE
     if provenance_path.is_symlink() or not provenance_path.is_file():
@@ -160,6 +161,9 @@ def validate_rectification_provenance(
         raise ValueError("Rectification provenance projection is unsupported")
     recorded_source = Path(str(value.get("source_sensor_folder") or ""))
     recorded_output = Path(str(value.get("output_sensor_folder") or ""))
+    source = Path(source_sensor) if source_sensor is not None else recorded_source
+    if source_root is not None and not source.resolve().is_relative_to(Path(source_root).resolve()):
+        raise ValueError("Rectification provenance source escapes the acquisition run")
     if (
         not recorded_source.is_absolute()
         or recorded_source.resolve() != source.resolve()
@@ -189,6 +193,17 @@ def validate_rectification_provenance(
     if value.get("frame_count") != output_fingerprint["frame_pair_count"]:
         raise ValueError("Rectification provenance frame_count is inconsistent")
     return value
+
+
+def sensor_input_projection(sensor_folder: Path, *, run_root: Path | None = None) -> str:
+    """Verify rectification evidence before consuming rectified camera geometry."""
+    provenance = sensor_folder / RECTIFICATION_PROVENANCE
+    canonical = sensor_folder.parent.name == RECTIFIED_DIR
+    if not canonical and not (provenance.exists() or provenance.is_symlink()):
+        return "native"
+    scope = run_root or sensor_folder.parent.parent
+    validate_rectification_provenance(None, sensor_folder, source_root=scope)
+    return "rectified"
 
 
 def _pairs(sensor_folder: Path) -> list[tuple[Path, Path]]:

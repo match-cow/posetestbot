@@ -130,73 +130,16 @@ def _sensor_summary(
         raise ValueError(
             "sync_report.v3 is missing required fields: " + ", ".join(missing_fields)
         )
-    dropped_rows = (
-        [row for row in report.get("dropped", []) if isinstance(row, Mapping)]
-        if isinstance(report.get("dropped"), list)
-        else []
+    outside_motion_interval_frame_count = int(report["outside_motion_interval_frame_count"])
+    eligible_in_motion_frames = int(report["eligible_in_motion_frames"])
+    matched_eligible_frames = int(report["matched_eligible_frames"])
+    match_ratio = matched_eligible_frames / eligible_in_motion_frames if eligible_in_motion_frames else 0.0
+    in_motion_exclusion_count = int(report["in_motion_exclusion_count"])
+    unexplained_in_motion_exclusion_count = max(
+        int(report["unexplained_in_motion_exclusion_count"]),
+        eligible_in_motion_frames - matched_eligible_frames - int(report.get("nearest_pose_delta_rejection_count", 0)),
     )
-    outside_motion_interval_frame_count = int(
-        report.get(
-            "outside_motion_interval_frame_count",
-            sum(
-                row.get("reason") == "outside robot motion intervals"
-                for row in dropped_rows
-            ),
-        )
-        or 0
-    )
-    dropped_in_motion_rows = [
-        row
-        for row in dropped_rows
-        if isinstance(row.get("motion"), str) and row.get("motion")
-    ]
-    eligible_in_motion_frames = int(
-        report.get(
-            "eligible_in_motion_frames",
-            (
-                matched_frames + len(dropped_in_motion_rows)
-                if dropped_rows
-                else total_frames
-            ),
-        )
-        or 0
-    )
-    matched_eligible_frames = int(
-        report.get("matched_eligible_frames", matched_frames) or 0
-    )
-    match_ratio = (
-        matched_eligible_frames / eligible_in_motion_frames
-        if eligible_in_motion_frames
-        else 0.0
-    )
-    in_motion_exclusion_count = int(
-        report.get(
-            "in_motion_exclusion_count",
-            max(0, eligible_in_motion_frames - matched_eligible_frames),
-        )
-        or 0
-    )
-    unexplained_in_motion_exclusion_count = int(
-        report.get(
-            "unexplained_in_motion_exclusion_count",
-            sum(
-                row.get("reason") != "nearest robot pose delta exceeds threshold"
-                for row in dropped_in_motion_rows
-            ),
-        )
-        or 0
-    )
-    incompatible_timestamp_pair_count = int(
-        report.get(
-            "incompatible_timestamp_pair_count",
-            sum(
-                row.get("reason")
-                == "frame/robot timestamp fallback clocks are incompatible"
-                for row in dropped_rows
-            ),
-        )
-        or 0
-    )
+    incompatible_timestamp_pair_count = int(report["incompatible_timestamp_pair_count"])
     robot_pose_packet_loss_audited = (
         report.get("robot_pose_packet_loss_audited") is True
     )
@@ -206,7 +149,6 @@ def _sensor_summary(
     else:
         robot_pose_packet_loss_count = None
     motion_intervals = report.get("motion_intervals")
-    motion_windows = report.get("motion_windows", {})
     timestamp_source_counts = report.get("timestamp_source_counts")
     provenance_audited = isinstance(timestamp_source_counts, Mapping)
     timestamp_pair = report.get("timestamp_pair")
@@ -275,8 +217,6 @@ def _sensor_summary(
         "motion_count": (
             len(motion_intervals)
             if isinstance(motion_intervals, list)
-            else len(motion_windows)
-            if isinstance(motion_windows, Mapping)
             else 0
         ),
         "mean_abs_nearest_pose_delta_ns": report.get("mean_abs_nearest_pose_delta_ns"),

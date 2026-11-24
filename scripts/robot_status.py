@@ -38,12 +38,6 @@ def print_status(status: dict) -> None:
         f"{velocity['commanded_m_s']} m/s "
         f"(host cap {velocity['host_command_cap_m_s']} m/s)"
     )
-    if status["env_overrides"]:
-        print("Environment overrides:")
-        for key, value in status["env_overrides"].items():
-            print(f"- {key}={value}")
-    else:
-        print("Environment overrides: none")
 
 
 def main() -> int:
