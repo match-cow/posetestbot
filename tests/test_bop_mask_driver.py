@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from posetestbot.bop import mask_driver
+from posetestbot.bop import mask_driver, writer
 from scripts.run_bop_export_stage import complete_official_mask_annotations
 from tests.test_bop_writer import _write_official_annotation_fixture
 
@@ -109,11 +109,20 @@ def test_mask_runner_uses_isolated_pinned_toolkit_boundary(
     assert not list(bop_root.glob(".*.adapter.json"))
 
 
-def test_export_postprocessor_accepts_an_injected_mask_runner(
+def test_export_postprocessor_assembles_targets_before_the_single_mask_validation(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     export = _write_official_annotation_fixture(tmp_path)
     calls: list[dict[str, Any]] = []
+    validated_scenes: list[Path] = []
+    validate_masks = writer.validate_official_scene_annotations
+
+    def track_validation(scene_folder):
+        validated_scenes.append(scene_folder)
+        return validate_masks(scene_folder)
+
+    monkeypatch.setattr(writer, "validate_official_scene_annotations", track_validation)
 
     def fake_mask_runner(output_root, **kwargs):
         calls.append({"output_root": output_root, **kwargs})
@@ -138,6 +147,15 @@ def test_export_postprocessor_accepts_an_injected_mask_runner(
     assert calls[0]["scene_ids"] == [1]
     assert calls[0]["object_ids"] == [1]
     assert calls[0]["image_size"] == (5, 4)
+    assert not validated_scenes
+
+    targets_path = writer.write_bop_targets(tmp_path, exports, split="test")
+    validation = writer.validate_bop_dataset(
+        tmp_path, exports, targets_path=targets_path
+    )
+
+    assert validation["target_count"] == 1
+    assert validated_scenes == [tmp_path / export.scene_folder]
 
 
 def test_official_algorithm_driver_uses_captured_depth_and_3x_info_canvas(
@@ -157,7 +175,7 @@ def test_official_algorithm_driver_uses_captured_depth_and_3x_info_canvas(
 
     dataset_params = types.ModuleType("bop_toolkit_lib.dataset_params")
     dataset_params.get_split_params = lambda *_args, **_kwargs: {
-        "im_size": (3, 2),
+        "im_size": (5, 4),
         "scene_ids": [1],
         "scene_camera_tpath": (
             bop_root / "test" / "{scene_id:06d}" / "scene_camera.json"
@@ -192,7 +210,7 @@ def test_official_algorithm_driver_uses_captured_depth_and_3x_info_canvas(
     }
 
     inout = types.ModuleType("bop_toolkit_lib.inout")
-    intrinsic = np.asarray([[100.0, 0.0, 1.0], [0.0, 100.0, 0.5], [0.0, 0.0, 1.0]])
+    intrinsic = np.asarray([[100.0, 0.0, 2.25], [0.0, 125.0, 0.75], [0.0, 0.0, 1.0]])
     inout.load_scene_camera = lambda _path: {
         0: {"cam_K": intrinsic, "depth_scale": 2.0}
     }
@@ -204,16 +222,25 @@ def test_official_algorithm_driver_uses_captured_depth_and_3x_info_canvas(
                 "cam_t_m2c": np.asarray([0.0, 0.0, 500.0]),
             },
             {
-                "obj_id": 2,
+                "obj_id": 1,
                 "cam_R_m2c": np.eye(3),
                 "cam_t_m2c": np.asarray([0.0, 0.0, 600.0]),
             },
+            {
+                "obj_id": 2,
+                "cam_R_m2c": np.eye(3),
+                "cam_t_m2c": np.asarray([0.0, 0.0, 700.0]),
+            },
         ]
     }
-    inout.load_depth = lambda _path: np.asarray(
-        [[5.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
-        dtype=np.float32,
-    )
+
+    def load_depth(_path):
+        depth = np.zeros((4, 5), dtype=np.float32)
+        depth[1, 0] = 5.0
+        depth[2, 4] = 15.0
+        return depth
+
+    inout.load_depth = load_depth
 
     def save_im(path, image):
         destination = Path(path)
@@ -235,16 +262,10 @@ def test_official_algorithm_driver_uses_captured_depth_and_3x_info_canvas(
     inout.save_json = save_json
 
     misc = types.ModuleType("bop_toolkit_lib.misc")
-    distance_inputs: list[np.ndarray] = []
-
-    def depth_to_distance(depth, _intrinsic):
-        distance_inputs.append(np.asarray(depth).copy())
-        return np.asarray(depth).copy()
 
     def bbox(xs, ys, _im_size):
         return [xs.min(), ys.min(), xs.max() - xs.min(), ys.max() - ys.min()]
 
-    misc.depth_im_to_dist_im_fast = depth_to_distance
     misc.calc_2d_bbox = bbox
 
     visibility = types.ModuleType("bop_toolkit_lib.visibility")
@@ -258,10 +279,8 @@ def test_official_algorithm_driver_uses_captured_depth_and_3x_info_canvas(
                 "mode": visib_mode,
             }
         )
-        result = np.zeros_like(rendered, dtype=bool)
-        if np.max(rendered) < 20:
-            result[0, 0] = True
-        return result
+        difference = rendered.astype(np.float32) - captured.astype(np.float32)
+        return (rendered > 0) & ((difference <= delta) | (captured == 0))
 
     visibility.estimate_visib_mask_gt = visible_mask
 
@@ -280,13 +299,13 @@ def test_official_algorithm_driver_uses_captured_depth_and_3x_info_canvas(
                     "intrinsics": (fx, fy, cx, cy),
                 }
             )
-            depth = np.zeros((6, 9), dtype=np.float32)
-            if obj_id == 1:
-                # One pixel is truncated to the left of the 3x-canvas crop;
-                # two remain in-frame.
-                depth[2, 2:5] = 11.0
+            depth = np.zeros((12, 15), dtype=np.float32)
+            if translation[2] == 500.0:
+                # The first pixel is out of frame, the second is occluded,
+                # and the third is where the captured depth is missing.
+                depth[5, 4:7] = 40.0
             else:
-                depth[2, 3] = 20.0
+                depth[6, 9] = 20.0 if obj_id == 1 else 90.0
             return {"depth": depth}
 
     def create_renderer(width, height, renderer_type, mode):
@@ -331,48 +350,73 @@ def test_official_algorithm_driver_uses_captured_depth_and_3x_info_canvas(
         )
     )
 
-    assert renderer_calls["create"] == (9, 6, "vispy", "depth")
+    assert renderer_calls["create"] == (15, 12, "vispy", "depth")
     assert renderer_calls["objects"] == [
         (1, (bop_root / "models" / "obj_000001.ply").as_posix()),
         (2, (bop_root / "models" / "obj_000002.ply").as_posix()),
     ]
     assert renderer_calls["renders"][0]["intrinsics"] == (
         100.0,
-        100.0,
-        4.0,
-        2.5,
+        125.0,
+        7.25,
+        4.75,
     )
-    assert distance_inputs[0][0, 0] == 10.0
+    assert [call["captured"].shape for call in visibility_calls] == [
+        (1, 2),
+        (1, 1),
+        (1, 1),
+    ]
+    np.testing.assert_allclose(
+        visibility_calls[0]["captured"],
+        [[10.0 * math.sqrt(1.0 + (-2.25 / 100) ** 2 + (0.25 / 125) ** 2), 0.0]],
+    )
     assert all(call["delta"] == 15.0 for call in visibility_calls)
     assert all(call["mode"] == "bop19" for call in visibility_calls)
     assert set(saved_images) == {
-        "test/000001/mask/000000_000000.png",
-        "test/000001/mask/000000_000001.png",
-        "test/000001/mask_visib/000000_000000.png",
-        "test/000001/mask_visib/000000_000001.png",
+        f"test/000001/{kind}/000000_{index:06d}.png"
+        for kind in ("mask", "mask_visib")
+        for index in range(3)
     }
-    assert set(np.unique(saved_images["test/000001/mask/000000_000000.png"])) <= {
-        0,
-        255,
-    }
-    assert (
-        int(np.count_nonzero(saved_images["test/000001/mask/000000_000000.png"])) == 2
+    expected_full = np.zeros((4, 5), dtype=np.uint8)
+    expected_full[1, :2] = 255
+    expected_visible = np.zeros_like(expected_full)
+    expected_visible[1, 1] = 255
+    np.testing.assert_array_equal(
+        saved_images["test/000001/mask/000000_000000.png"], expected_full
     )
-    assert (
-        int(np.count_nonzero(saved_images["test/000001/mask_visib/000000_000000.png"]))
-        == 1
+    np.testing.assert_array_equal(
+        saved_images["test/000001/mask_visib/000000_000000.png"], expected_visible
     )
-    info = saved_json["test/000001/scene_gt_info.json"]["0"]
-    assert info[0]["px_count_all"] == 3
-    assert info[0]["px_count_valid"] == 1
-    assert info[0]["px_count_visib"] == 1
-    assert math.isclose(info[0]["visib_fract"], 1.0 / 3.0)
-    assert info[0]["bbox_obj"] == [-1, 0, 2, 0]
-    assert info[0]["bbox_visib"] == [0, 0, 0, 0]
-    assert info[1]["px_count_all"] == 1
-    assert info[1]["px_count_visib"] == 0
-    assert info[1]["visib_fract"] == 0.0
-    assert info[1]["bbox_obj"] == [-1, -1, -1, -1]
-    assert info[1]["bbox_visib"] == [-1, -1, -1, -1]
-    assert report["scenes"]["1"]["annotation_count"] == 2
+    scene_gt_info = saved_json["test/000001/scene_gt_info.json"]
+    assert scene_gt_info["0"] == [
+        {
+            "bbox_obj": [-1, 1, 2, 0],
+            "bbox_visib": [1, 1, 0, 0],
+            "px_count_all": 3,
+            "px_count_valid": 1,
+            "px_count_visib": 1,
+            "visib_fract": 1.0 / 3.0,
+        },
+        {
+            "bbox_obj": [4, 2, 0, 0],
+            "bbox_visib": [4, 2, 0, 0],
+            "px_count_all": 1,
+            "px_count_valid": 1,
+            "px_count_visib": 1,
+            "visib_fract": 1.0,
+        },
+        {
+            "bbox_obj": [-1, -1, -1, -1],
+            "bbox_visib": [-1, -1, -1, -1],
+            "px_count_all": 1,
+            "px_count_valid": 1,
+            "px_count_visib": 0,
+            "visib_fract": 0.0,
+        },
+    ]
+    scene_gt = {"0": inout.load_scene_gt(scene_root / "scene_gt.json")[0]}
+    assert writer.targets_from_scene_gt(
+        scene_gt, scene_id=1, scene_gt_info=scene_gt_info
+    ) == [{"scene_id": 1, "im_id": 0, "obj_id": 1, "inst_count": 2}]
+    assert report["scenes"]["1"]["annotation_count"] == 3
     assert report["depth_source"] == "exported_captured_depth"

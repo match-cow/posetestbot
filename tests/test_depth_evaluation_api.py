@@ -210,3 +210,33 @@ def test_depth_api_rejects_unapproved_comparison_inputs_and_path_escapes(depth_c
         ).status_code
         == 404
     )
+
+
+def test_depth_quality_csv_and_frame_series_are_completion_gated(depth_client):
+    client, _runner, root = depth_client
+    response = client.post("/depth/evaluations", json=submission(root))
+    record_id = response.json["id"]
+    query = {"run_root": str(root)}
+    for suffix in ("download/csv", "frame-series"):
+        assert (
+            client.get(f"/depth/evaluations/{record_id}/{suffix}", query_string=query)
+            .status_code
+            == 404
+        )
+    depth.run_evaluation(
+        depth.folder(root, "evaluations", record_id) / "request.json",
+        render_reference=analytic_reference,
+    )
+
+    csv_response = client.get(
+        f"/depth/evaluations/{record_id}/download/csv", query_string=query
+    )
+    assert csv_response.status_code == 200
+    assert csv_response.mimetype == "text/csv"
+    assert f"{record_id}-depth-quality.csv" in csv_response.headers["Content-Disposition"]
+    header = csv_response.data.decode().splitlines()[0].split(",")
+    assert header[:3] == ["level", "input_id", "finish_label"]
+    assert "rmse_mm" in header and "completeness" in header
+    series = client.get(f"/depth/evaluations/{record_id}/frame-series", query_string=query)
+    assert series.status_code == 200 and series.json["available"] is True
+    assert series.json["rows"]

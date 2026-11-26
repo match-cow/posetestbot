@@ -78,6 +78,39 @@ Retained requests preserve their original location and job binding.
 | `GET /depth/<kind>/<id>/frames/<key>` | Frame identities, per-instance/region metrics and scales |
 | `GET /depth/<kind>/<id>/frames/<key>/media/<media>` | PNG: `rgb`, `measured`, `reference`, `error`, `missing`; NPZ: `numeric` |
 | `GET /depth/<kind>/<id>/download` | Complete research ZIP: HTML, figures, tables, maps, provenance |
+| `GET /depth/<kind>/<id>/download/csv` | One tidy `text/csv` of every depth-quality value, built from manifest-verified published files (also for studies published before it existed) |
+| `GET /depth/<kind>/<id>/frame-series` | `depth_frame_series.v1` with `available: true`, or `available: false` and a `reason` for studies published before per-frame series |
+
+The CSV columns are `level` (`run`, `sensor`, `sensor_geometry`, `instance`,
+`bin`, `frame_instance`, `frame`, `frame_geometry`), the comparison tags
+`input_id`/`finish_label`/`evaluation_id`, identity columns (`sensor_name`,
+`scene_id`, `im_id`, `frame_key`, `instance_uuid`, `canonical_sha256`,
+`region`, `distance_bin`, `angle_bin`), frame counts, pixel counts,
+completeness, bias/MAE/RMSE/median/P95 in mm, one
+`outlier_rate_gt_<t>mm` and `usable_coverage_le_<t>mm` column per threshold,
+and the motion columns `robot_timestamp_ns`, `t_motion_s`, `path_mm`, and
+`path_fraction`.
+
+`frame_series.json` holds exact per-frame aggregates for each region:
+`frame` rows pool all selected instances in the frame and `frame_geometry`
+rows pool one geometry. Motion fields come from each camera's
+`match_robot_ee_poses.json` when the GT provenance binds it by hash. That file
+is then frozen with the study's sources. `t_motion_s` counts from the
+camera's first selected frame, `path_mm` is cumulative end-effector travel in
+image order, and `path_fraction` is `path_mm` divided by the total. Missing or
+unbound robot evidence leaves these fields null and never blocks the study.
+Comparisons concatenate their inputs' series, tag `input_id`/`finish_label`,
+and list inputs without a series in `inputs_without_series`.
+
+Comparison reports also carry `summary` (every input's run, sensor,
+sensor-geometry and instance aggregates) and `series_bins` (every input's own
+distance/incidence bins). `bins` remains the common-bin subset.
+
+Reference rendering splits the selected frames into contiguous slices and runs
+one BlenderProc process per slice (`depth_render_plan.v2`). There are up to
+eight workers with four Cycles threads each, bounded by the CPUs available to
+the job. During rendering, `progress.json` reports `state: "rendering"` with
+`rendered_frames`; `completed_frames` counts measured frames.
 
 Frame keys join six-digit-padded scene/image IDs with `_`; comparisons prefix
 the input ordinal. Arbitrary media paths are rejected. Reports/media/downloads

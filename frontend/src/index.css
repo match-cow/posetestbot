@@ -32,6 +32,16 @@
   --sidebar-foreground: #20241f;
   --sidebar-accent: #f5f8e7;
   --sidebar-border: #dfe2dc;
+  /* Categorical chart series, fixed order (validated: adjacent CVD and
+     normal-vision separation on the card surface). Never cycled. */
+  --series-1: #257de0;
+  --series-2: #f47230;
+  --series-3: #00b894;
+  --series-4: #f2a600;
+  --series-5: #ee7fac;
+  --series-6: #008a17;
+  --series-7: #6a4ce2;
+  --series-8: #ec4647;
 }
 
 [data-theme="dark"],
@@ -65,6 +75,14 @@
   --sidebar-foreground: #f1f3ee;
   --sidebar-accent: #262d18;
   --sidebar-border: #353b34;
+  --series-1: #338ced;
+  --series-2: #e76624;
+  --series-3: #00a888;
+  --series-4: #d28e05;
+  --series-5: #e24d8b;
+  --series-6: #0aac23;
+  --series-7: #9887ef;
+  --series-8: #eb6263;
 }
 
 @theme inline {

@@ -395,6 +395,87 @@ def test_library_selection_snapshots_both_files_and_binds_current_run_config(
     )
 
 
+def test_active_calibration_reports_run_selection_and_published_bundle(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runs = tmp_path / "runs"
+    source = runs / "calibration_run"
+    destination = runs / "object_run"
+    _write_source(source)
+    _write_destination(destination)
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", runs.as_posix())
+    client = create_app().test_client()
+
+    before = client.get(
+        "/ui/calibrations/active", query_string={"run_root": destination}
+    )
+    assert before.status_code == 200
+    assert before.get_json()["selected"] is None
+    assert before.get_json()["published"] is None
+
+    candidate = _candidate(
+        client.get(
+            "/ui/calibrations", query_string={"run_root": destination}
+        ).get_json(),
+        source,
+    )
+    selected = client.post(
+        "/ui/calibrations/select",
+        json={
+            "run_root": destination.as_posix(),
+            "source_run_root": source.as_posix(),
+            "expected_bundle_sha256": candidate["bundle_sha256"],
+            "operator": "dataset-operator",
+        },
+    )
+    assert selected.status_code == 201
+    saved = client.post(
+        "/run-config",
+        json={
+            "run_root": destination.as_posix(),
+            "run_name": "object_run",
+            "intent": "dataset",
+            "annotation_mode": "none",
+            "resolution": "720p",
+            "fps": 6,
+            "velocity_m_s": 0.2,
+            "sensors": [_sensor().to_dict()],
+            "dataset_mode": "objectless",
+            "calibration_profiles": selected.get_json()["calibration_profiles"],
+        },
+    )
+    assert saved.status_code == 201, saved.get_json()
+
+    dataset = client.get(
+        "/ui/calibrations/active", query_string={"run_root": destination}
+    ).get_json()
+    assert dataset["selected"]["valid"] is True
+    assert dataset["selected"]["source"]["bundle_sha256"] == candidate["bundle_sha256"]
+    assert [item["run_name"] for item in dataset["selected"]["sources"]] == [
+        "Reusable camera calibration"
+    ]
+    assert dataset["published"] is None
+
+    published = client.get(
+        "/ui/calibrations/active", query_string={"run_root": source}
+    ).get_json()["published"]
+    assert published["valid"] is True
+    assert published["bundle_sha256"] == candidate["bundle_sha256"]
+    assert published["profile_count"] == 1
+
+    atomic_write_json(source / CALIBRATION_PROFILES, {"changed": True})
+    corrupt = client.get(
+        "/ui/calibrations/active", query_string={"run_root": source}
+    ).get_json()["published"]
+    assert corrupt["valid"] is False
+    assert corrupt["issues"][0]["code"] == "invalid_calibration_bundle"
+
+    outside = client.get(
+        "/ui/calibrations/active", query_string={"run_root": tmp_path / "elsewhere"}
+    )
+    assert outside.status_code == 400
+
+
 def test_composite_selection_combines_static_and_robot_mounted_source_runs(
     tmp_path: Path, monkeypatch
 ) -> None:

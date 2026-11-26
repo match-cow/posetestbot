@@ -295,7 +295,7 @@ def test_setup_keeps_pose_gt_available_without_mask_toolkit(
     assert {
         item["code"]
         for item in setup["readiness_by_mode"]["pose_and_masks"]["blockers"]
-    } == {"annotation_mode_not_configured", "bop_toolkit_unavailable"}
+    } == {"bop_toolkit_unavailable"}
 
 
 def test_setup_reports_current_pose_and_mask_product(

@@ -6,7 +6,10 @@ import hashlib
 import json
 import shutil
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
+from threading import Lock
 from typing import Any, Mapping, Sequence
 
 import cv2
@@ -33,8 +36,9 @@ from posetestbot.io.artifacts import (
     RGB_DIR,
     SYNCHRONIZED_DIR,
 )
-from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
 from posetestbot.io.derived import validate_derived_output
+from posetestbot.pipeline.derived_work import frame_worker_count
+from posetestbot.pipeline.sensor_selection import filter_enabled_sensor_folders
 
 
 SCHEMA_VERSION = "camera_rectification.v1"
@@ -42,6 +46,8 @@ PROVENANCE_SCHEMA_VERSION = "rectification_provenance.v2"
 FINGERPRINT_SCHEMA_VERSION = "rgbd_camera_artifact_fingerprint.v1"
 RECTIFICATION_PROVENANCE = "rectification_provenance.json"
 RECTIFIED_DIR = "rectified"
+MAX_RECTIFICATION_WORKERS = 4
+_OPENCV_THREADS_LOCK = Lock()
 _FINGERPRINT_SIDECARS = (
     CAM_K,
     DEPTH_SCALE,
@@ -303,6 +309,81 @@ def _write_sidecars(
     )
 
 
+def _rectify_frame(
+    pair: tuple[Path, Path],
+    *,
+    destination: Path,
+    image_size: tuple[int, int],
+    map_x: np.ndarray,
+    map_y: np.ndarray,
+) -> None:
+    rgb_path, depth_path = pair
+    rgb = cv2.imread(rgb_path.as_posix(), cv2.IMREAD_UNCHANGED)
+    depth = cv2.imread(depth_path.as_posix(), cv2.IMREAD_UNCHANGED)
+    if rgb is None or depth is None:
+        raise ValueError(f"Unreadable RGB-D frame pair: {rgb_path.name}")
+    if rgb.shape[:2] != depth.shape or (rgb.shape[1], rgb.shape[0]) != image_size:
+        raise ValueError(
+            f"RGB-D dimensions do not match intrinsic profile: {rgb_path.name}"
+        )
+    rectified_rgb = cv2.remap(
+        rgb,
+        map_x,
+        map_y,
+        cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    rectified_depth = cv2.remap(
+        depth,
+        map_x,
+        map_y,
+        cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    if not cv2.imwrite(
+        (destination / RGB_DIR / rgb_path.name).as_posix(), rectified_rgb
+    ):
+        raise OSError(f"Failed to write rectified RGB: {rgb_path.name}")
+    if not cv2.imwrite(
+        (destination / DEPTH_DIR / depth_path.name).as_posix(), rectified_depth
+    ):
+        raise OSError(f"Failed to write rectified depth: {depth_path.name}")
+
+
+def _rectify_frames(
+    pairs: list[tuple[Path, Path]],
+    destination: Path,
+    profile: Mapping[str, Any],
+    image_size: tuple[int, int],
+) -> np.ndarray:
+    workers = frame_worker_count(len(pairs), limit=MAX_RECTIFICATION_WORKERS)
+    # OpenCV's thread setting is process-wide. Restore it after all frame
+    # workers have exited, including when a frame fails or the job is canceled.
+    with _OPENCV_THREADS_LOCK:
+        previous_threads = cv2.getNumThreads()
+        cv2.setNumThreads(1)
+        try:
+            map_x, map_y, rectified_k = _maps(profile)
+            rectify_frame = partial(
+                _rectify_frame,
+                destination=destination,
+                image_size=image_size,
+                map_x=map_x,
+                map_y=map_y,
+            )
+            executor = ThreadPoolExecutor(max_workers=workers)
+            try:
+                for _ in executor.map(rectify_frame, pairs):
+                    pass
+            finally:
+                executor.shutdown(cancel_futures=True)
+        finally:
+            cv2.setNumThreads(previous_threads)
+    return rectified_k
+
+
 def rectify_sensor_folder(
     source_sensor: str | Path,
     destination_sensor: str | Path,
@@ -337,40 +418,7 @@ def rectify_sensor_folder(
     destination.mkdir(parents=True, exist_ok=False)
     (destination / RGB_DIR).mkdir()
     (destination / DEPTH_DIR).mkdir()
-    map_x, map_y, rectified_k = _maps(profile)
-    for rgb_path, depth_path in pairs:
-        rgb = cv2.imread(rgb_path.as_posix(), cv2.IMREAD_UNCHANGED)
-        depth = cv2.imread(depth_path.as_posix(), cv2.IMREAD_UNCHANGED)
-        if rgb is None or depth is None:
-            raise ValueError(f"Unreadable RGB-D frame pair: {rgb_path.name}")
-        if rgb.shape[:2] != depth.shape or (rgb.shape[1], rgb.shape[0]) != image_size:
-            raise ValueError(
-                f"RGB-D dimensions do not match intrinsic profile: {rgb_path.name}"
-            )
-        rectified_rgb = cv2.remap(
-            rgb,
-            map_x,
-            map_y,
-            cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-        rectified_depth = cv2.remap(
-            depth,
-            map_x,
-            map_y,
-            cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-        if not cv2.imwrite(
-            (destination / RGB_DIR / rgb_path.name).as_posix(), rectified_rgb
-        ):
-            raise OSError(f"Failed to write rectified RGB: {rgb_path.name}")
-        if not cv2.imwrite(
-            (destination / DEPTH_DIR / depth_path.name).as_posix(), rectified_depth
-        ):
-            raise OSError(f"Failed to write rectified depth: {depth_path.name}")
+    rectified_k = _rectify_frames(pairs, destination, profile, image_size)
 
     for artifact in (MATCH_ROBOT_EE_POSES,):
         source_path = source / artifact

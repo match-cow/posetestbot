@@ -14,7 +14,8 @@ Below `processed/bop_evaluation/depth/{evaluations,comparisons}/<id>/`:
 | `progress.json`, `job.json` | Diagnostic progress and LocalJobRunner identity; Jobs owns process truth |
 | `.work/` | Incomplete/failed/canceled diagnostics, never downloadable |
 | `complete/manifest.json` | Atomic publication binding request and completed artifact hashes |
-| `complete/report.json`, `metrics.csv`, `frames.csv` (evaluations) | Exact region/bin metrics, counts, settings, camera projection and source/quality evidence |
+| `complete/report.json`, `metrics.csv`, `frames.csv` (evaluations) | Exact region/bin metrics, counts, settings, camera projection and source/quality evidence; comparison reports add per-input `summary` and `series_bins` |
+| `complete/frame_series.json` | `depth_frame_series.v1` exact per-frame aggregates with optional robot timing and path progress |
 | `complete/frames.sqlite3` | Paginated frame metadata |
 | `complete/frames/<key>.npz` | Measured/reference optical-axis mm, OpenCV normals, render IDs, selected reference mask |
 | `complete/frames/<key>*.png`, `<key>.json` | RGB/depth/error/missing views and per-instance metrics |
@@ -40,7 +41,7 @@ Quality video exports use `processed/bop_evaluation/depth/videos/<id>/`:
 
 | Path | Contract |
 | --- | --- |
-| `run_config.json` | Strict `run_config.v4` intent and hardware/data contract |
+| `run_config.json` | Strict `run_config.v4` intent and hardware/data contract; object-dataset subruns add `subrun` lineage |
 | `dataset_manifest.json` | Run-level artifact ledger and provenance bindings |
 | `run_preflight_report.json` | Current `run_preflight.v2` configuration/readiness evidence |
 | `hardware_status_report.json` | Read-only hardware snapshot |

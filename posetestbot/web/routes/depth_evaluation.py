@@ -1,5 +1,6 @@
 """Browser-safe Inspect depth studies; expensive work is always queued."""
 
+import io
 import json
 
 from flask import Blueprint, jsonify, request, send_file
@@ -239,6 +240,43 @@ def depth_download(kind, record_id):
             mimetype="application/zip",
             max_age=0,
         )
+    except Exception as exc:
+        return _error(exc)
+
+
+@depth_evaluation_bp.get("/depth/<kind>/<record_id>/download/csv")
+def depth_download_csv(kind, record_id):
+    try:
+        root = resolve_web_run_root(request.args.get("run_root"))
+        return send_file(
+            io.BytesIO(depth.depth_quality_csv(root, kind, record_id)),
+            as_attachment=True,
+            download_name=f"{record_id}-depth-quality.csv",
+            mimetype="text/csv",
+            max_age=0,
+        )
+    except Exception as exc:
+        return _error(exc)
+
+
+@depth_evaluation_bp.get("/depth/<kind>/<record_id>/frame-series")
+def depth_frame_series(kind, record_id):
+    try:
+        root = resolve_web_run_root(request.args.get("run_root"))
+        publication = depth.completed(root, kind, record_id)
+        if "frame_series.json" not in publication.files:
+            return jsonify(
+                {
+                    "schema_version": depth.FRAME_SERIES_SCHEMA,
+                    "id": record_id,
+                    "available": False,
+                    "reason": "This study was published before per-frame series "
+                    "existed. Re-run it to get per-frame charts.",
+                    "rows": [],
+                }
+            )
+        value = json.loads(publication.artifact("frame_series.json").read_text())
+        return jsonify({**value, "available": True})
     except Exception as exc:
         return _error(exc)
 

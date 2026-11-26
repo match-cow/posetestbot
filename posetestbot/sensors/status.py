@@ -76,6 +76,11 @@ class SensorFamilyStatus:
             for device in self.devices
         ]
         value["diagnostics"] = list(self.diagnostics or [])
+        adapter = SENSOR_ADAPTERS.get(self.sensor_type)
+        if adapter is not None:
+            capabilities = adapter.to_dict()
+            value["supported_resolutions"] = capabilities["supported_resolutions"]
+            value["supported_fps"] = capabilities["supported_fps"]
         return value
 
 

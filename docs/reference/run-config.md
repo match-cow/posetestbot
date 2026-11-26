@@ -22,7 +22,14 @@ be submitted afresh for each capture request.
 | `intrinsic_calibration_profiles` | Exact run-owned intrinsic-profile snapshot path or `null` |
 | `calibration_profile_selection` | Hash-bound v2 selection pointer or `null` |
 | `calibration_target` | Hash-bound selected target bundle or `null` |
-| `bop` | Explicit eventual annotation mode |
+| `bop` | Recorded BOP ground-truth outcome (`none` until chosen after capture) |
+| `subrun` | Optional object-dataset subrun lineage; absent for ordinary runs |
+
+`subrun`, when present, contains exactly `parent_run_id` (the original run's
+canonical UUID, never the run's own), `parent_run_root` (absolute path),
+`variant` (trimmed text, 1–240 characters, describing the material,
+environment or part copy), and ISO-8601 `created_at`. It is allowed only for
+`pose_template` dataset runs and is preserved by later setup saves.
 
 Unknown or retired fields, including `pipeline`, `object_folder`, and
 `selected_objects`, are rejected.
@@ -101,21 +108,32 @@ selection APIs write their own hash-bound objects; clients should not invent
 asset paths or hashes.
 
 `bop.annotation_mode` is one of `none`, `pose`, or `pose_and_masks`.
-Calibration intent requires `none`. Dataset processing always writes the base
-annotation-free BOP export; the configured non-`none` mode is fulfilled later
-by the explicit optional annotation job.
+Calibration intent requires `none`. New dataset runs start with `none`.
+Dataset processing always writes the base annotation-free BOP export. When the
+operator queues the optional post-capture annotation job (`POST
+/bop/annotations`), the chosen mode is recorded here atomically; only
+`bop.annotation_mode` changes, so the camera contract is untouched.
+
+`capture.fps` must be a rate every enabled sensor delivers natively at
+`capture.resolution` (`supported_fps` in `posetestbot.sensors.registry`:
+RealSense D435 and OAK-D Pro 6/15/30 fps at 720p; ZED 2i 15/30/60 fps at
+720p and 15/30/60/100 fps at 360p). Dataset-intent setup requires
+`capture.velocity_m_s >= 0.05`. Both are checked when a setup is created or
+changed, and capture-plan preflight rejects an unsupported rate; existing
+runs remain readable.
 
 ## Create and inspect
 
 ```bash
 uv run python scripts/create_run_config.py working_data/example \
-  --intent dataset --annotation-mode none
+  --intent dataset
 
 curl --fail-with-body --get http://127.0.0.1:5000/run-config \
   --data-urlencode run_root=working_data/example
 ```
 
-`POST /run-config` requires `run_root`, `intent`, and `annotation_mode`. It
+`POST /run-config` requires `run_root` and `intent`. An omitted
+`annotation_mode` keeps the run's recorded value (`none` for a new run). It
 serializes replacement with selection writers, writes atomically, updates
 `dataset_manifest.json`, and refuses camera-contract changes after raw capture
 evidence exists.

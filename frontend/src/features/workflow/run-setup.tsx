@@ -20,24 +20,21 @@ import type { CaptureSynchronization, RunConfig, SensorStatus } from "@/lib/cont
 import { daysSince, formatAge, formatDate } from "@/lib/utils"
 import { useOperator } from "@/providers/operator-provider"
 
-const DEFAULT_CAPTURE_SPEED_M_S = 0.01
+const MIN_CALIBRATION_CAPTURE_SPEED_M_S = 0.01
 const MAX_CALIBRATION_CAPTURE_SPEED_M_S = 0.03
+// Slower object-dataset motion makes the robot jitter.
+const MIN_DATASET_CAPTURE_SPEED_M_S = 0.05
 const MAX_DATASET_CAPTURE_SPEED_M_S = 1
+const DEFAULT_CAPTURE_FPS = 6
 
-const ANNOTATION_REQUIRED_MESSAGE = "Choose the BOP annotation outcome for this dataset."
-
-const setupSchema = (maximumCaptureSpeedMps: number) => z.object({
+const setupSchema = (minimumCaptureSpeedMps: number, maximumCaptureSpeedMps: number) => z.object({
   run_name: z.string().optional(),
   resolution: z.string().min(1),
-  fps: z.number().int().min(1).max(60),
-  velocity: z.number().min(0.01).max(maximumCaptureSpeedMps),
-  // Blank until the operator chooses: a preselected outcome gets saved by accident.
-  annotation_mode: z.enum(["", "none", "pose", "pose_and_masks"]).refine((value) => value !== "", ANNOTATION_REQUIRED_MESSAGE),
+  fps: z.number({ message: "Choose a frame rate every enabled camera supports." }).int().positive(),
+  velocity: z.number().min(minimumCaptureSpeedMps).max(maximumCaptureSpeedMps),
 })
 
-/** What the form holds: the annotation outcome may still be blank. */
 type SetupFormValues = z.input<ReturnType<typeof setupSchema>>
-/** What validation lets through to save: the outcome has been chosen. */
 type SetupValues = z.output<ReturnType<typeof setupSchema>>
 type RunSensor = RunConfig["capture"]["sensors"][number]
 type MountingMode = "eye_in_hand" | "static"
@@ -204,31 +201,40 @@ function sharedResolutions(status: SensorStatus | undefined, enabledSensors: Run
   return shared?.length ? shared : ["720p"]
 }
 
+/** Frame rates every enabled camera delivers natively at the chosen resolution. */
+function sharedFrameRates(status: SensorStatus | undefined, enabledSensors: RunSensor[], resolution: string) {
+  let shared: number[] | null = null
+  for (const sensor of enabledSensors) {
+    const family = status?.families.find((item) => item.sensor_type === sensor.sensor_type)
+    const byResolution = family?.supported_fps
+    const rates = byResolution && typeof byResolution === "object" && Array.isArray((byResolution as Record<string, unknown>)[resolution])
+      ? ((byResolution as Record<string, unknown[]>)[resolution]).filter((item): item is number => typeof item === "number")
+      : null
+    if (rates === null) continue
+    shared = shared === null ? rates : shared.filter((item) => rates.includes(item))
+  }
+  return shared
+}
+
 function defaultSetupValues(intent: WorkflowIntent): SetupFormValues {
   return {
     run_name: "",
     resolution: "720p",
-    fps: 6,
-    velocity: DEFAULT_CAPTURE_SPEED_M_S,
-    annotation_mode: intent === "calibration" ? "none" : "",
+    fps: DEFAULT_CAPTURE_FPS,
+    velocity: intent === "dataset" ? MIN_DATASET_CAPTURE_SPEED_M_S : MIN_CALIBRATION_CAPTURE_SPEED_M_S,
   }
 }
 
 function setupValuesFromConfig(
   config: RunConfig,
+  minimumCaptureSpeedMps: number,
   maximumCaptureSpeedMps: number,
-  intent: WorkflowIntent,
 ): SetupFormValues {
   return {
     run_name: config.run_name,
     resolution: config.capture.resolution,
     fps: config.capture.fps,
-    velocity: Math.min(config.capture.velocity_m_s, maximumCaptureSpeedMps),
-    // A calibration recording always stores "none"; that was never a dataset
-    // decision, so it must not arrive preselected in the dataset workflow.
-    annotation_mode: intent === "calibration"
-      ? "none"
-      : config.capture.intent === "dataset" ? config.bop.annotation_mode : "",
+    velocity: Math.max(minimumCaptureSpeedMps, Math.min(config.capture.velocity_m_s, maximumCaptureSpeedMps)),
   }
 }
 
@@ -239,6 +245,9 @@ export function RunSetup({ intent = "calibration" }: { intent?: WorkflowIntent }
 
 function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; selectedRun: string }) {
   const queryClient = useQueryClient()
+  const minimumCaptureSpeedMps = intent === "dataset"
+    ? MIN_DATASET_CAPTURE_SPEED_M_S
+    : MIN_CALIBRATION_CAPTURE_SPEED_M_S
   const maximumCaptureSpeedMps = intent === "dataset"
     ? MAX_DATASET_CAPTURE_SPEED_M_S
     : MAX_CALIBRATION_CAPTURE_SPEED_M_S
@@ -246,7 +255,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
     ? "The dataset workflow sends a structured robot_command.v1 request up to 1.00 m/s. Full capture uses an A1 joint PTP, and the commissioned Sunrise app independently caps A1 at 3°/s. These are ordinary software limits, not safety-rated limits."
     : "Calibration raster legs use a scaled Cartesian LIN speed and a structured robot_command.v1 request capped at 0.03 m/s. This is not a safety-rated limit."
   const captureSpeedHint = intent === "dataset"
-    ? "Choose 0.01–1.00 m/s. Requests above 0.03 m/s require the commissioned structured-command app. Full capture is an A1 joint PTP; the commissioned app also caps A1 at 3°/s. Speed alone cannot guarantee sharp frames—exposure time and lighting still matter."
+    ? "Choose 0.05–1.00 m/s; slower motion makes the robot jitter. Requests above 0.03 m/s require the commissioned structured-command app. Full capture is an A1 joint PTP; the commissioned app also caps A1 at 3°/s. Speed alone cannot guarantee sharp frames—exposure time and lighting still matter."
     : "Choose 0.01–0.03 m/s. Full capture is an A1 joint PTP; calibration motion remains in the conservative commissioned range. Speed alone cannot guarantee sharp frames—exposure time and lighting still matter."
   const sensors = useQuery({ queryKey: ["sensors", "status"], queryFn: () => api<SensorStatus>("/sensors/status"), staleTime: 10_000 })
   const existing = useQuery({ queryKey: ["run-config", selectedRun], queryFn: () => api<RunConfigResponse>(query("/run-config", { run_root: selectedRun })), retry: false })
@@ -258,9 +267,9 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
   })
   const calibrationSources = calibrations.data?.calibrations ?? []
   const form = useForm<SetupFormValues, unknown, SetupValues>({
-    resolver: zodResolver(setupSchema(maximumCaptureSpeedMps)),
+    resolver: zodResolver(setupSchema(minimumCaptureSpeedMps, maximumCaptureSpeedMps)),
     defaultValues: existing.data?.config
-      ? setupValuesFromConfig(existing.data.config, maximumCaptureSpeedMps, intent)
+      ? setupValuesFromConfig(existing.data.config, minimumCaptureSpeedMps, maximumCaptureSpeedMps)
       : defaultSetupValues(intent),
   })
   const [enabledOverrides, setEnabledOverrides] = useState<Record<string, Record<string, boolean>>>({})
@@ -377,7 +386,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
   const missingMountingSensorKeys = enabledSensors.filter((sensor) => !isConfiguredMounting(sensor.mounting_mode)).map(sensorKey)
   const cameraMountingReady = missingMountingSensorKeys.length === 0
   const selectedResolution = useWatch({ control: form.control, name: "resolution" })
-  const annotationChosen = useWatch({ control: form.control, name: "annotation_mode" }) !== ""
+  const selectedFps = useWatch({ control: form.control, name: "fps" })
   const savedEnabledSensorKeys = (existing.data?.config.capture.sensors ?? [])
     .filter((sensor) => sensor.enabled !== false)
     .map(sensorKey)
@@ -392,6 +401,10 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
     || hasEnabledMembershipChanges
     || hasResolutionChanges
   const resolutionOptions = sharedResolutions(sensors.data, enabledSensors)
+  const frameRateOptions = sharedFrameRates(sensors.data, enabledSensors, selectedResolution)
+  // Unknown capabilities (status still loading) never block; known ones must cover the choice.
+  const frameRateSupported = frameRateOptions === null || frameRateOptions.includes(Number(selectedFps))
+  const frameRateChoices = frameRateOptions ?? [Number(selectedFps) || DEFAULT_CAPTURE_FPS]
   const activeSourceBySensor = calibrationAssignments?.runRoot === selectedRun
     ? calibrationAssignments.sourceBySensor
     : {}
@@ -438,7 +451,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
   const savedConfigKey = savedConfig ? JSON.stringify(savedConfig) : null
   useEffect(() => {
     if (!savedConfig) return
-    form.reset(setupValuesFromConfig(savedConfig, maximumCaptureSpeedMps, intent))
+    form.reset(setupValuesFromConfig(savedConfig, minimumCaptureSpeedMps, maximumCaptureSpeedMps))
     // eslint-disable-next-line react-hooks/exhaustive-deps -- savedConfigKey stands in for savedConfig's content
   }, [savedConfigKey, form, intent, maximumCaptureSpeedMps])
 
@@ -544,7 +557,6 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
           ...runValues,
           sensors: selectedSensors,
           intent,
-          annotation_mode: intent === "calibration" ? "none" : values.annotation_mode,
           calibration_profiles: calibrationProfiles || null,
           intrinsic_calibration_profiles: intrinsicProfiles || null,
           ...(intent === "dataset" ? { expected_calibration_bundle_sha256: expectedCalibrationBundleSha256 } : {}),
@@ -568,6 +580,7 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
       setConfirmReplacement(false)
       void queryClient.invalidateQueries({ queryKey: ["run-config", selectedRun] })
       void queryClient.invalidateQueries({ queryKey: ["calibration-library", selectedRun] })
+      void queryClient.invalidateQueries({ queryKey: ["active-calibration", selectedRun] })
       void queryClient.invalidateQueries({ queryKey: ["overview", selectedRun] })
       void queryClient.invalidateQueries({ queryKey: ["workflow-status", selectedRun] })
       void queryClient.invalidateQueries({ queryKey: ["runs"] })
@@ -639,13 +652,8 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
       })}>
         <fieldset className="space-y-6" disabled={setupControlsDisabled}>
         <div className="grid gap-4 sm:grid-cols-2"><Field id="run-name" label="Run display name (optional)" hint="Human-readable metadata only. Leave blank to use the folder name; changing it does not select or rename storage." error={form.formState.errors.run_name?.message}><Input id="run-name" {...form.register("run_name")} placeholder="Defaults to folder name" /></Field><Field id="resolution" label="Image resolution" hint="Only modes shared by every enabled camera are offered."><Controller control={form.control} name="resolution" render={({ field }) => <Select value={field.value} onValueChange={field.onChange} disabled={cameraContractLocked}><SelectTrigger id="resolution" aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined}><SelectValue /></SelectTrigger><SelectContent>{resolutionOptions.map((resolution) => <SelectItem value={resolution} key={resolution}>{resolution === "720p" ? "1280 × 720" : resolution === "360p" ? "672 × 376" : resolution}</SelectItem>)}</SelectContent></Select>} /></Field></div>
-        <div className="grid gap-4 sm:grid-cols-2"><Field id="fps" label={<span className="inline-flex items-center gap-1">Frames per second <HelpTip label="frames per second">The requested RGB-D frame rate for each enabled camera. Higher rates create more data and may exceed a camera or USB connection's supported mode.</HelpTip></span>} hint="How many RGB-D frames each camera should request per second." error={form.formState.errors.fps?.message}><Input id="fps" type="number" min={1} max={60} disabled={cameraContractLocked} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : undefined} {...form.register("fps", { valueAsNumber: true })} /></Field><Field id="velocity" label={<span className="inline-flex items-center gap-1">{intent === "dataset" ? "Requested robot capture speed (m/s)" : "Robot capture speed limit (m/s)"} <HelpTip label="robot capture speed">{captureSpeedHelp}</HelpTip></span>} hint={captureSpeedHint} error={form.formState.errors.velocity?.message}><Input id="velocity" type="number" min="0.01" max={maximumCaptureSpeedMps} step="0.01" {...form.register("velocity", { valueAsNumber: true })} /></Field></div>
+        <div className="grid gap-4 sm:grid-cols-2"><Field id="fps" label={<span className="inline-flex items-center gap-1">Frames per second <HelpTip label="frames per second">The RGB-D frame rate requested from each enabled camera. Only rates every enabled camera delivers natively at the chosen resolution are offered: RealSense D435 and OAK-D Pro 6, 15 or 30 fps; ZED 2i 15, 30 or 60 fps (also 100 fps at 672 × 376).</HelpTip></span>} hint="Only frame rates every enabled camera supports at this resolution are offered." error={form.formState.errors.fps?.message}><Controller control={form.control} name="fps" render={({ field }) => <Select value={frameRateSupported ? String(field.value) : ""} onValueChange={(value) => field.onChange(Number(value))} disabled={cameraContractLocked || frameRateChoices.length === 0}><SelectTrigger id="fps" aria-label="Frames per second" aria-invalid={!frameRateSupported} aria-describedby={cameraContractLocked ? "camera-contract-lock-reason" : !frameRateSupported ? "fps-unsupported" : undefined}><SelectValue placeholder="Choose a frame rate" /></SelectTrigger><SelectContent>{frameRateChoices.map((rate) => <SelectItem value={String(rate)} key={rate}>{rate} fps</SelectItem>)}</SelectContent></Select>} />{!frameRateSupported && <p id="fps-unsupported" data-testid="fps-unsupported" className="text-[11px] font-medium text-destructive">{frameRateOptions?.length ? `${selectedFps} fps is not supported by every enabled camera at this resolution. Choose ${frameRateOptions.join(", ")} fps.` : "The enabled cameras share no native frame rate at this resolution. Change the resolution or the enabled cameras."}</p>}</Field><Field id="velocity" label={<span className="inline-flex items-center gap-1">{intent === "dataset" ? "Requested robot capture speed (m/s)" : "Robot capture speed limit (m/s)"} <HelpTip label="robot capture speed">{captureSpeedHelp}</HelpTip></span>} hint={captureSpeedHint} error={form.formState.errors.velocity?.message}><Input id="velocity" type="number" min={minimumCaptureSpeedMps} max={maximumCaptureSpeedMps} step="0.01" {...form.register("velocity", { valueAsNumber: true })} /></Field></div>
 
-        {intent === "dataset" && <section className="space-y-3 rounded-lg border bg-muted/15 p-4" data-testid="bop-annotation-mode-setup" aria-labelledby="bop-annotation-mode-heading">
-          <div><h3 id="bop-annotation-mode-heading" className="text-sm font-semibold">BOP annotation outcome <span className="text-destructive">Required</span></h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Choose what this dataset must contain when it is finished. The base image/model export is always produced; choosing ground truth records the intent and does not queue rendering.</p></div>
-          <Controller control={form.control} name="annotation_mode" render={({ field }) => <Select value={field.value} onValueChange={field.onChange}><SelectTrigger id="annotation-mode" aria-label="BOP annotation mode" aria-invalid={!annotationChosen} aria-describedby={annotationChosen ? undefined : "annotation-mode-required"}><SelectValue placeholder="Choose the dataset outcome" /></SelectTrigger><SelectContent><SelectItem value="none">Base BOP dataset only — no ground truth</SelectItem><SelectItem value="pose">Pose ground truth</SelectItem><SelectItem value="pose_and_masks">Pose ground truth + masks</SelectItem></SelectContent></Select>} />
-          {!annotationChosen && <p id="annotation-mode-required" data-testid="annotation-mode-required" className="text-[11px] font-medium text-destructive">{ANNOTATION_REQUIRED_MESSAGE} Nothing is preselected.</p>}
-        </section>}
 
         {intent === "dataset" && <section className="space-y-3" aria-labelledby="saved-calibration-heading">
           <div><h3 id="saved-calibration-heading" className="text-sm font-semibold">Saved camera calibration <span className="text-destructive">Required</span></h3><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Choose a promoted source for each enabled camera, newest first. Static and robot-mounted cameras may come from different calibration runs; PoseTestBot combines only the assigned profile pairs into one immutable, run-owned snapshot. <Link to="/calibrations" className="font-semibold text-primary-strong underline underline-offset-4">Review all calibrations and their age</Link>.</p></div>
@@ -700,10 +708,10 @@ function RunSetupForContext({ intent, selectedRun }: { intent: WorkflowIntent; s
               ? <div className="flex min-w-0 items-start gap-2 text-xs" role="alert"><TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" /><div><div className="font-semibold text-destructive">The active run’s setup could not be loaded</div><p className="mt-1 text-muted-foreground">{errorMessage(existing.error)} Existing setup may still be present, so saving remains disabled.</p><Button type="button" variant="outline" size="sm" className="mt-2" onClick={() => existing.refetch()} disabled={existing.isFetching}><RefreshCw className={existing.isFetching ? "animate-spin" : undefined} />Retry setup lookup</Button></div></div>
               : !cameraMountingReady
                 ? <p className="text-xs font-medium text-destructive" data-testid="run-mounting-required">Choose Static or Robot-mounted for every enabled camera. PoseTestBot will not assume a mounting.</p>
-                : !annotationChosen
-                  ? <p className="text-xs font-medium text-destructive" data-testid="run-annotation-required">{ANNOTATION_REQUIRED_MESSAGE}</p>
+                : !frameRateSupported
+                  ? <p className="text-xs font-medium text-destructive" data-testid="run-fps-required">Choose a frame rate every enabled camera supports.</p>
                   : null}
-          <Button type="submit" className="sm:ml-auto" disabled={setupControlsDisabled || save.isPending || sensors.isPending || enabledSensors.length === 0 || !calibrationReady || !annotationChosen || intentMismatch}>{setupLookupPending || save.isPending ? <LoaderCircle className="animate-spin" /> : <Save />}{save.isPending ? (hasCalibrationDraft ? "Validating and saving…" : "Saving…") : (hasCalibrationDraft ? "Validate and save setup" : "Save setup")}</Button>
+          <Button type="submit" className="sm:ml-auto" disabled={setupControlsDisabled || save.isPending || sensors.isPending || enabledSensors.length === 0 || !calibrationReady || !frameRateSupported || intentMismatch}>{setupLookupPending || save.isPending ? <LoaderCircle className="animate-spin" /> : <Save />}{save.isPending ? (hasCalibrationDraft ? "Validating and saving…" : "Saving…") : (hasCalibrationDraft ? "Validate and save setup" : "Save setup")}</Button>
         </div>
       </form></CardContent>
     </Card>

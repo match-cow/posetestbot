@@ -23,7 +23,7 @@ def main() -> None:
         value["template_uuid"],
         placement=value["placement"],
         confirmed=confirmed,
-        operator=value["operator"],
+        operator=value.get("operator"),
     )
     print(
         json.dumps(

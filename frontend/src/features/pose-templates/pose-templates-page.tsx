@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Archive, CheckCircle2, Copy, Download, LoaderCircle, PackageSearch, Plus, RefreshCw, RotateCcw, Save, Search, Sparkles, Trash2, X } from "lucide-react"
 import { Link } from "react-router-dom"
 import { toast } from "sonner"
-import { contourPoints, IsometricMeshPreview, orientationAnalysisQueryKey, orientationThumbnailQueryKey, TemplateFootprintThumbnail, WorkpieceIsometricThumbnail } from "@/components/geometry-previews"
+import { contourPoints, IsometricMeshPreview, orientationAnalysisQueryKey, orientationThumbnailQueryKey, TemplateFootprintThumbnail, TemplatePrintScale, WorkpieceIsometricThumbnail } from "@/components/geometry-previews"
 import { HelpTip } from "@/components/help-tip"
 import { PageHeader } from "@/components/page-header"
 import { ProcessHandoff } from "@/components/process-handoff"
@@ -439,7 +439,7 @@ export function PoseTemplatesPage() {
       {library.isError && <QueryProblem title="Pose-template library unavailable" error={library.error} retry={() => void library.refetch()} />}
       {library.data?.invalid_templates?.map(item => <Card key={item.template_uuid}><CardContent className="flex items-center justify-between gap-4 pt-4"><div><strong>Invalid template {item.template_uuid}</strong><p className="mt-1 text-xs text-destructive">{item.error}</p></div><Button variant="outline" onClick={() => setDeleteConfirmation(item)}><Trash2 />Delete invalid template</Button></CardContent></Card>)}
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{library.data?.templates.map((item) => <Card key={item.template_uuid} data-testid={`pose-template-library-card-${item.template_uuid}`}><CardContent className="space-y-3 p-3">
-        <TemplateFootprintThumbnail bundle={item} />
+        <div><TemplateFootprintThumbnail bundle={item} /><TemplatePrintScale bundle={item} className="mt-1 text-center" /></div>
         <div className="flex items-start justify-between gap-3"><div><div className="font-semibold">{item.display_name}</div><div className="mt-1 text-[10px] text-muted-foreground">{item.instances.length} instance{item.instances.length === 1 ? "" : "s"} · {item.template_uuid.slice(0, 8)}</div></div><StatusBadge status={item.archive.state} tone={item.archive.state === "active" ? "informational" : "neutral"} /></div>
         <div className="flex flex-wrap gap-2">
           <Button asChild size="sm" variant="outline"><a href={`/pose-templates/library/${item.template_uuid}/download/pdf`}><Download />PDF</a></Button>

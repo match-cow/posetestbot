@@ -308,6 +308,19 @@ function TemplateFootprintSvg({ bundle, thumbnail }: { bundle: PoseTemplateBundl
   </>
 }
 
+/** Print-compensation scale stored in an immutable template bundle, e.g. "X 100.0 % · Y 99.6 %". */
+export function templatePrintScaleLabel(bundle: PoseTemplateBundle) {
+  const scale = bundle.print_compensation ?? bundle.configuration?.print_compensation
+  if (!scale || !Number.isFinite(scale.x_scale) || !Number.isFinite(scale.y_scale)) return null
+  return `X ${(scale.x_scale * 100).toFixed(1)} % · Y ${(scale.y_scale * 100).toFixed(1)} %`
+}
+
+export function TemplatePrintScale({ bundle, className }: { bundle: PoseTemplateBundle; className?: string }) {
+  const label = templatePrintScaleLabel(bundle)
+  if (!label) return null
+  return <div className={cn("font-mono text-[10px] text-muted-foreground", className)} data-testid="template-print-scale" title="Print compensation applied to the template PDF">Print scale {label}</div>
+}
+
 export function TemplateFootprintThumbnail({ bundle, className }: { bundle: PoseTemplateBundle; className?: string }) {
   const thumbnail = useTemplateThumbnail(bundle.template_uuid)
   return <div data-testid={`template-thumbnail-${bundle.template_uuid}`} className={cn("surface-grid relative grid h-40 place-items-center overflow-hidden rounded-lg border bg-muted/60 p-3", className)}>

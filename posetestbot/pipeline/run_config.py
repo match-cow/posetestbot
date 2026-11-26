@@ -10,6 +10,7 @@ import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -18,6 +19,7 @@ import fcntl
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.config import (
     DEFAULT_CAPTURE_VELOCITY_M_S,
+    MIN_DATASET_CAPTURE_VELOCITY_M_S,
     RobotProfile,
     robot_profile,
 )
@@ -31,6 +33,7 @@ from posetestbot.robot.reference_frames import (
     POSE_TEMPLATE_BASE_SUNRISE_PATH,
 )
 from posetestbot.sensors.contracts import MountingMode, SensorType
+from posetestbot.sensors.registry import supported_fps_for, validate_sensor_fps
 
 
 SCHEMA_VERSION = "run_config.v4"
@@ -221,6 +224,7 @@ class PoseTestBotRunConfig:
     calibration_profile_selection: Mapping[str, Any] | None = None
     calibration_target: Mapping[str, Any] | None = None
     bop: BopRunConfig = field(default_factory=lambda: BopRunConfig("none"))
+    subrun: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result = {
@@ -251,6 +255,8 @@ class PoseTestBotRunConfig:
         result["pose_template"] = (
             dict(self.pose_template) if self.pose_template is not None else None
         )
+        if self.subrun is not None:
+            result["subrun"] = dict(self.subrun)
         return result
 
 
@@ -626,6 +632,7 @@ def create_run_config(
     calibration_target: Mapping[str, Any] | None = None,
     fixed_transforms: tuple[FixedFrameTransform, ...] = (),
     synchronization: (Mapping[str, Any] | CaptureSynchronizationConfig | None) = None,
+    subrun: Mapping[str, Any] | None = None,
 ) -> PoseTestBotRunConfig:
     run_root_path = Path(run_root)
     if capture_intent not in CAPTURE_INTENTS:
@@ -684,9 +691,56 @@ def create_run_config(
             dict(calibration_target) if calibration_target is not None else None
         ),
         bop=BopRunConfig(annotation_mode=bop_annotation_mode),
+        subrun=dict(subrun) if subrun is not None else None,
     )
     validate_run_config(config.to_dict())
     return config
+
+
+def shared_capture_fps(
+    sensors: tuple[SensorRunConfig, ...], resolution: str
+) -> tuple[int, ...]:
+    """Return the frame rates every enabled sensor delivers at ``resolution``."""
+
+    shared: set[int] | None = None
+    for sensor in sensors:
+        if not sensor.enabled:
+            continue
+        rates = set(supported_fps_for(sensor.sensor_type, resolution))
+        shared = rates if shared is None else shared & rates
+    return tuple(sorted(shared or ()))
+
+
+def validate_new_capture_settings(
+    *,
+    intent: str,
+    resolution: str,
+    fps: int,
+    velocity_m_s: float,
+    sensors: tuple[SensorRunConfig, ...],
+    check_fps: bool = True,
+    check_velocity: bool = True,
+) -> None:
+    """Check operator-chosen capture settings before a setup save.
+
+    The checks apply to new or changed values only. Stored runs stay readable
+    by ``validate_run_config`` even when an earlier setup allowed them.
+    """
+
+    if check_fps:
+        for sensor in sensors:
+            if sensor.enabled:
+                validate_sensor_fps(sensor.sensor_type, resolution, fps)
+    if (
+        check_velocity
+        and intent == "dataset"
+        and velocity_m_s < MIN_DATASET_CAPTURE_VELOCITY_M_S
+    ):
+        raise ValueError(
+            "Object-dataset capture speed must be at least "
+            f"{MIN_DATASET_CAPTURE_VELOCITY_M_S:.2f} m/s; slower motion makes "
+            "the robot jitter"
+        )
 
 
 def fixed_transform_from_mapping(value: Mapping[str, Any]) -> FixedFrameTransform:
@@ -731,6 +785,7 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         "calibration_profile_selection",
         "calibration_target",
         "bop",
+        "subrun",
     }
     unexpected = sorted(set(value) - allowed_top_level)
     if unexpected:
@@ -1228,11 +1283,98 @@ def validate_run_config(value: Mapping[str, Any]) -> None:
         raise ValueError("Calibration capture intent requires dataset_mode=objectless")
     if capture.get("intent") == "calibration" and bop.get("annotation_mode") != "none":
         raise ValueError("Calibration capture intent requires bop.annotation_mode=none")
+    if "subrun" in value:
+        validate_subrun_lineage(
+            value["subrun"],
+            intent=capture.get("intent"),
+            dataset_mode=dataset_mode,
+            run_id=value["run_id"],
+        )
+
+
+SUBRUN_FIELDS = {"parent_run_id", "parent_run_root", "variant", "created_at"}
+MAX_SUBRUN_VARIANT_LENGTH = 240
+
+
+def validate_subrun_lineage(
+    subrun: Any, *, intent: Any, dataset_mode: Any, run_id: Any
+) -> None:
+    """Validate the optional object-dataset subrun lineage block."""
+
+    if not isinstance(subrun, Mapping) or set(subrun) != SUBRUN_FIELDS:
+        raise ValueError(
+            "Run config subrun must contain exactly: " + ", ".join(sorted(SUBRUN_FIELDS))
+        )
+    if intent != "dataset" or dataset_mode != "pose_template":
+        raise ValueError("Run config subrun requires a pose_template dataset run")
+    try:
+        parent_id = str(uuid.UUID(str(subrun["parent_run_id"])))
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("Run config subrun.parent_run_id must be a canonical UUID") from exc
+    if subrun["parent_run_id"] != parent_id or parent_id == run_id:
+        raise ValueError(
+            "Run config subrun.parent_run_id must be another run's canonical UUID"
+        )
+    parent_root = subrun["parent_run_root"]
+    if not isinstance(parent_root, str) or not Path(parent_root).is_absolute():
+        raise ValueError("Run config subrun.parent_run_root must be an absolute path")
+    variant = subrun["variant"]
+    if (
+        not isinstance(variant, str)
+        or not variant.strip()
+        or variant != variant.strip()
+        or len(variant) > MAX_SUBRUN_VARIANT_LENGTH
+        or any(ord(character) < 32 for character in variant)
+    ):
+        raise ValueError(
+            "Run config subrun.variant must be trimmed text of 1-"
+            f"{MAX_SUBRUN_VARIANT_LENGTH} characters without control characters"
+        )
+    created_at = subrun["created_at"]
+    try:
+        if not isinstance(created_at, str):
+            raise ValueError
+        datetime.fromisoformat(created_at)
+    except ValueError as exc:
+        raise ValueError("Run config subrun.created_at must be ISO-8601") from exc
 
 
 def write_run_config(run_root: str | Path, config: PoseTestBotRunConfig) -> Path:
     with run_config_lock(run_root) as root:
         return atomic_write_json(root / RUN_CONFIG, config.to_dict())
+
+
+def record_bop_annotation_mode(run_root: str | Path, annotation_mode: str) -> str:
+    """Record the post-capture ground-truth outcome; return the previous mode.
+
+    Only ``bop.annotation_mode`` changes, so the camera contract and raw
+    capture evidence stay untouched.
+    """
+
+    if annotation_mode not in BOP_ANNOTATION_MODES:
+        raise ValueError(
+            "annotation_mode must be one of: " + ", ".join(sorted(BOP_ANNOTATION_MODES))
+        )
+    run_root_path = Path(run_root)
+    with run_config_lock(run_root_path) as root:
+        config = load_run_config(root / RUN_CONFIG)
+        previous = str(config["bop"]["annotation_mode"])
+        if previous == annotation_mode:
+            return previous
+        config["bop"] = {"annotation_mode": annotation_mode}
+        validate_run_config(config)
+        path = atomic_write_json(root / RUN_CONFIG, config)
+    manifest = load_or_create_run_manifest(run_root_path)
+    upsert_stage(
+        manifest,
+        name="run_config",
+        status="succeeded",
+        artifacts={RUN_CONFIG: path},
+        run_root=run_root_path,
+        message=f"Recorded BOP ground-truth outcome {annotation_mode}.",
+    )
+    write_run_manifest(manifest, run_root_path)
+    return previous
 
 
 def write_run_config_with_manifest(

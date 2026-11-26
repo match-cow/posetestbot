@@ -31,9 +31,14 @@ USER_GUIDE_PAGES = [DOCS_ROOT / "index.md", DOCS_ROOT / "quickstart.md"] + sorte
 # one in the frontend fails this test until the guide is updated as well.
 USER_GUIDE_CONSOLE_LABELS = (
     "Use for this recording",
-    "BOP annotation outcome",
+    "Frames per second",
+    "Ground-truth outcome",
     "Start with a new run folder",
+    "Active calibration",
+    "Open run folders",
+    "Create new run folder",
     "Choose grid",
+    "Not known: the calibration estimates it",
     "Check readiness",
     "Review and start capture",
     "Start recording",
@@ -46,10 +51,13 @@ USER_GUIDE_CONSOLE_LABELS = (
     "Generate pose GT",
     "Generate pose + masks",
     "Review dataset in Cell View",
+    "New subrun from this run",
+    "Create subrun",
     "Add workpiece",
     "Correct model units",
     "Choose orientation",
     "Generate immutable version",
+    "Print scale",
     "Refresh discovery",
     "Start program",
     "Exit idle program",
@@ -60,6 +68,8 @@ USER_GUIDE_CONSOLE_LABELS = (
     "Queue BOP evaluation",
     "Manual BOP19 CSV import",
     "Queue depth evaluation",
+    "Download depth quality CSV",
+    "Along motion",
     "Compare finishes",
 )
 

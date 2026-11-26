@@ -1650,6 +1650,44 @@ def _selected_for_library(run_root: Path) -> dict[str, Any] | None:
     return {**selected, "valid": True, "issues": []}
 
 
+def active_calibration_summary(run_root: str | Path) -> dict[str, Any]:
+    """Cheaply describe the calibration one run uses and the one it publishes.
+
+    ``selected`` is the run-owned reusable-calibration selection (dataset
+    runs), revalidated like the library view. ``published`` is the bundle a
+    calibration run publishes at its root after explicit promotion. Neither
+    scans other runs, so the console header can poll this per active run.
+    """
+
+    destination = _resolve_direct_run(run_root, must_exist=False)
+    published: dict[str, Any] | None = None
+    if (destination / CALIBRATION_PROFILES).exists():
+        try:
+            bundle = _load_bundle(destination)
+            published = {
+                "valid": True,
+                "bundle_sha256": bundle.bundle_sha256,
+                "calibrated_at": _latest_calibrated_at(bundle),
+                "profile_count": len(bundle.profiles),
+                "issues": [],
+            }
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            published = {
+                "valid": False,
+                "issues": [
+                    _issue(
+                        "invalid_calibration_bundle",
+                        _safe_error("Calibration bundle is not usable", exc),
+                    )
+                ],
+            }
+    return {
+        "run_root": destination.as_posix(),
+        "selected": _selected_for_library(destination),
+        "published": published,
+    }
+
+
 def _resolve_calibration_source(
     value: str | Path,
 ) -> tuple[Path, Mapping[str, Any] | None]:

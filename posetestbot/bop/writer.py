@@ -1388,7 +1388,7 @@ def finalize_official_scene_annotations(
     output_root: str | Path,
     exports: list[BopSceneExport],
 ) -> list[BopSceneExport]:
-    """Bind official mask/info outputs to staged pose exports."""
+    """Assemble artifacts and targets for the final staged export validation."""
 
     output_root = Path(output_root)
     finalized: list[BopSceneExport] = []
@@ -1396,11 +1396,14 @@ def finalize_official_scene_annotations(
         if export.annotation_source != "blenderproc":
             raise ValueError("Official BOP masks require BlenderProc pose annotations")
         scene_folder = output_root / export.scene_folder
-        validate_official_scene_annotations(scene_folder)
         scene_gt = _load_json_if_present(scene_folder / "scene_gt.json")
         scene_gt_info = _load_json_if_present(scene_folder / "scene_gt_info.json")
-        assert isinstance(scene_gt, Mapping)
-        assert isinstance(scene_gt_info, Mapping)
+        if not isinstance(scene_gt, Mapping):
+            raise ValueError(f"Missing or invalid scene_gt.json: {scene_folder}")
+        if not isinstance(scene_gt_info, Mapping) or set(scene_gt_info) != set(scene_gt):
+            raise ValueError(
+                f"scene_gt_info.json must exactly match scene_gt image IDs: {scene_folder}"
+            )
         artifacts = dict(export.artifacts)
         artifacts.update(
             {

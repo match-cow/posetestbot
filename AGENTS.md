@@ -148,7 +148,7 @@ arguments must never enter this repository or a browser response.
   `configured`, `connected`, `verified`, and `ready` only for their actual
   contracts.
 - Do not preselect a consequential outcome. A choice that changes what a run
-  produces or what a destructive action keeps (the BOP annotation outcome,
+  produces or what a destructive action keeps (the step-6 ground-truth outcome,
   keeping a calibration when its run is deleted, a measured placement) starts
   blank, shows a visible "required" reason, and disables its action until the
   operator chooses. Auto-select only when exactly one option exists.
@@ -257,6 +257,13 @@ freeze sources and reject changes before atomic publication below
 Only atomically published `complete/` provides reports, exact metrics, numeric
 maps, frame media, research ZIP, and hash manifests. Failed/canceled `.work/`
 trees remain diagnostic evidence, never downloads.
+
+Reference rendering runs contiguous frame slices in parallel BlenderProc
+processes (`depth_render_plan.v2`) and reports `rendered_frames` while
+rendering. Studies publish exact per-frame aggregates in `frame_series.json`
+(robot timing/path progress from hash-frozen `match_robot_ee_poses.json` when
+the GT provenance binds it; otherwise null). `GET /depth/<kind>/<id>/download/csv`
+builds one tidy CSV only from manifest-verified published files.
 
 Depth quality MP4s reuse completed study publications through
 `posetestbot.bop.depth_videos` and `scripts/run_depth_video.py`. Freeze one
@@ -461,8 +468,17 @@ There is no generic stage or sequence registry. Keep these fixed recipes:
   calibrated base BOP export.
 - Calibration: intent-level attempt → operator review → explicit promotion.
 
-Optional GT/mask generation is a separate deliberate dataset step. Do not add
-caller-supplied stage lists or turn Inspect evaluation into orchestration.
+Optional GT/mask generation is a separate deliberate dataset step, chosen
+after capture in Workflow step 6 (setup records `bop.annotation_mode: none`).
+Do not add caller-supplied stage lists or turn Inspect evaluation into
+orchestration.
+
+Object-dataset subruns (`posetestbot.pipeline.subrun`, `POST /runs/subrun`)
+create a new sibling run that replays a captured run's camera setup,
+calibration sources, and pose-template placement, verifying identical bundle
+hashes, and record `run_config.json` `subrun` lineage. They never modify the
+parent, never chain (a subrun's parent is always the original run), and remove
+their partial folder on failure.
 
 ## Validation
 

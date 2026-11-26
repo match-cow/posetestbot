@@ -7,7 +7,10 @@ import argparse
 import json
 from pathlib import Path
 
-from posetestbot.config import DEFAULT_CAPTURE_VELOCITY_M_S
+from posetestbot.config import (
+    DEFAULT_CAPTURE_VELOCITY_M_S,
+    MIN_DATASET_CAPTURE_VELOCITY_M_S,
+)
 from posetestbot.pipeline.run_config import (
     BOP_ANNOTATION_MODES,
     CAPTURE_INTENTS,
@@ -15,6 +18,8 @@ from posetestbot.pipeline.run_config import (
     default_lab_sensors,
     fixed_transform_from_mapping,
     sensor_config_from_token,
+    shared_capture_fps,
+    validate_new_capture_settings,
     write_run_config_with_manifest,
 )
 from posetestbot.sensors.contracts import MountingMode
@@ -36,9 +41,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--annotation-mode",
-        required=True,
+        default="none",
         choices=tuple(sorted(BOP_ANNOTATION_MODES)),
-        help="Explicit BOP annotation capability for eventual dataset export.",
+        help=(
+            "Recorded BOP ground-truth outcome (default none; ground truth is "
+            "normally chosen after capture in Workflow step 6)."
+        ),
     )
     parser.add_argument("--run-name", default=None, help="Human-readable run name.")
     parser.add_argument(
@@ -51,15 +59,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--resolution", default="720p")
-    parser.add_argument("--fps", type=int, default=6)
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=None,
+        help=(
+            "Capture frame rate supported by every enabled sensor (default: 6 "
+            "when shared, otherwise the lowest shared rate)."
+        ),
+    )
     parser.add_argument(
         "--velocity",
         type=float,
-        default=DEFAULT_CAPTURE_VELOCITY_M_S,
+        default=None,
         help=(
-            "Requested capture-motion speed in m/s "
-            f"(default {DEFAULT_CAPTURE_VELOCITY_M_S:g}; execution is capped "
-            "independently)."
+            "Requested capture-motion speed in m/s (default "
+            f"{DEFAULT_CAPTURE_VELOCITY_M_S:g} for calibration, "
+            f"{MIN_DATASET_CAPTURE_VELOCITY_M_S:g} for datasets; execution is "
+            "capped independently)."
         ),
     )
     parser.add_argument(
@@ -108,14 +125,32 @@ def main() -> None:
         if args.sensor
         else default_lab_sensors(mounting_mode=args.mounting_mode)
     )
+    fps = args.fps
+    if fps is None:
+        shared = shared_capture_fps(sensors, args.resolution)
+        fps = 6 if 6 in shared or not shared else shared[0]
+    velocity = args.velocity
+    if velocity is None:
+        velocity = (
+            MIN_DATASET_CAPTURE_VELOCITY_M_S
+            if args.intent == "dataset"
+            else DEFAULT_CAPTURE_VELOCITY_M_S
+        )
+    validate_new_capture_settings(
+        intent=args.intent,
+        resolution=args.resolution,
+        fps=fps,
+        velocity_m_s=velocity,
+        sensors=sensors,
+    )
     config = create_run_config(
         run_root=run_root,
         capture_intent=args.intent,
         bop_annotation_mode=args.annotation_mode,
         run_name=args.run_name,
         resolution=args.resolution,
-        fps=args.fps,
-        velocity_m_s=args.velocity,
+        fps=fps,
+        velocity_m_s=velocity,
         sensors=sensors,
         dataset_mode=args.dataset_mode,
         calibration_profiles=args.calibration_profiles,

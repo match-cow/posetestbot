@@ -9,7 +9,8 @@ and the current page in the middle.
 1. **Sidebar**: all pages, grouped by purpose (see below).
 2. **Active acquisition run**: the run folder you are working on. Every
    workflow and inspection page uses this run. Click it to switch to another
-   run; **Run folders** next to it creates new ones.
+   run. The same menu ends with **Open run folders** and **Create new run
+   folder**.
 3. **Workflow progress** for the active run. Each tile is a step; a check mark
    means it is complete.
 4. **Status cards**: free storage, connected cameras, the robot, and the GPU
@@ -17,6 +18,13 @@ and the current page in the middle.
 5. **Job activity**: background work that is running or recently failed.
 6. **Resume position**: jumps back to the step where you left off.
 7. **Documentation** opens this site. The moon icon switches to dark mode.
+8. **Active calibration**: the calibration the active run uses. For an object
+   dataset run it names the source calibration(s) of the run's own verified
+   snapshot; for a calibration run it shows whether this run has published
+   one. Click it for the bundle hash, the cameras each source covers, and
+   links to **Calibrations** or the Workflow step where the calibration is
+   chosen or published. The menu only shows and links; changing the
+   calibration still happens in Workflow step 1.
 
 ## Pages in the sidebar
 

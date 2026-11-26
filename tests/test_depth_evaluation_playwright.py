@@ -204,6 +204,24 @@ def test_depth_labels_submission_retained_maps_comparison_and_jobs(
             expect(page.get_by_test_id("depth-results")).to_contain_text(
                 "Boundary only"
             )
+            with page.expect_download() as csv_download:
+                page.get_by_role("link", name="Download depth quality CSV").click()
+            assert csv_download.value.suggested_filename.endswith("-depth-quality.csv")
+            csv_path = tmp_path / "depth-quality.csv"
+            csv_download.value.save_as(csv_path)
+            csv_lines = csv_path.read_text().splitlines()
+            assert csv_lines[0].startswith("level,input_id,finish_label")
+            assert any(line.startswith("frame_instance,") for line in csv_lines)
+            page.get_by_role("tab", name="Along motion", exact=True).click()
+            motion = page.get_by_test_id("depth-motion-charts")
+            # No matched robot poses in this fixture: plotted by frame instead.
+            expect(motion.get_by_test_id("depth-motion-fallback")).to_be_visible()
+            error_chart = motion.get_by_test_id("depth-motion-error-chart")
+            expect(error_chart.locator("polyline")).to_have_count(1)
+            expect(error_chart).to_contain_text("RMSE per frame")
+            expect(
+                motion.get_by_test_id("depth-motion-completeness-chart").locator("polyline")
+            ).to_have_count(1)
             with page.expect_download() as download:
                 page.get_by_role("link", name="Download research bundle").click()
             assert download.value.suggested_filename.endswith("-research.zip")
@@ -286,6 +304,20 @@ def test_depth_labels_submission_retained_maps_comparison_and_jobs(
             expect(page.get_by_test_id("depth-results")).to_contain_text(
                 "2 separate run/sensor series"
             )
+            summary = page.get_by_test_id("depth-comparison-summary-table")
+            expect(summary.locator("tbody tr")).to_have_count(2)
+            expect(summary).to_contain_text("matte")
+            expect(summary).to_contain_text("polished")
+            expect(summary.locator("thead")).to_contain_text("RMSE mm")
+            expect(summary.locator("thead")).to_contain_text("Completeness")
+            expect(
+                page.get_by_test_id("depth-comparison-rmse-chart").locator("li")
+            ).to_have_count(2)
+            page.get_by_role("tab", name="Along motion", exact=True).click()
+            expect(
+                page.get_by_test_id("depth-motion-error-chart").locator("polyline")
+            ).to_have_count(2)
+            page.get_by_role("tab", name="Overview", exact=True).click()
             page.get_by_role("tab", name="Frames", exact=True).click()
             page.get_by_test_id("depth-frame-inspection").scroll_into_view_if_needed()
             expect(

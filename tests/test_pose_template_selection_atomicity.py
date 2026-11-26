@@ -596,3 +596,19 @@ def test_other_run_config_promoters_use_the_shared_per_run_lock(
         assert not holder.is_alive()
         assert not caller.is_alive()
         assert errors == []
+
+
+def test_operator_name_is_optional_selection_provenance(tmp_path: Path) -> None:
+    run, library, _first, second = _selection_fixture(tmp_path)
+
+    selected = select_pose_template(
+        run,
+        second["template_uuid"],
+        placement={"matrix": np.eye(4).tolist()},
+        confirmed=True,
+        operator="   ",
+        library_root=library,
+    )
+
+    assert selected["operator"] is None
+    assert load_pose_template_selection(run)["operator"] is None

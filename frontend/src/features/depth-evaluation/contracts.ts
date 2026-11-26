@@ -61,7 +61,7 @@ export interface DepthFrame {
 export interface DepthRecord {
   id: string; created_at: string; state: string; report_available: boolean; job_id?: string
   submission?: DepthSubmission | DepthComparisonSubmission; inputs?: DepthInput[]
-  progress: { state: string; completed_frames?: number; total_frames?: number; error?: string }
+  progress: { state: string; completed_frames?: number; rendered_frames?: number; total_frames?: number; error?: string }
 }
 export interface DepthHistory { schema_version: "depth_history.v1"; records: DepthRecord[]; total: number; offset: number; limit: number }
 interface ReportBase {
@@ -78,6 +78,8 @@ export interface DepthEvaluationReport extends ReportBase {
 export interface DepthComparisonReport extends ReportBase {
   schema_version: "depth_comparison_report.v1"; kind: "comparison"
   inputs: (DepthInput & { camera_projections?: DepthCameraProjection[] })[]; bins: DepthRow[]
+  /** Each input's own aggregates and bins; absent in comparisons published before they existed. */
+  summary?: DepthRow[]; series_bins?: DepthRow[]
   series: { input_id: string; evaluation_id: string; run_root: string; finish_label: string; sensor_name: string }[]
   coverage: {
     input_id: string; evaluation_id: string; run_root: string; finish_label: string; sensor_name: string
@@ -111,4 +113,19 @@ export interface DepthVideoChoices {
   encoder: { available: boolean; reason: string | null }
   series: DepthVideoSeries[]; records: DepthVideoRecord[]
   total: number; offset: number; limit: number
+}
+
+export interface DepthFrameSeriesRow extends DepthMetrics {
+  level: "frame" | "frame_geometry"
+  frame_key: string; ordinal: number; scene_id: number; im_id: number
+  sensor_name: string; canonical_sha256: string; region: string
+  input_id?: string; finish_label?: string
+  robot_timestamp_ns: number | null; t_motion_s: number | null
+  path_mm: number | null; path_fraction: number | null
+}
+export interface DepthFrameSeries {
+  schema_version: "depth_frame_series.v1"; id: string
+  available: boolean; reason?: string; motion_available?: boolean
+  inputs_without_series?: string[]
+  rows: DepthFrameSeriesRow[]
 }

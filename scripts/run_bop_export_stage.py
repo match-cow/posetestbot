@@ -8,6 +8,7 @@ import json
 import shutil
 import uuid
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable, Mapping
 
 import cv2
@@ -337,6 +338,7 @@ def _export(args, run_root, input_folder, output_folder, calibration_profiles_pa
     staging_folder = output_folder.with_name(
         f".{output_folder.name}.{uuid.uuid4().hex}.tmp"
     )
+    staging_started = perf_counter()
     try:
         sweep_staging(output_folder.parent, output_folder.name, "tmp")
         annotation_mode = resolve_annotation_mode(
@@ -513,6 +515,10 @@ def _export(args, run_root, input_folder, output_folder, calibration_profiles_pa
                 if export.annotation_source == "blenderproc"
             ],
         }
+        print(
+            f"BOP export staging took {perf_counter() - staging_started:.1f} s.",
+            flush=True,
+        )
         annotation_provenance: dict[str, object] = {}
         if annotation_mode == "pose":
             annotation_provenance = {
@@ -526,11 +532,16 @@ def _export(args, run_root, input_folder, output_folder, calibration_profiles_pa
                 raise ValueError(
                     "Official BOP mask generation requires exported object models"
                 )
+            mask_started = perf_counter()
             exports, mask_generation_provenance = complete_official_mask_annotations(
                 staging_folder,
                 exports,
                 object_models,
                 split=args.split,
+            )
+            print(
+                f"BOP mask generation took {perf_counter() - mask_started:.1f} s.",
+                flush=True,
             )
             annotation_provenance = {
                 "schema_version": "posetestbot_bop_gt_generation.v1",
@@ -572,11 +583,16 @@ def _export(args, run_root, input_folder, output_folder, calibration_profiles_pa
             dataset_name=run_root.name,
             generated_at=utc_now_iso(),
         )
+        validation_started = perf_counter()
         validation = validate_bop_dataset(
             staging_folder,
             exports,
             object_models=object_models,
             targets_path=targets_path,
+        )
+        print(
+            f"BOP export validation took {perf_counter() - validation_started:.1f} s.",
+            flush=True,
         )
         exported_profile_ids = {
             export.calibration_profile_id

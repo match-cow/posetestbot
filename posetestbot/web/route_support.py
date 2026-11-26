@@ -15,6 +15,7 @@ from posetestbot.calibration.profile_library import (
 )
 from posetestbot.config import (
     DEFAULT_CAPTURE_VELOCITY_M_S,
+    MIN_DATASET_CAPTURE_VELOCITY_M_S,
     MANUAL_TEST_COMMAND_VELOCITY_M_S,
     robot_profile,
 )
@@ -47,6 +48,7 @@ from posetestbot.pipeline.run_config import (
     load_run_config_for_run_root,
     run_config_lock,
     sensor_configs_from_values,
+    validate_new_capture_settings,
     write_run_config_with_manifest,
 )
 from posetestbot.robot.status import collect_robot_status
@@ -156,10 +158,17 @@ def _run_config_from_payload(data: dict[str, Any]):
     intent = data.get("intent")
     if intent not in CAPTURE_INTENTS:
         raise ValueError("intent is required and must be calibration or dataset")
-    annotation_mode = data.get("annotation_mode")
+    # Ground truth is chosen after capture (Workflow step 6). Setup saves keep
+    # the run's recorded outcome and start new runs with the base export only.
+    annotation_mode = data.get(
+        "annotation_mode",
+        existing["bop"]["annotation_mode"] if existing is not None else "none",
+    )
+    if intent == "calibration" and "annotation_mode" not in data:
+        annotation_mode = "none"
     if annotation_mode not in BOP_ANNOTATION_MODES:
         raise ValueError(
-            "annotation_mode is required and must be one of: "
+            "annotation_mode must be one of: "
             + ", ".join(sorted(BOP_ANNOTATION_MODES))
         )
 
@@ -254,11 +263,33 @@ def _run_config_from_payload(data: dict[str, Any]):
         fixed_transform_from_mapping(item)
         for item in frames.get("fixed_transforms", [])
     )
+    default_velocity = (
+        MIN_DATASET_CAPTURE_VELOCITY_M_S
+        if intent == "dataset"
+        else DEFAULT_CAPTURE_VELOCITY_M_S
+    )
     velocity = float(
         data.get(
             "velocity_m_s",
-            existing_capture.get("velocity_m_s", DEFAULT_CAPTURE_VELOCITY_M_S),
+            existing_capture.get("velocity_m_s", default_velocity),
         )
+    )
+    # Validate operator-chosen capture settings when they are new or changed so
+    # an earlier saved run can still be re-saved without touching them.
+    validate_new_capture_settings(
+        intent=intent,
+        resolution=resolution,
+        fps=fps,
+        velocity_m_s=velocity,
+        sensors=sensors,
+        check_fps=existing is None
+        or fps != existing_capture.get("fps")
+        or resolution != existing_capture.get("resolution")
+        or _capture_sensor_contract(existing_capture["sensors"])
+        != _capture_sensor_contract(sensors),
+        check_velocity=existing is None
+        or velocity != existing_capture.get("velocity_m_s")
+        or intent != existing_capture.get("intent"),
     )
     return create_run_config(
         run_root=run_root,
@@ -282,6 +313,8 @@ def _run_config_from_payload(data: dict[str, Any]):
         ),
         fixed_transforms=fixed_transforms,
         synchronization=synchronization,
+        # Subrun lineage is fixed at creation; setup saves keep it.
+        subrun=existing.get("subrun") if existing is not None else None,
     )
 
 

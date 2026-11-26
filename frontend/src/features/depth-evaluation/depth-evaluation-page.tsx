@@ -27,6 +27,28 @@ function RecordState({ record }: { record: DepthRecord }) {
   </span>
 }
 
+const STAGE_LABELS: Record<string, string> = {
+  queued: "Queued",
+  validating: "Validating frozen inputs",
+  rendering: "Rendering reference depth",
+  measuring: "Measuring depth quality",
+  reporting: "Writing report",
+}
+
+/** Live stage and per-stage frame counter: rendering and measuring each count to the total. */
+function RecordProgress({ record }: { record: DepthRecord }) {
+  const progress = record.progress
+  const total = progress.total_frames
+  if (record.report_available || ["failed", "canceled", "invalid", "abandoned"].includes(record.state)) return null
+  const done = progress.state === "rendering" ? progress.rendered_frames ?? 0 : progress.completed_frames ?? 0
+  const counted = total != null && ["rendering", "measuring", "reporting"].includes(progress.state)
+  return <div className="space-y-1 px-3 pb-2" data-testid="depth-record-progress">
+    <p className="text-[10px] font-medium text-foreground">{STAGE_LABELS[progress.state] ?? progress.state}</p>
+    {counted && <><p className="text-[10px] text-muted-foreground">{done.toLocaleString()} / {total.toLocaleString()} frames {progress.state === "rendering" ? "rendered" : "measured"}</p>
+    <progress className="h-1.5 w-full accent-primary" max={total || 1} value={done} aria-label={`${STAGE_LABELS[progress.state] ?? progress.state} progress`} /></>}
+  </div>
+}
+
 function DepthRunPage({ run }: { run: string }) {
   const { runs } = useOperator()
   const cache = useQueryClient()
@@ -103,7 +125,7 @@ function DepthRunPage({ run }: { run: string }) {
           {history.isError && <QueryProblem title="Study history unavailable" error={history.error} retry={() => void history.refetch()} />}{history.isPending && <p role="status" className="text-xs text-muted-foreground">Loading studies…</p>}{history.data?.records.length === 0 && <p className="py-3 text-xs text-muted-foreground">{search ? "No matching studies." : "No studies yet. Create an evaluation to get started."}</p>}
           <div className="space-y-2">{history.data?.records.map(r => <div key={r.id} className={cn("overflow-hidden rounded-lg border", result?.id === r.id && "border-primary/50 bg-primary/5")}>
             <button className="w-full p-3 text-left transition-colors hover:bg-muted/40 disabled:cursor-default disabled:hover:bg-transparent" disabled={!r.report_available} aria-label={`Open retained ${historyKind === "evaluations" ? "evaluation" : "comparison"} ${finish(r)} ${r.id}`} aria-pressed={result?.id === r.id} onClick={() => setSelected({ kind: historyKind, id: r.id })}><div className="flex items-center justify-between gap-2"><strong className="truncate text-xs">{finish(r)}</strong>{r.report_available && <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />}</div><div className="my-2"><RecordState record={r} /></div><p className="text-[10px] text-muted-foreground">{new Date(r.created_at).toLocaleString()}</p><p className="mt-1 truncate font-mono text-[9px] text-muted-foreground" title={r.id}>{r.id}</p></button>
-            {r.progress.error && <p role="alert" className="break-words px-3 pb-2 text-[11px] text-warning-foreground">{r.progress.error}</p>}{!r.report_available && r.progress.total_frames != null && <p className="px-3 pb-2 text-[10px] text-muted-foreground">{r.progress.completed_frames ?? 0} / {r.progress.total_frames} frames</p>}{r.job_id && <Link className="block border-t px-3 py-2 text-[10px] text-muted-foreground underline" to={query("/jobs", { search: r.job_id })}>Job progress & logs</Link>}
+            {r.progress.error && <p role="alert" className="break-words px-3 pb-2 text-[11px] text-warning-foreground">{r.progress.error}</p>}<RecordProgress record={r} />{r.job_id && <Link className="block border-t px-3 py-2 text-[10px] text-muted-foreground underline" to={query("/jobs", { search: r.job_id })}>Job progress & logs</Link>}
           </div>)}</div>
           <div className="flex items-center justify-between gap-2"><Button size="sm" variant="outline" disabled={!historyOffset} aria-label={`Previous ${historyKind}`} onClick={() => setHistoryOffset(Math.max(0, historyOffset - 12))}>Previous</Button><span className="text-[10px] text-muted-foreground">{history.data?.total ?? 0} studies</span><Button size="sm" variant="outline" disabled={!history.data || historyOffset + 12 >= history.data.total} aria-label={`Next ${historyKind}`} onClick={() => setHistoryOffset(historyOffset + 12)}>Next</Button></div>
         </CardContent></Card>
@@ -156,7 +178,7 @@ function DepthRunPage({ run }: { run: string }) {
 
 /** Listing re-hashes every study on the server, so poll only while one is still running. */
 function pollWhileActive(query: { state: { data?: DepthHistory } }) {
-  return query.state.data?.records.some((record) => !record.report_available && !["failed", "canceled", "invalid", "abandoned"].includes(record.state)) ? 3000 : false
+  return query.state.data?.records.some((record) => !record.report_available && !["failed", "canceled", "invalid", "abandoned"].includes(record.state)) ? 2000 : false
 }
 
 export function DepthEvaluationPage() {

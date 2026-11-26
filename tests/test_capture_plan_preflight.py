@@ -101,6 +101,7 @@ def test_capture_plan_preflight_reports_ok_for_mocked_connected_sensors(
     assert checks["real_robot_permission"]["status"] == "ok"
     assert checks["sensor_adapter:realsense_d435:123"]["status"] == "ok"
     assert checks["sensor_adapter:oak_d_pro:auto"]["status"] == "ok"
+    assert checks["sensor_fps:realsense_d435:123"]["status"] == "ok"
     assert checks["sensor_output_folder:realsense_123"]["status"] == "ok"
     assert checks["sensor:realsense_d435:123"]["status"] == "ok"
     assert checks["sensor:oak_d_pro:auto"]["status"] == "ok"
@@ -466,3 +467,28 @@ def test_capture_plan_preflight_accepts_persisted_plan_build_options(
     assert checks["capture_plan_current_config"]["status"] == "ok"
     assert report["capture_plan"]["capture"]["max_frames"] == 12
     assert report["capture_plan"]["capture"]["warmup_frames"] == 30
+
+
+def test_capture_plan_preflight_rejects_a_frame_rate_the_sensor_cannot_deliver(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run-bad-fps"
+    config = create_run_config(
+        capture_intent="dataset",
+        bop_annotation_mode="none",
+        run_root=run_root,
+        sensors=(sensor_config_from_token("zed_2i:auto:static:Cell ZED"),),
+        fps=6,
+    )
+    write_run_config(run_root, config)
+
+    report = build_capture_plan_preflight(
+        run_root,
+        include_sensor_status=False,
+        write_plan_if_missing=False,
+    )
+
+    assert report["overall_status"] == "error"
+    check = {item["name"]: item for item in report["checks"]}["sensor_fps:zed_2i:auto"]
+    assert check["status"] == "error"
+    assert check["details"]["supported_fps"] == [15, 30, 60]

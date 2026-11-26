@@ -128,6 +128,10 @@ class ComparisonReport(ReportBase):
     series: list[dict[str, Any]]
     bins: list[AggregateRow]
     coverage: list[dict[str, Any]]
+    # Every input's own run/sensor/geometry/instance aggregates and bins, so
+    # errors and completeness stay visible without any common bin.
+    summary: list[AggregateRow] = Field(default_factory=list)
+    series_bins: list[AggregateRow] = Field(default_factory=list)
 
 
 def regions(instance_ids: np.ndarray, instance_id: int) -> dict[str, np.ndarray]:

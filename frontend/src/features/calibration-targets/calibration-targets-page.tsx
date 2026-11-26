@@ -86,9 +86,15 @@ type SelectionResponse = {
 }
 
 const placementLabels = {
-  unknown: "Fixed target; estimate grid → PoseTemplateBase",
-  template_base_identity: "Grid aligned to PoseTemplateBase",
-  posegridgen_board_to_base: "Use PoseGridGen grid → PoseTemplateBase pose",
+  unknown: "Not known: the calibration estimates it",
+  template_base_identity: "Exactly at the template base origin",
+  posegridgen_board_to_base: "Use the offset saved in the PoseGridGen file",
+}
+
+const placementDescriptions: Record<keyof typeof placementLabels, string> = {
+  unknown: "Nothing is stored. The calibration solve estimates where the grid sits on the PoseTemplateBase from the recorded images.",
+  template_base_identity: "The grid's origin and axes coincide with PoseTemplateBase (identity transform), e.g. the grid is printed as the template base itself.",
+  posegridgen_board_to_base: "Applies the board → base offset that PoseGridGen recorded when this grid layout was generated.",
 }
 
 type RunConfigResponse = {
@@ -404,11 +410,15 @@ function TargetSelectionDialog({
       {arrangement.status === "ready" && arrangement.mountingFrame === "robot_flange" ? <div data-testid="static-target-mounting" className="rounded-lg border border-primary/30 bg-primary/5 p-4 text-xs">
         <div className="font-semibold">Moving calibration instrument: robot-mounted grid</div>
         <p className="mt-1 leading-relaxed text-muted-foreground">Attach the grid rigidly to the moving robot flange. Robot poses in <code>{POSE_TEMPLATE_BASE_SUNRISE_PATH}</code> provide many observations of the fixed cameras. PoseTestBot jointly estimates grid → robot_flange as supporting evidence; no measured attachment is required, and the reusable output remains camera → PoseTemplateBase rather than a hand-tracking calibration.</p>
-      </div> : arrangement.status === "ready" ? <Field label="Grid placement relative to PoseTemplateBase">
+      </div> : arrangement.status === "ready" ? <Field label="Where is the grid relative to the template base?">
         <Select disabled={placementLocked} value={placement} onValueChange={(value: keyof typeof placementLabels) => onPlacementChange(value)}>
-          <SelectTrigger aria-label="Target placement"><SelectValue placeholder="Choose placement" /></SelectTrigger>
+          <SelectTrigger aria-label="Target placement" aria-describedby="target-placement-help"><SelectValue placeholder="Choose placement" /></SelectTrigger>
           <SelectContent>{Object.entries(placementLabels).map(([value, label]) => <SelectItem value={value} key={value}>{label}</SelectItem>)}</SelectContent>
         </Select>
+        <div id="target-placement-help" className="space-y-1.5 rounded-md border bg-muted/20 p-3 text-xs" data-testid="target-placement-help">
+          <dl className="space-y-1.5">{(Object.keys(placementLabels) as Array<keyof typeof placementLabels>).map((value) => <div key={value} className={value === placement ? "font-medium text-foreground" : "text-muted-foreground"}><dt className="inline font-semibold">{placementLabels[value]}:</dt> <dd className="inline">{placementDescriptions[value]}</dd></div>)}</dl>
+          <p className="border-t pt-1.5 text-muted-foreground">Used for Cell View placement only; the calibration solve always estimates the grid pose itself.</p>
+        </div>
       </Field> : <CalibrationArrangementCard arrangement={arrangement} editHref="/workflow/calibration?step=configure" testId="calibration-target-dialog-arrangement" />}
       {arrangement.status === "ready" && arrangement.mountingFrame === "template_base" && !placement && <p className="text-xs text-destructive">Choose the recorded grid placement before selecting this target.</p>}
       {placementLocked && <p className="rounded border border-warning/40 bg-warning/5 p-3 text-xs text-muted-foreground">Placement is fixed only for this completed run. Start a fresh run after moving cameras or the board, then select this same saved target with the placement used by the new recording.</p>}

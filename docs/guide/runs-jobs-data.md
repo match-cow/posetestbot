@@ -8,7 +8,8 @@ robot poses, processed data, the BOP export, and evaluations.
 
 [![Run folders page](../images/console/run-folders.webp){ loading=lazy }](../images/console/run-folders.webp)
 
-On **Storage → Run folders** (or **Run folders** in the top bar) you can:
+On **Storage → Run folders** (or **Open run folders** in the top-bar
+**Active acquisition run** menu) you can:
 
 - **Start another acquisition**: choose a storage root and a folder name. The
   new folder becomes the active run.

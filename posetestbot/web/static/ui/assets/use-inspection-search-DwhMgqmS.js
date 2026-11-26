@@ -1,1 +1,0 @@
-import{m as n,r as t,Z as p}from"./index-D_gtCljM.js";function h(){const{selectedRunEpoch:e}=n(),[c,o]=t.useState(e),[u,a]=p(),r=t.useMemo(()=>new URLSearchParams,[]),s=e!==c;return t.useEffect(()=>{s&&(a(r,{replace:!0}),queueMicrotask(()=>o(e)))},[r,e,a,s]),{params:s?r:u,setParams:a,switched:s}}export{h as u};

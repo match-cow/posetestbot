@@ -79,6 +79,7 @@ def _run_record(path: Path) -> dict[str, Any]:
     run_id = None
     intent = None
     annotation_mode = None
+    subrun = None
     config_valid = False
     config_error = None
     try:
@@ -89,6 +90,12 @@ def _run_record(path: Path) -> dict[str, Any]:
         run_id = str(config["run_id"])
         intent = str(config["capture"]["intent"])
         annotation_mode = str(config["bop"]["annotation_mode"])
+        if config.get("subrun") is not None:
+            subrun = {
+                "parent_run_id": config["subrun"]["parent_run_id"],
+                "parent_run_root": config["subrun"]["parent_run_root"],
+                "variant": config["subrun"]["variant"],
+            }
         config_valid = True
     except (FileNotFoundError, OSError, ValueError) as exc:
         config_error = str(exc)
@@ -101,6 +108,7 @@ def _run_record(path: Path) -> dict[str, Any]:
         "run_id": run_id,
         "intent": intent,
         "annotation_mode": annotation_mode,
+        "subrun": subrun,
         "config_valid": config_valid,
         "config_error": config_error,
         "modified_at": modified_at,
