@@ -62,16 +62,18 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
   const setup = useQuery({
     queryKey: ["bop-annotations", "setup", runRoot],
     queryFn: () => api<BopAnnotationSetup>(query("/bop/annotations/setup", { run_root: runRoot })),
-    refetchInterval: active ? 1_000 : false,
   })
-  const configuredMode = setup.data?.configured_mode ?? "none"
-  const selectedMode: BopAnnotationMode = configuredMode === "pose" ? "pose" : "pose_and_masks"
-  const annotationRequested = configuredMode !== "none"
-  const masksRequested = configuredMode === "pose_and_masks"
+  // Optional and consequential: nothing is preselected; the operator chooses
+  // pose-only or pose + masks after the base export exists.
+  const [modeChoice, setModeChoice] = useState<{ runRoot: string; mode: BopAnnotationMode } | null>(null)
+  const chosenMode: BopAnnotationMode | null = modeChoice?.runRoot === runRoot ? modeChoice.mode : null
+  const selectedMode: BopAnnotationMode = chosenMode ?? "pose_and_masks"
+  const annotationRequested = chosenMode !== null
+  const masksRequested = chosenMode === "pose_and_masks"
   const generate = useMutation({
-    mutationFn: () => api<{ job_id: string; job: Job }>("/bop/annotations", {
+    mutationFn: (mode: BopAnnotationMode) => api<{ job_id: string; job: Job }>("/bop/annotations", {
       method: "POST",
-      body: JSON.stringify({ run_root: runRoot, mode: selectedMode }),
+      body: JSON.stringify({ run_root: runRoot, mode }),
     }),
     onSuccess: (data) => {
       setSubmittedJob({ runRoot, id: data.job_id })
@@ -79,7 +81,6 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
         description: `Job ${data.job_id} continues after navigation; status and output are available in Jobs.`,
       })
       void queryClient.invalidateQueries({ queryKey: ["jobs"] })
-      void queryClient.invalidateQueries({ queryKey: ["bop-annotations", "setup", runRoot] })
     },
     onError: (error) => toast.error("Ground-truth generation was not queued", {
       description: errorMessage(error),
@@ -97,7 +98,7 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
   const selectedReadiness = setup.data?.readiness_by_mode[selectedMode]
   const queueBlockers = Array.from(new Set([
     ...(!bopExportComplete ? ["Complete the base BOP image/model export before generating annotations."] : []),
-    ...(!annotationRequested ? ["Run setup records base BOP export only; change the annotation outcome in Workflow step 1 to request ground truth."] : []),
+    ...(!annotationRequested ? ["Choose pose ground truth or pose ground truth + masks above. This step is optional; the base BOP dataset is already complete without it."] : []),
     ...(annotationRequested && selectedReadiness && !selectedReadiness.ready && selectedReadiness.blockers.length === 0 ? [`${modeLabel(selectedMode)} is not ready for this run.`] : []),
     ...(annotationRequested ? selectedReadiness?.blockers.map((issue) => issue.message) ?? [] : []),
     ...(active ? ["Wait for the active ground-truth job to finish or cancel it from Jobs."] : []),
@@ -113,9 +114,9 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
     <CardHeader>
       <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <div>
-          <CardTitle className="text-base">Generate the configured ground truth</CardTitle>
+          <CardTitle className="text-base">Add ground truth (optional)</CardTitle>
           <CardDescription className="mt-1 max-w-4xl leading-relaxed">
-            Each model-to-camera pose is derived through the immutable object model, pose template, measured placement, robot pose, and selected camera calibration. The outcome below was chosen in step 1.
+            The base BOP image/model export is complete without this step. Optionally add BOP ground truth: each model-to-camera pose is derived through the immutable object model, pose template, measured placement, robot pose, and selected camera calibration.
           </CardDescription>
         </div>
         {setup.data && <div className="grid shrink-0 grid-cols-3 gap-3 rounded-lg border bg-muted/20 px-4 py-3 text-center text-[10px]">
@@ -150,14 +151,14 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
                 <div className="flex flex-wrap items-center gap-2 text-sm font-semibold">
                   Pinned rendering toolkit
                   <StatusBadge status={setup.data.toolkit.available ? "ready" : masksRequested ? "blocked" : "not_required"} tone={setup.data.toolkit.available ? "success" : masksRequested ? "destructive" : "neutral"}>
-                    {setup.data.toolkit.available ? "available" : masksRequested ? "required for masks" : "not required for this run"}
+                    {setup.data.toolkit.available ? "available" : masksRequested ? "required for masks" : "needed for masks only"}
                   </StatusBadge>
                 </div>
                 <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                   {setup.data.toolkit.available
                     ? `Revision ${setup.data.toolkit.revision ?? "unreported"}${setup.data.toolkit.renderer ? ` · ${setup.data.toolkit.renderer} renderer` : ""}.`
                     : !masksRequested
-                      ? "Only masks and visibility evidence need the rendering toolkit; this run did not ask for them."
+                      ? "Only masks and visibility evidence need the rendering toolkit."
                       : setup.data.toolkit.reason ?? "Install the pinned rendering toolkit before generating masks and visibility evidence."}
                 </p>
                 {!setup.data.toolkit.available && masksRequested && setup.data.toolkit.install_command && <code className="mt-2 block select-all rounded bg-background px-2 py-1.5 text-[10px]">{setup.data.toolkit.install_command}</code>}
@@ -165,14 +166,27 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
             </div>
             <div className="flex justify-end"><Button type="button" variant="outline" size="sm" onClick={refresh}><RefreshCw aria-hidden="true" />Refresh readiness</Button></div>
 
-            <div className="space-y-2 rounded-lg border bg-muted/20 p-4 text-xs" data-testid="configured-bop-annotation">
-              <div className="flex items-center gap-2 font-semibold">
-                {masksRequested ? <ImageIcon className="size-4" /> : <FileJson className="size-4" />}
-                {masksRequested ? "Pose ground truth + masks" : annotationRequested ? "Pose ground truth" : "Base BOP dataset only"}
+            <fieldset className="space-y-2 rounded-lg border bg-muted/20 p-4 text-xs" data-testid="bop-annotation-choice">
+              <legend className="px-1 text-sm font-semibold">Ground-truth outcome {!annotationRequested && <span className="font-normal text-muted-foreground">— optional, choose one to enable generation</span>}</legend>
+              <div className="grid gap-2 md:grid-cols-2" role="radiogroup" aria-label="Ground-truth outcome">
+                {([
+                  { mode: "pose" as const, icon: <FileJson className="size-4" />, title: "Pose ground truth", text: "Adds camera-relative object poses in scene_gt.json. BOP Evaluation additionally needs masks." },
+                  { mode: "pose_and_masks" as const, icon: <ImageIcon className="size-4" />, title: "Pose ground truth + masks", text: "Adds poses, full and visible masks, bounding boxes, and the visibility evidence BOP Evaluation needs." },
+                ]).map((option) => <button
+                  type="button"
+                  role="radio"
+                  key={option.mode}
+                  aria-checked={chosenMode === option.mode}
+                  disabled={active || generate.isPending}
+                  onClick={() => setModeChoice({ runRoot, mode: option.mode })}
+                  className={cn("rounded-md border bg-background/70 p-3 text-left transition-colors disabled:opacity-60", chosenMode === option.mode ? "border-primary ring-2 ring-primary/25" : "hover:border-foreground/25")}
+                >
+                  <div className="flex items-center gap-2 font-semibold">{option.icon}{option.title}</div>
+                  <p className="mt-1 text-muted-foreground">{option.text}</p>
+                </button>)}
               </div>
-              <p className="text-muted-foreground">{masksRequested ? "Includes camera-relative poses, full and visible masks, bounding boxes, and BOP Evaluation visibility evidence." : annotationRequested ? "Adds camera-relative poses in scene_gt.json. BOP Evaluation requires pose ground truth + masks." : "The verified image and model export completes the configured outcome."}</p>
-              <Link to="/workflow/dataset?step=configure" className="font-medium text-primary-strong underline underline-offset-4">Change in step 1</Link>
-            </div>
+              {setup.data.configured_mode && setup.data.configured_mode !== "none" && <p className="text-muted-foreground">Last recorded for this run: {setup.data.configured_mode === "pose" ? "Pose ground truth" : "Pose ground truth + masks"}.</p>}
+            </fieldset>
 
             {annotationRequested && (selectedReadiness?.blockers.length ?? 0) > 0 && <div role="alert" data-testid="bop-annotation-blockers" className="rounded-lg border border-warning/40 bg-warning/5 p-4">
               <div className="flex items-center gap-2 text-xs font-semibold text-warning-foreground"><AlertTriangle aria-hidden="true" className="size-4" />Ground truth cannot be queued yet</div>
@@ -237,9 +251,9 @@ export function BopGroundTruthGeneration({ runRoot, bopExportComplete }: BopGrou
             </div>}
             <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
               <p className="max-w-3xl text-xs leading-relaxed text-muted-foreground">This creates derived BOP annotations only. It never changes raw RGB-D frames, robot poses, the selected template, or calibration snapshots. The background job continues after navigation and remains recoverable in <Link className="font-medium text-primary-strong underline-offset-4 hover:underline" to="/jobs">Jobs</Link>.</p>
-              <Button type="button" onClick={() => generate.mutate()} disabled={!annotationRequested || queueBlockers.length > 0 || generate.isPending || active}>
+              <Button type="button" onClick={() => { if (chosenMode) generate.mutate(chosenMode) }} disabled={!annotationRequested || queueBlockers.length > 0 || generate.isPending || active}>
                 {generate.isPending || active ? <LoaderCircle aria-hidden="true" className="animate-spin" /> : <Play aria-hidden="true" />}
-                {generate.isPending ? "Queueing…" : active ? "Generating…" : selectedMode === "pose" ? "Generate pose GT" : "Generate pose + masks"}
+                {generate.isPending ? "Queueing…" : active ? "Generating…" : !chosenMode ? "Generate ground truth" : selectedMode === "pose" ? "Generate pose GT" : "Generate pose + masks"}
               </Button>
             </div>
           </>}

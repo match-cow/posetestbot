@@ -41,7 +41,11 @@ Open **Calibration Targets** in the operator console:
    `robot_flange`, while eye-in-hand cameras use `template_base`. Then declare
    the supported placement policy for that frame. The guided static path uses
    `unknown`; the fixed-target path may use `unknown`,
-   `template_base_identity`, or `posegridgen_board_to_base`.
+   `template_base_identity`, or `posegridgen_board_to_base`. The console
+   labels them **Not known: the calibration estimates it**, **Exactly at the
+   template base origin**, and **Use the offset saved in the PoseGridGen
+   file**. The stored placement is consumed only by Cell View; the calibration
+   solve always estimates the grid pose itself.
 
 The simplified **Workflow → Calibration** screen can also select any saved
 bundle directly for an immutable calculation attempt. Camera mounting is saved

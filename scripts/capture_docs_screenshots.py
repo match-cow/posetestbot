@@ -74,6 +74,7 @@ SCREENSHOTS: tuple[Screenshot, ...] = (
             (5, 1048, 846),
             (6, 236, 922),
             (7, 1290, 62),
+            (8, 1045, 28),
         ),
     ),
     Screenshot("workflow-choose", "/workflow/setup", crop=(SIDEBAR_WIDTH, TOP_BAR_HEIGHT, 1600, 720)),

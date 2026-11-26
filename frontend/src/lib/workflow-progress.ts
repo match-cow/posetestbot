@@ -10,9 +10,11 @@ export function workflowStepStatuses(completed: boolean[], annotation?: { config
   const firstIncomplete = completed.findIndex(value => !value)
   const steps: WorkflowProgressStatus[] = completed.map((value, index) => value ? "complete" : index === firstIncomplete ? "current" : "not_started")
   if (annotation) {
-    const mode = annotation.config?.bop.annotation_mode
+    // Ground truth is an optional post-capture addition: verified output of
+    // either mode completes the step; otherwise it is available once the base
+    // export exists.
     const output = annotation.setup?.current_output
-    const done = mode === "none" ? annotation.baseReady : output?.verified && output.mode === mode
+    const done = Boolean(annotation.baseReady && output?.verified && (output.mode === "pose" || output.mode === "pose_and_masks"))
     steps.push(done ? "complete" : annotation.baseReady ? "ready" : "not_started")
   }
   return steps

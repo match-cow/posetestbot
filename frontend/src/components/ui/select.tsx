@@ -31,3 +31,15 @@ export const SelectItem = React.forwardRef<React.ElementRef<typeof SelectPrimiti
   </SelectPrimitive.Item>
 ))
 SelectItem.displayName = SelectPrimitive.Item.displayName
+
+export const SelectGroup = SelectPrimitive.Group
+
+export const SelectLabel = React.forwardRef<React.ElementRef<typeof SelectPrimitive.Label>, React.ComponentPropsWithoutRef<typeof SelectPrimitive.Label>>(({ className, ...props }, ref) => (
+  <SelectPrimitive.Label ref={ref} className={cn("px-2 py-1.5 text-[9px] font-bold uppercase tracking-[0.14em] text-muted-foreground", className)} {...props} />
+))
+SelectLabel.displayName = SelectPrimitive.Label.displayName
+
+export const SelectSeparator = React.forwardRef<React.ElementRef<typeof SelectPrimitive.Separator>, React.ComponentPropsWithoutRef<typeof SelectPrimitive.Separator>>(({ className, ...props }, ref) => (
+  <SelectPrimitive.Separator ref={ref} className={cn("-mx-1 my-1 h-px bg-border", className)} {...props} />
+))
+SelectSeparator.displayName = SelectPrimitive.Separator.displayName

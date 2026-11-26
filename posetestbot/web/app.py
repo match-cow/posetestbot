@@ -27,6 +27,7 @@ from posetestbot.web.routes.overview import overview_bp
 from posetestbot.web.routes.pages import pages_bp
 from posetestbot.web.routes.pose_templates import pose_templates_bp
 from posetestbot.web.routes.run_folders import run_folders_bp
+from posetestbot.web.routes.subruns import subruns_bp
 from posetestbot.web.routes.sensors import sensors_bp
 from posetestbot.web.routes.ui import ui_bp
 from posetestbot.web.routes.workpieces import workpieces_bp
@@ -132,6 +133,7 @@ def create_app(
     app.register_blueprint(overview_bp)
     app.register_blueprint(ui_bp)
     app.register_blueprint(run_folders_bp)
+    app.register_blueprint(subruns_bp)
     _install_preview_poll_log_filter()
     return app
 

@@ -2,9 +2,9 @@
 
 # Complete HTTP route index
 
-This index contains all **154** non-static Flask rules registered by
+This index contains all **159** non-static Flask rules registered by
 `posetestbot.web.app.create_app`, rendered as
-**156** method-specific operations. It is generated from the
+**161** method-specific operations. It is generated from the
 running route map, so aliases remain explicit and every application-declared
 method has its own row. Flask's implicit `HEAD` and `OPTIONS` methods are
 excluded.
@@ -116,6 +116,8 @@ uv run python scripts/generate_http_api_reference.py --check
 | `GET` | `/depth/<kind>` | JSON | Depth history | `depth_evaluation.depth_history` |
 | `GET` | `/depth/<kind>/<record_id>` | JSON | Depth status | `depth_evaluation.depth_status` |
 | `GET` | `/depth/<kind>/<record_id>/download` | ZIP | Depth download | `depth_evaluation.depth_download` |
+| `GET` | `/depth/<kind>/<record_id>/download/csv` | File | Depth download csv | `depth_evaluation.depth_download_csv` |
+| `GET` | `/depth/<kind>/<record_id>/frame-series` | JSON | Depth frame series | `depth_evaluation.depth_frame_series` |
 | `GET` | `/depth/<kind>/<record_id>/frames` | JSON | Depth frames | `depth_evaluation.depth_frames` |
 | `GET` | `/depth/<kind>/<record_id>/frames/<frame_key>` | JSON | Depth frame media | `depth_evaluation.depth_frame_media` |
 | `GET` | `/depth/<kind>/<record_id>/frames/<frame_key>/media/<media_kind>` | PNG / NPZ | Depth frame media | `depth_evaluation.depth_frame_media` |
@@ -159,6 +161,8 @@ uv run python scripts/generate_http_api_reference.py --check
 | `GET` | `/assets/cow_dark.png` | PNG | Serve an operator-console brand asset | `brand_asset` |
 | `GET` | `/assets/cow_favicon.png` | PNG | Serve an operator-console brand asset | `brand_asset` |
 | `GET` | `/assets/cow_light.png` | PNG | Serve an operator-console brand asset | `brand_asset` |
+| `GET` | `/runs/subrun` | JSON | Subrun parent | `subruns.subrun_parent` |
+| `POST` | `/runs/subrun` | JSON | Queue subrun | `subruns.queue_subrun` |
 
 ## Operator-console data
 
@@ -166,6 +170,7 @@ uv run python scripts/generate_http_api_reference.py --check
 | --- | --- | --- | --- | --- |
 | `GET` | `/ui/bootstrap` | JSON | Ui bootstrap | `ui.ui_bootstrap` |
 | `GET` | `/ui/calibrations` | JSON | Calibration library | `calibration_library.calibration_library` |
+| `GET` | `/ui/calibrations/active` | JSON | Active calibration view | `calibration_library.active_calibration_view` |
 | `GET` | `/ui/calibrations/library` | JSON | Calibration library view | `calibration_library.calibration_library_view` |
 | `DELETE` | `/ui/calibrations/library/<bundle_sha256>` | JSON | Delete library calibration | `calibration_library.delete_library_calibration` |
 | `POST` | `/ui/calibrations/library/retain` | JSON | Retain library calibration | `calibration_library.retain_library_calibration` |

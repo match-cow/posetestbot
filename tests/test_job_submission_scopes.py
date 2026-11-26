@@ -12,7 +12,7 @@ EXPECTED_DIRECT_SUBMISSIONS = {
         "robot_commands": "<forwarded>",
     },
     "posetestbot/web/routes/bop_annotations.py": {
-        "queue_bop_annotations": "run",
+        "_submit_annotation_job": "run",
     },
     "posetestbot/web/routes/bop_evaluation.py": {},
     "posetestbot/web/routes/calibration.py": {
@@ -30,6 +30,9 @@ EXPECTED_DIRECT_SUBMISSIONS = {
         "_submit": "<forwarded>",
         "preview": "global",
         "library_delete": "library",
+    },
+    "posetestbot/web/routes/subruns.py": {
+        "queue_subrun": "run",
     },
     "posetestbot/web/routes/run_folders.py": {
         "refresh_run_folder_inventory": "global",

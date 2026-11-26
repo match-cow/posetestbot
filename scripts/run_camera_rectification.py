@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from time import perf_counter
 
 from posetestbot.calibration.intrinsics import load_intrinsic_profile_collection
 from posetestbot.calibration.rectification import rectify_run
@@ -14,7 +15,12 @@ from posetestbot.io.artifacts import (
     CAMERA_RECTIFICATION_REPORT,
     INTRINSIC_CALIBRATION_PROFILES,
 )
-from posetestbot.io.manifest import load_or_create_run_manifest, upsert_stage, write_run_manifest
+from posetestbot.io.manifest import (
+    load_or_create_run_manifest,
+    upsert_stage,
+    write_run_manifest,
+)
+from posetestbot.jobs.cancellation import raise_on_first_cancel_signal
 from posetestbot.pipeline.run_config import load_run_config_for_run_root
 
 
@@ -68,6 +74,7 @@ def main() -> None:
     manifest = load_or_create_run_manifest(run_root)
     upsert_stage(manifest, name="camera_rectification", status="running")
     write_run_manifest(manifest, run_root)
+    started = perf_counter()
     try:
         if _selected_calibration_configured(run_root):
             from posetestbot.calibration.profile_library import (
@@ -113,14 +120,24 @@ def main() -> None:
             run_root=run_root,
         )
         write_run_manifest(manifest, run_root)
-    except Exception as exc:
-        upsert_stage(manifest, name="camera_rectification", status="failed", message=str(exc))
+    except BaseException as exc:
+        upsert_stage(
+            manifest,
+            name="camera_rectification",
+            status="canceled"
+            if isinstance(exc, (KeyboardInterrupt, InterruptedError))
+            else "failed",
+            message=str(exc),
+        )
         write_run_manifest(manifest, run_root)
         raise
+    if not args.json:
+        print(f"RGB-D rectification took {perf_counter() - started:.1f} s.", flush=True)
     print(f"Wrote {report_path}")
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
+    raise_on_first_cancel_signal(KeyboardInterrupt("Derived job canceled"))
     main()

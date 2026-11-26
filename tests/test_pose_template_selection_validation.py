@@ -96,7 +96,7 @@ def test_selection_loader_rejects_tampered_trusted_fields(tmp_path: Path) -> Non
         ),
         (
             "operator type",
-            "operator provenance must be a non-empty string",
+            "operator provenance must be a non-empty string or null",
             lambda value: _set_path(value, ("operator",), ["operator"]),
         ),
         (
@@ -234,15 +234,13 @@ def test_select_pose_template_rejects_non_boolean_confirmation_at_public_boundar
             operator="pytest",
             library_root=tmp_path / "library",
         )
-    with pytest.raises(
-        ValueError, match="operator provenance must be a non-empty string"
-    ):
+    with pytest.raises(ValueError, match="operator provenance must be a string or null"):
         select_pose_template(
             run,
             "11111111-1111-4111-8111-111111111111",
             placement={"matrix": np.eye(4).tolist()},
             confirmed=True,
-            operator=None,  # type: ignore[arg-type]
+            operator=["pytest"],  # type: ignore[arg-type]
             library_root=tmp_path / "library",
         )
 

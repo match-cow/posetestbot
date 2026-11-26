@@ -147,11 +147,14 @@ profiles kept in the library. PoseTestBot copies and hash-binds the combined cal
 timing policy into `processed/calibration_inputs/<bundle_sha256>/`; later
 source-run edits cannot change this dataset.
 
-Choose the **BOP annotation outcome** explicitly. Nothing is preselected, and
-setup cannot be saved until one of base dataset only, pose ground truth, or
-pose ground truth plus masks is chosen. Setup also cannot be saved from the
-other workflow's page: a calibration run is not converted into a dataset run
-or the reverse. Start a new run folder instead.
+Choose **Frames per second** from the rates every enabled camera delivers
+natively at the chosen resolution (`posetestbot.sensors.registry`
+`supported_fps`), and a capture speed of at least 0.05 m/s. Setup no longer
+asks for a BOP annotation outcome: new dataset runs record
+`bop.annotation_mode: "none"`, and ground truth is chosen after capture in
+step 6. Setup cannot be saved from the other workflow's page: a calibration
+run is not converted into a dataset run or the reverse. Start a new run
+folder instead.
 
 ### 2. Choose the pose template and placement
 
@@ -191,18 +194,53 @@ non-destructive sync → sync quality → rectification → calibrated BOP expor
 Synchronization uses the selected per-camera timestamp fields, clock-domain
 rule, offset, and nearest-pose limit. It cannot be overridden by browser
 defaults. Quality measures eligible in-motion coverage; preserved lead-in and
-tail frames are not dataset failures. Export revalidates calibration and input
-hashes before writing `bop_export_manifest.v5`.
+tail frames are not dataset failures. Rectification shares each camera's remap
+tables across up to four frame workers. Export revalidates calibration and input
+hashes before writing `bop_export_manifest.v5`. **Jobs** logs the elapsed time
+for RGB-D rectification, BOP export staging, and final validation.
 
 ### 6. Optionally add BOP ground truth
 
-The base image/model export is a complete acquisition outcome. If
-`bop.annotation_mode` is `pose` or `pose_and_masks`, deliberately queue the
-matching optional job after base export. Pose mode adds `scene_gt.json`; the
-full mode also renders masks, visible masks, and visibility information.
+The base image/model export is a complete acquisition outcome. To add ground
+truth, choose a **Ground-truth outcome** (pose ground truth, or pose ground
+truth + masks; nothing is preselected) and queue the optional job after base
+export. Queueing records the chosen mode in `bop.annotation_mode`. Pose mode adds `scene_gt.json`; the
+full mode also renders masks, visible masks, and visibility information. The
+pinned BOP Toolkit runtime uses up to three independent render workers, with
+one Mesa rendering thread each. It keeps the full render canvas for truncated
+silhouettes and computes visibility within each object's image bounds. The
+export assembles BOP19 targets and validates the staged masks, depth, and
+visibility evidence before atomic publication. **Jobs** also logs the elapsed
+time for GT preparation and mask generation.
+
+Workflow polls the annotation job status while it runs. Readiness refreshes
+when the job finishes or when you select **Refresh readiness**.
 
 Only an annotation-bearing dataset can use the Inspect evaluation path. Pose
 estimation itself remains in the separate controller/consumer boundary.
+
+### Subruns: capture another variant
+
+After a dataset run has been captured, **New subrun from this run** (step 4,
+step 6, or **Run folders**) queues a disk-only job,
+`scripts/run_subrun_create.py`, through `POST /runs/subrun`. It needs a
+required, blank variant description and a new sibling folder name (default
+`<parent>__subNN`). `GET /runs/subrun` describes what will be reused. The job:
+
+1. replays the parent's per-camera calibration sources into a new
+   `calibration_profile_selection.v2` snapshot and checks that the bundle hash
+   is identical (a deleted source falls back to its retained library copy);
+2. writes a new `run_config.v4` with the same cameras, aliases, resolution,
+   frame rate, speed, and synchronization, `bop.annotation_mode: "none"`, and
+   `subrun` lineage;
+3. re-selects the parent's pose template from the library with the same
+   confirmed placement and checks that the bundle hash is identical.
+
+A failure removes the partially created folder; the parent is never modified.
+A subrun of a subrun is refused (subruns always point at the original run).
+The new run opens at step 3: readiness, capture, processing, and optional
+ground truth run again. Each subrun exports its own BOP dataset; the lineage
+lives in `run_config.json`, and the run lists group subruns under their parent.
 
 ### Inspect: run an external pose estimator
 

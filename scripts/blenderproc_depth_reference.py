@@ -13,10 +13,18 @@ def render(plan_path):
     if bproc.__version__ != "2.8.0":
         raise RuntimeError("Depth references require pinned BlenderProc 2.8.0")
     plan = json.loads(Path(plan_path).read_text())
-    if plan["schema_version"] != "depth_render_plan.v1":
+    if plan["schema_version"] != "depth_render_plan.v2":
         raise ValueError("Unsupported depth render plan")
     output = Path(plan["output"])
     output.mkdir(parents=True, exist_ok=True)
+    # Parallel slices share the reference folder but never a scratch folder.
+    render_dir = Path(plan["render_dir"])
+    manifest_name = plan["manifest"]
+    if Path(manifest_name).name != manifest_name or not manifest_name.endswith(".json"):
+        raise ValueError("Depth render manifest must be a plain JSON file name")
+    threads = plan["threads"]
+    if type(threads) is not int or threads < 1:
+        raise ValueError("Depth render threads must be a positive integer")
     bproc.init()
     bproc.renderer.set_render_devices(use_only_cpu=True)
     bproc.renderer.set_denoiser(None)
@@ -24,7 +32,7 @@ def render(plan_path):
     bproc.renderer.set_noise_threshold(0)
     bpy.context.scene.cycles.filter_width = 0.0
     bpy.context.scene.render.threads_mode = "FIXED"
-    bpy.context.scene.render.threads = 4
+    bpy.context.scene.render.threads = threads
     material = bproc.material.create("opaque_geometry")
     material.set_principled_shader_value("Alpha", 1.0)
     material.set_principled_shader_value("Transmission Weight", 0.0)
@@ -73,7 +81,7 @@ def render(plan_path):
             clip_end=10000,
         )
         data = bproc.renderer.render(
-            output_dir=str(output / ".render"),
+            output_dir=str(render_dir),
             load_keys={"depth", "normals", "segmap"},
             verbose=False,
         )
@@ -93,7 +101,7 @@ def render(plan_path):
         )
         print(f"Depth reference {path.name}", flush=True)
         del data, depth, normals, ids
-    (output / "renderer.json").write_text(
+    (output / manifest_name).write_text(
         json.dumps(
             {
                 "schema_version": "depth_renderer.v1",

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
 
+from posetestbot.calibration import rectification
 from posetestbot.calibration.intrinsics import factory_intrinsic_profile
 from posetestbot.calibration.rectification import (
     PROVENANCE_SCHEMA_VERSION,
@@ -153,6 +155,40 @@ def test_rectification_is_transactional_non_destructive_and_depth_nearest(
     assert (
         provenance["output_fingerprint"] == report["sensors"][0]["output_fingerprint"]
     )
+
+
+def test_canceled_frame_worker_preserves_the_previous_rectification(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root = tmp_path / "run"
+    sensor, profile = rectification_fixture(run_root)
+    for modality in ("rgb", "depth"):
+        folder = sensor / modality
+        shutil.copyfile(folder / "000000.png", folder / "000001.png")
+    source_before = digest_tree(sensor)
+    report_path, report = rectify_run(run_root, [profile])
+    rectified = Path(report["output_root"])
+    published_before = digest_tree(rectified)
+    report_before = report_path.read_bytes()
+    original_threads = cv2.getNumThreads()
+    rectify_frame = rectification._rectify_frame
+
+    def cancel_second_frame(pair, **kwargs):
+        if pair[0].name == "000001.png":
+            raise InterruptedError("Rectification canceled")
+        rectify_frame(pair, **kwargs)
+
+    monkeypatch.setattr(rectification, "_rectify_frame", cancel_second_frame)
+
+    with pytest.raises(InterruptedError, match="Rectification canceled"):
+        rectify_run(run_root, [profile], overwrite=True)
+
+    assert digest_tree(sensor) == source_before
+    assert digest_tree(rectified) == published_before
+    assert report_path.read_bytes() == report_before
+    assert not list(rectified.parent.glob(".rectified.*.tmp"))
+    assert cv2.getNumThreads() == original_threads
 
 
 @pytest.mark.parametrize(

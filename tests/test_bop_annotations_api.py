@@ -64,12 +64,18 @@ def test_api_queues_one_run_scoped_annotation_job(
         lambda _run_root, app_root: _setup(),
     )
     submission: dict = {}
+    recorded: list[str] = []
 
     def submit(**kwargs):
         submission.update(kwargs)
         return _Job()
 
     monkeypatch.setattr(route.job_runner, "submit", submit)
+    monkeypatch.setattr(
+        route,
+        "record_bop_annotation_mode",
+        lambda _run_root, mode: recorded.append(mode) or "none",
+    )
     client = create_app().test_client()
 
     response = client.post(
@@ -78,6 +84,7 @@ def test_api_queues_one_run_scoped_annotation_job(
     )
 
     assert response.status_code == 202
+    assert recorded == ["pose_and_masks"]
     assert response.get_json()["job_id"] == "job-ground-truth"
     assert submission["name"] == "bop_annotations"
     assert submission["command"] == [
@@ -112,10 +119,16 @@ def test_api_applies_readiness_to_the_selected_product_only(
         lambda _run_root, app_root: _setup(pose_ready=True, full_ready=False),
     )
     submissions = []
+    recorded: list[str] = []
     monkeypatch.setattr(
         route.job_runner,
         "submit",
         lambda **kwargs: submissions.append(kwargs) or _Job(),
+    )
+    monkeypatch.setattr(
+        route,
+        "record_bop_annotation_mode",
+        lambda _run_root, mode: recorded.append(mode) or "none",
     )
     client = create_app().test_client()
 
@@ -123,26 +136,61 @@ def test_api_applies_readiness_to_the_selected_product_only(
         "/bop/annotations",
         json={"run_root": run.as_posix(), "mode": "pose_and_masks"},
     )
-    mismatch = client.post(
+    # The setup-time mode no longer gates the post-capture choice.
+    pose = client.post(
         "/bop/annotations",
         json={"run_root": run.as_posix(), "mode": "pose"},
     )
 
     assert full.status_code == 400
     assert "Not ready" in full.get_json()["output"]
-    assert mismatch.status_code == 400
-    assert "does not match run_config.json" in mismatch.get_json()["output"]
+    assert pose.status_code == 202
+    assert len(submissions) == 1
+    assert recorded == ["pose"]
+
+
+def test_api_records_the_chosen_mode_and_restores_it_when_queueing_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from posetestbot.jobs.runner import ResourceBusyError
+    from posetestbot.pipeline.run_config import (
+        create_run_config,
+        load_run_config_for_run_root,
+        write_run_config_with_manifest,
+    )
+
+    run = tmp_path / "run"
+    write_run_config_with_manifest(
+        run,
+        create_run_config(
+            run_root=run, capture_intent="dataset", bop_annotation_mode="none"
+        ),
+    )
+    monkeypatch.setenv("POSETESTBOT_WEB_RUN_ROOTS", tmp_path.as_posix())
     monkeypatch.setattr(
         route,
         "inspect_annotation_setup",
-        lambda _run_root, app_root: _setup(configured_mode="pose"),
+        lambda _run_root, app_root: _setup(configured_mode="none"),
     )
-    pose = client.post(
-        "/bop/annotations",
-        json={"run_root": run.as_posix(), "mode": "pose"},
+
+    def busy(**_kwargs):
+        raise ResourceBusyError("render busy")
+
+    monkeypatch.setattr(route.job_runner, "submit", busy)
+    client = create_app().test_client()
+    refused = client.post(
+        "/bop/annotations", json={"run_root": run.as_posix(), "mode": "pose"}
     )
-    assert pose.status_code == 202
-    assert len(submissions) == 1
+    assert refused.status_code == 409
+    assert load_run_config_for_run_root(run)["bop"]["annotation_mode"] == "none"
+
+    monkeypatch.setattr(route.job_runner, "submit", lambda **_kwargs: _Job())
+    queued = client.post(
+        "/bop/annotations", json={"run_root": run.as_posix(), "mode": "pose"}
+    )
+    assert queued.status_code == 202
+    assert load_run_config_for_run_root(run)["bop"]["annotation_mode"] == "pose"
 
 
 def test_api_rejects_unknown_annotation_product(

@@ -158,6 +158,30 @@ def retained_projections(root, expected_sha256, scene_ids):
     return scenes
 
 
+def _matched_robot_poses(root: Path, export, provenance):
+    """Return the scene's matched robot poses when the GT provenance binds them.
+
+    They are optional chart evidence (robot timing and path progress). Missing
+    or unbound files leave motion unavailable rather than blocking the study.
+    """
+
+    folder = export.get("input_sensor_folder")
+    expected = provenance.get("source_artifact_sha256", {}).get(
+        "match_robot_ee_poses.json"
+    )
+    if not isinstance(folder, str) or not isinstance(expected, str):
+        return None
+    relative = (Path(folder) / "match_robot_ee_poses.json").as_posix()
+    try:
+        path = _safe_relative(root, relative, label="Matched robot poses")
+        _required_plain_file(path, root=root, label="Matched robot poses")
+    except (OSError, ValueError):
+        return None
+    if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        return None
+    return relative
+
+
 def inventory(run_root: str | Path):
     root = Path(run_root).resolve()
     if _has_symlink_component(root / "bop", root=root):
@@ -310,6 +334,9 @@ def inventory(run_root: str | Path):
             raise ValueError("Depth frame map contradicts its exported scene")
         bindings = provenance["frame_bindings"]
         binding_by_id = {str(row["output_image_id"]): row for row in bindings}
+        matched_relative = _matched_robot_poses(root, export, provenance)
+        if matched_relative is not None:
+            paths.add(matched_relative)
         if (
             set(camera) != set(gt)
             or set(gt) != set(mapped["frames"])
@@ -427,6 +454,16 @@ def inventory(run_root: str | Path):
                     "gt": rows,
                     "rgb": rgb,
                     "depth": depth,
+                    **(
+                        {
+                            "motion_source": {
+                                "matched": matched_relative,
+                                "source_filename": binding["source_filename"],
+                            }
+                        }
+                        if matched_relative is not None
+                        else {}
+                    ),
                 }
             )
     if (

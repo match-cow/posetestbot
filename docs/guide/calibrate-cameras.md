@@ -48,6 +48,17 @@ Click **Choose grid**. On **Calibration Targets**, find the bundle that matches
 the *physical* board you are using (marker count and size) and click
 **Select for run**. You return to the workflow automatically.
 
+With robot-mounted cameras the dialog also asks **Where is the grid relative
+to the template base?** If you are unsure, choose **Not known: the
+calibration estimates it**. The answer only places the grid in Cell View; the
+calibration always estimates the grid pose from the images.
+
+| Option | Meaning |
+| --- | --- |
+| Not known: the calibration estimates it | Nothing is stored; the solve estimates where the grid sits |
+| Exactly at the template base origin | The grid's origin and axes coincide with the template base |
+| Use the offset saved in the PoseGridGen file | Applies the board-to-base offset recorded when the grid was generated |
+
 Generate a new bundle only if you print a new board. You can download the
 PDF to print from the bundle card.
 

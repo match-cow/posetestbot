@@ -17,6 +17,7 @@ import { activeWorkflowHref, workflowJourneyMetadata } from "@/lib/workflow-sess
 import { useOperator } from "@/providers/operator-provider"
 import { CalibrationWorkflow } from "@/features/workflow/calibration-workflow"
 import { BopGroundTruthGeneration } from "@/features/workflow/bop-ground-truth-generation"
+import { SubrunLineageBanner, SubrunOffer } from "@/features/workflow/subrun-dialog"
 import { CaptureGate } from "@/features/workflow/capture-gate"
 import { GroundTruthWorkflow } from "@/features/workflow/ground-truth-workflow"
 import { DatasetProcessing } from "@/features/workflow/dataset-processing"
@@ -267,7 +268,7 @@ export function WorkflowPage() {
     { id: "target", label: "Printed grid and physical mounting selected", description: targetSelected ? `The run records the immutable grid and its ${calibrationArrangement.status === "ready" ? calibrationArrangement.mountingFrame.replaceAll("_", " ") : "physical"} mounting frame.` : targetGeometrySelected ? "The selected grid's saved mounting frame does not match the enabled cameras. Re-select it after correcting Workflow step 1." : "Select the exact printed grid and record how it is mounted for this camera group.", status: targetSelected ? "met" : "missing", onFix: () => navigate("/calibration-targets", { state: calibrationTargetWorkflowState }), fixLabel: targetGeometrySelected ? "Correct target mounting" : "Choose calibration grid" },
   ]
   const calibrationReady = readinessSatisfied(preflight, calibrationRequirements)
-  const calibrationStatuses = workflowStepStatuses([configSaved, targetSelected, calibrationReady, captureComplete, calibrationPublished])
+  const calibrationStatuses = workflowStepStatuses([configSaved, targetSelected, calibrationReady || captureComplete, captureComplete, calibrationPublished])
   const calibrationSteps: WorkflowStepDefinition[] = calibrationOutline.map((title, index) => ({
     id: ["configure", "target", "readiness", "capture", "calculate"][index], number: index + 1, title, summary: ["Choose camera identities and acquisition settings.", "Bind the physical printed board to this run.", "Resolve all blockers in one place.", "Open cameras and authorize supervised robot motion.", "Estimate time alignment, compare candidates, and explicitly publish profiles."][index], status: calibrationStatuses[index], required: true,
   }))
@@ -281,7 +282,9 @@ export function WorkflowPage() {
   const datasetReady = readinessSatisfied(preflight, datasetRequirements)
   const datasetConfigured = configSaved && datasetCalibrationSelected
   const datasetStatuses = workflowStepStatuses(
-    [datasetConfigured, templateSelected, datasetReady, captureComplete, syncComplete && syncQualityComplete && rectificationComplete && bopComplete],
+    // Readiness gates capture only; once captured, a later config edit (e.g. the
+    // step-6 ground-truth choice) must not reopen it.
+    [datasetConfigured, templateSelected, datasetReady || captureComplete, captureComplete, syncComplete && syncQualityComplete && rectificationComplete && bopComplete],
     { config: runConfig, setup: annotationSetup.data, baseReady: bopComplete },
   )
   if (["queued", "running", "canceling"].includes(datasetProcessingJobStatus ?? "")) datasetStatuses[4] = "running"
@@ -319,11 +322,13 @@ export function WorkflowPage() {
   if (page === "dataset") {
     return <JourneyShell journey="dataset" steps={datasetSteps} selectedStep={selectedStep} onSelectStep={selectStep}>
       <WorkflowStepCard id="configure" number={1} title="Configure cameras and select calibration" description="Choose the cameras for this recording and select a published calibration made for those exact camera identities and acquisition settings." status={datasetStatuses[0]} help="A calibration profile maps camera pixels into the shared robot/template coordinate system. It is required for an object dataset.">
+        <SubrunLineageBanner runRoot={selectedRun} lineage={runConfig?.subrun} />
         <RunSetup intent="dataset" />
         <CalibrationSyncPolicy configured={datasetCalibrationSnapshotConfigured} calibrationSync={calibrationSync} />
       </WorkflowStepCard>
 
       <WorkflowStepCard id="template" number={2} title="Choose the pose template and placement" description="Select the immutable printed pose template that is physically present, enter its measured transform into template base, and confirm it." status={datasetStatuses[1]} help="The pose template fixes object identities and relative poses. The measured placement locates the printed template in the robot's dataset reference frame.">
+        <SubrunLineageBanner runRoot={selectedRun} lineage={runConfig?.subrun} />
         <GroundTruthWorkflow />
         <div className="grid gap-3 md:grid-cols-2"><OptionalAction icon={Boxes} title="Add or edit workpieces" description="Manage source CAD, canonical geometry, names, tags, and lifecycle before making a new template." to="/workpieces" action="Open catalogue" /><OptionalAction icon={Grid3X3} title="Create a pose template" description="Lay out stable object orientations and publish a new immutable printable version." to="/pose-templates" action="Open templates" /></div>
       </WorkflowStepCard>
@@ -334,6 +339,7 @@ export function WorkflowPage() {
 
       <WorkflowStepCard id="capture" number={4} title="Record the object dataset" description="Place the objects exactly as confirmed, clear the workcell, then authorize supervised camera and robot capture." status={datasetStatuses[3]} help="Raw RGB, depth, timestamp, and robot-pose evidence is preserved. Use a new run folder rather than overwriting a prior capture.">
         <CaptureGate key={selectedRun} captureComplete={captureComplete} onContinue={() => selectStep("sync")} intent="dataset" readiness={{ ready: datasetReady, onReview: () => selectStep("readiness") }} />
+        <SubrunOffer runRoot={runConfig?.subrun?.parent_run_root ?? selectedRun} available={captureComplete && datasetConfigured && templateSelected} />
       </WorkflowStepCard>
 
       <WorkflowStepCard id="sync" number={5} title="Process frames and create the base BOP export" description="Synchronize frames to robot poses, verify match quality, validate calibration, rectify RGB-D data, and write the base image/model BOP dataset. Raw captures remain unchanged." status={datasetStatuses[4]} help="The processing job rejects missing matches, excessive pose gaps, incompatible timestamps, calibration-provenance mismatches, and invalid exports.">
@@ -344,6 +350,7 @@ export function WorkflowPage() {
       <WorkflowStepCard id="export" number={6} title="Add optional BOP ground-truth evidence" description="After the base image/model export is verified, optionally add pose-only or rendered pose-and-mask annotations for this run." status={datasetStatuses[5]} required={false} help="The base BOP export is already a portable pose-estimation input. Pose + masks is optional and enables the Inspect page to evaluate an already compatible BOP19 result CSV.">
         <Card className={bopComplete ? "border-success/35 bg-success/5" : "border-dashed"}><CardContent className="flex flex-col gap-4 py-5 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-semibold">{bopComplete ? "BOP image/model export is ready" : "BOP export has not completed"}</div><p className="mt-1 text-xs text-muted-foreground">{bopComplete ? "The base export has populated calibrated scenes, models, and object targets. You can finish here, add pose-only ground truth, or add rendered poses and masks for Inspect metrics." : "Use the processing job in step 5. It validates calibration, rectifies frames, copies models, and writes the base BOP scenes before optional ground-truth generation."}</p></div>{bopComplete ? <Button asChild variant="outline"><Link to="/cell">Review dataset in Cell View<ArrowRight aria-hidden="true" /></Link></Button> : <Button type="button" variant="outline" onClick={() => selectStep("sync")}>Open processing step</Button>}</CardContent></Card>
         <BopGroundTruthGeneration runRoot={selectedRun} bopExportComplete={bopComplete} />
+        <SubrunOffer runRoot={runConfig?.subrun?.parent_run_root ?? selectedRun} available={bopComplete && datasetConfigured && templateSelected} />
       </WorkflowStepCard>
     </JourneyShell>
   }

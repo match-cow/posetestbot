@@ -1,15 +1,15 @@
 import { useEffect } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
-import { ArrowRight, BookOpen, Boxes, Camera, ChartNoAxesCombined, Check, Circle, CircleDot, Cpu, Crosshair, FolderOpen, Folders, Gauge, Grid3X3, Layers, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Route, ScanSearch, Sun, Workflow } from "lucide-react"
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom"
+import { ArrowRight, BookOpen, Boxes, Camera, ChartNoAxesCombined, Check, Circle, CircleDot, Cpu, Crosshair, FolderOpen, FolderPlus, Folders, Gauge, Grid3X3, Layers, LayoutTemplate, ListChecks, LoaderCircle, LockKeyhole, Moon, PackageSearch, Route, ScanSearch, Sun, Workflow } from "lucide-react"
 import { RestartControl } from "@/components/restart-control"
 import { Button } from "@/components/ui/button"
-import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select"
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger } from "@/components/ui/select"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useOperator } from "@/providers/operator-provider"
 import { useTheme } from "@/providers/theme-provider"
 import { api, query } from "@/lib/api"
-import type { CaptureState, Job } from "@/lib/contracts"
+import type { ActiveCalibration, CaptureState, Job, RunIndexItem } from "@/lib/contracts"
 import { cn } from "@/lib/utils"
 import { activeWorkflowHref, type ActiveWorkflow, type WorkflowProgressStatus } from "@/lib/workflow-session"
 import { toast } from "sonner"
@@ -100,10 +100,112 @@ function CurrentWorkflowCard({ workflow, runtime }: { workflow: ActiveWorkflow; 
   </section>
 }
 
+const OPEN_RUN_FOLDERS = "__posetestbot_open_run_folders__"
+const CREATE_RUN_FOLDER = "__posetestbot_create_run_folder__"
+const OPEN_CALIBRATIONS = "__posetestbot_open_calibrations__"
+const OPEN_CALIBRATION_STEP = "__posetestbot_open_calibration_step__"
+
+const shortHash = (value: string | undefined) => value ? value.slice(0, 12) : "—"
+
+interface CalibrationPresentation {
+  name: string
+  detail: string | null
+  badge: string
+  tone: "success" | "warning" | "destructive" | "muted"
+}
+
+/** What the header says about the calibration the active run uses or publishes. */
+function calibrationPresentation(intent: string | null | undefined, data: ActiveCalibration | undefined, error: boolean): CalibrationPresentation {
+  if (error) return { name: "Unavailable", detail: null, badge: "Status error", tone: "destructive" }
+  if (!data) return { name: "Loading…", detail: null, badge: "Checking", tone: "muted" }
+  if (intent === "calibration") {
+    const published = data.published
+    if (!published) return { name: "Not yet published", detail: "This run produces a calibration", badge: "Calibration run", tone: "muted" }
+    if (!published.valid) return { name: "Published bundle unusable", detail: published.issues[0]?.message ?? null, badge: "Invalid", tone: "destructive" }
+    return { name: "Published by this run", detail: shortHash(published.bundle_sha256), badge: "Published", tone: "success" }
+  }
+  const selected = data.selected
+  if (!selected) return { name: "None selected", detail: intent === "dataset" ? "Choose one in Workflow step 1" : null, badge: intent === "dataset" ? "Required" : "Not configured", tone: "warning" }
+  if (!selected.valid) return { name: "Invalid selection", detail: selected.issues[0]?.message ?? null, badge: "Invalid", tone: "destructive" }
+  const names = selected.sources?.map((source) => source.run_name) ?? [selected.source.run_name]
+  return {
+    name: names.length > 1 ? `${names.length} sources · ${names.join(", ")}` : names[0],
+    detail: shortHash(selected.source.bundle_sha256),
+    badge: "Snapshot verified",
+    tone: "success",
+  }
+}
+
+const toneClass: Record<CalibrationPresentation["tone"], string> = {
+  success: "border-success/30 bg-success/10 text-success",
+  warning: "border-warning/35 bg-warning/10 text-warning-foreground",
+  destructive: "border-destructive/30 bg-destructive/10 text-destructive",
+  muted: "border-border bg-muted text-muted-foreground",
+}
+
+function ActiveCalibrationMenu({ run, runRoot }: { run: RunIndexItem | undefined; runRoot: string }) {
+  const navigate = useNavigate()
+  const intent = run?.config_valid ? run.intent : null
+  const calibration = useQuery({
+    queryKey: ["active-calibration", runRoot],
+    queryFn: () => api<ActiveCalibration>(query("/ui/calibrations/active", { run_root: runRoot })),
+    refetchInterval: 15_000,
+    retry: false,
+  })
+  const view = calibrationPresentation(intent, calibration.data, calibration.isError)
+  const selected = calibration.data?.selected
+  const published = calibration.data?.published
+  const stepHref = intent === "calibration" ? "/workflow/calibration?step=calculate" : "/workflow/dataset?step=configure"
+  const stepLabel = intent === "calibration" ? "Review or publish in Workflow step 5" : selected ? "Change in Workflow step 1" : "Select in Workflow step 1"
+  const onAction = (value: string) => {
+    if (value === OPEN_CALIBRATIONS) navigate("/calibrations")
+    else if (value === OPEN_CALIBRATION_STEP) navigate(stepHref)
+  }
+  return <Select value="" onValueChange={onAction}>
+    <SelectTrigger
+      aria-label="Active calibration"
+      className="h-full min-w-[240px] max-w-[480px] shrink basis-[40%] justify-start gap-2 bg-muted/35 px-3 text-left shadow-sm [&>svg:last-child]:ml-auto"
+      data-testid="active-calibration-switcher"
+      title={view.detail ? `${view.name} · ${view.detail}` : view.name}
+    >
+      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+        <span className="grid size-7 shrink-0 place-items-center rounded-md bg-primary/10"><Crosshair className="size-4 text-primary-strong" aria-hidden="true" /></span>
+        <span className="hidden shrink-0 text-[9px] font-bold uppercase tracking-[0.14em] text-primary-strong 2xl:inline">Active calibration</span>
+        <span className="hidden h-3.5 w-px shrink-0 bg-border 2xl:inline" aria-hidden="true" />
+        <strong className="min-w-[4rem] flex-1 truncate text-xs" data-testid="active-calibration-name">{view.name}</strong>
+        <span className={cn("hidden shrink-0 rounded-full border px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider md:inline-flex", toneClass[view.tone])} data-testid="active-calibration-status">{view.badge}</span>
+      </div>
+    </SelectTrigger>
+    <SelectContent align="end" className="w-[min(460px,calc(100vw-2rem))]" data-testid="active-calibration-options">
+      <SelectGroup>
+        <SelectLabel>{intent === "calibration" ? "Calibration this run publishes" : "Calibration used by the active run"}</SelectLabel>
+        <div className="space-y-1.5 px-2 pb-2 text-[11px]" data-testid="active-calibration-details">
+          <div className="flex items-center gap-2"><span className="min-w-0 truncate font-semibold">{view.name}</span><span className={cn("shrink-0 rounded-full border px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider", toneClass[view.tone])}>{view.badge}</span></div>
+          {intent !== "calibration" && selected?.valid && <>
+            {(selected.sources ?? [{ run_name: selected.source.run_name, run_root: selected.source.run_root ?? "", bundle_sha256: selected.source.bundle_sha256, selected_sensor_keys: [] }]).map((source) => <div key={`${source.run_root}:${source.bundle_sha256}`} className="rounded-md border bg-muted/40 px-2 py-1.5">
+              <div className="truncate font-semibold">{source.run_name}</div>
+              <div className="truncate font-mono text-[9px] text-muted-foreground">bundle {shortHash(source.bundle_sha256)}{source.run_root ? ` · ${source.run_root}` : ""}</div>
+              {source.selected_sensor_keys.length > 0 && <div className="truncate text-[10px] text-muted-foreground">Cameras: {source.selected_sensor_keys.join(", ")}</div>}
+            </div>)}
+            <div className="text-[10px] text-muted-foreground">Run-owned snapshot {shortHash(selected.source.bundle_sha256)} · selected {new Date(selected.selected_at).toLocaleString()}. Later source changes cannot alter this run.</div>
+          </>}
+          {intent === "calibration" && published?.valid && <div className="text-[10px] text-muted-foreground">Bundle {shortHash(published.bundle_sha256)} · {published.profile_count} profile{published.profile_count === 1 ? "" : "s"}{published.calibrated_at ? ` · calibrated ${new Date(published.calibrated_at).toLocaleString()}` : ""}</div>}
+          {view.tone !== "success" && view.detail && <div className="text-[10px] text-muted-foreground">{view.detail}</div>}
+          {!intent && <div className="text-[10px] text-muted-foreground">Save Workflow setup to choose an object-dataset calibration or record a new calibration.</div>}
+        </div>
+      </SelectGroup>
+      <SelectSeparator />
+      {intent && <SelectItem value={OPEN_CALIBRATION_STEP} data-testid="active-calibration-workflow-action"><span className="flex items-center gap-2"><Workflow className="size-3.5" aria-hidden="true" />{stepLabel}</span></SelectItem>}
+      <SelectItem value={OPEN_CALIBRATIONS} data-testid="active-calibration-library-action"><span className="flex items-center gap-2"><Crosshair className="size-3.5" aria-hidden="true" />Open Calibrations library</span></SelectItem>
+    </SelectContent>
+  </Select>
+}
+
 export function AppShell() {
   const { bootstrap, runs, selectedRun, autoSelectedRun, selectRun, currentWorkflow } = useOperator()
   const { theme, setTheme } = useTheme()
   const location = useLocation()
+  const navigate = useNavigate()
   const workflowHref = currentWorkflow ? activeWorkflowHref(currentWorkflow) : "/workflow/setup"
   const activeRun = runs.find((run) => run.path === selectedRun)
   const activeFolderName = selectedRun.split("/").filter(Boolean).at(-1) ?? selectedRun
@@ -174,6 +276,8 @@ export function AppShell() {
   }, [location.pathname])
 
   const switchRun = (path: string) => {
+    if (path === OPEN_RUN_FOLDERS) { navigate("/run-folders"); return }
+    if (path === CREATE_RUN_FOLDER) { navigate("/run-folders?new=1"); return }
     if (path === selectedRun) return
     const nextRun = runs.find((run) => run.path === path)
     if (!selectRun(path)) {
@@ -223,7 +327,7 @@ export function AppShell() {
                 </Link>
                 <section
                   aria-label="Active run context"
-                  className="flex h-10 min-w-0 flex-1 items-stretch gap-2 xl:max-w-[1000px]"
+                  className="flex h-10 min-w-0 flex-1 items-stretch gap-2 xl:max-w-[1200px]"
                   data-testid="active-run-context"
                 >
                   <Select value={selectedRun} onValueChange={switchRun}>
@@ -238,26 +342,29 @@ export function AppShell() {
                         <span className="hidden shrink-0 text-[9px] font-bold uppercase tracking-[0.14em] text-primary-strong sm:inline">Active acquisition run</span>
                         <span className="hidden h-3.5 w-px shrink-0 bg-border sm:inline" aria-hidden="true" />
                         <strong className="max-w-[34%] shrink-0 truncate text-xs" data-testid="active-run-name">{activeRunName}</strong>{autoSelectedRun && <span className="shrink-0 rounded border px-1.5 py-0.5 text-[9px] text-muted-foreground">Auto-selected</span>}
-                        <span className="hidden shrink-0 text-[8px] font-bold uppercase tracking-wider text-muted-foreground md:inline">Folder</span>
-                        <span className="hidden min-w-0 flex-1 truncate font-mono text-[9px] text-muted-foreground md:inline" data-testid="active-run-path">{selectedRun}</span>
+                        <span className="hidden shrink-0 text-[8px] font-bold uppercase tracking-wider text-muted-foreground 2xl:inline">Folder</span>
+                        <span className="hidden min-w-0 flex-1 truncate font-mono text-[9px] text-muted-foreground 2xl:inline" data-testid="active-run-path">{selectedRun}</span>
                         <span className={cn("hidden shrink-0 rounded-full border px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider lg:inline-flex", activeRun?.config_valid ? "border-success/30 bg-success/10 text-success" : "border-warning/35 bg-warning/10 text-warning-foreground")}>{activeRun?.config_valid ? "Configured" : "Not configured"}</span>
                       </div>
                     </SelectTrigger>
                     <SelectContent align="start" className="w-[var(--radix-select-trigger-width)] max-w-[calc(100vw-2rem)]" data-testid="active-run-options">
-                      {runOptions.map((run) => <SelectItem key={run.path} value={run.path} className="py-2 pr-3">
+                      {groupSubruns(runOptions).map((run) => <SelectItem key={run.path} value={run.path} className={cn("py-2 pr-3", run.subrun && "pl-8")}>
                         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                           <span className="flex min-w-0 items-center gap-2">
+                            {run.subrun && <span className="shrink-0 text-[9px] font-bold uppercase tracking-wider text-primary-strong">Subrun</span>}
                             <span className="truncate font-semibold">{run.run_name ?? run.name}</span>
                             <span className={cn("shrink-0 rounded-full border px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider", run.config_valid ? "border-success/30 bg-success/10 text-success" : "border-warning/35 bg-warning/10 text-warning-foreground")}>{run.config_valid ? run.intent ?? "Configured" : "Not configured"}</span>
                           </span>
+                          {run.subrun && <span className="truncate text-[10px] text-muted-foreground">{run.subrun.variant}</span>}
                           <span className="truncate font-mono text-[9px] text-muted-foreground">{run.path}</span>
                         </span>
                       </SelectItem>)}
+                      <SelectSeparator />
+                      <SelectItem value={OPEN_RUN_FOLDERS} className="py-2" data-testid="open-run-folders-action"><span className="flex items-center gap-2"><Folders className="size-3.5" aria-hidden="true" />Open run folders</span></SelectItem>
+                      <SelectItem value={CREATE_RUN_FOLDER} className="py-2" data-testid="create-run-folder-action"><span className="flex items-center gap-2"><FolderPlus className="size-3.5" aria-hidden="true" />Create new run folder</span></SelectItem>
                     </SelectContent>
                   </Select>
-                  <Button asChild variant="outline" className="h-full shrink-0 rounded-lg px-3" data-testid="manage-run-folders">
-                    <Link to="/run-folders" aria-label="Manage run folders"><Folders aria-hidden="true" /><span className="hidden sm:inline">Run folders</span></Link>
-                  </Button>
+                  <ActiveCalibrationMenu run={activeRun} runRoot={selectedRun} />
                 </section>
               </div>
               <div className="flex shrink-0 items-center gap-2">
@@ -279,4 +386,21 @@ export function AppShell() {
       </div>
     </TooltipProvider>
   )
+}
+
+/** Keep the list order, but list each subrun directly below its parent run. */
+function groupSubruns<T extends { path: string; subrun?: { parent_run_root: string } | null }>(runs: T[]): T[] {
+  const paths = new Set(runs.map(run => run.path))
+  const children = new Map<string, T[]>()
+  for (const run of runs) {
+    const parent = run.subrun?.parent_run_root
+    if (parent && paths.has(parent)) children.set(parent, [...(children.get(parent) ?? []), run])
+  }
+  const grouped: T[] = []
+  for (const run of runs) {
+    const parent = run.subrun?.parent_run_root
+    if (parent && paths.has(parent)) continue
+    grouped.push(run, ...(children.get(run.path) ?? []))
+  }
+  return grouped
 }

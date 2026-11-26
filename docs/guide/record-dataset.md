@@ -16,22 +16,24 @@ where you are; you can click any step to review it.
 
 [![Step 1: cameras and calibration](../images/console/dataset-1-configure.webp){ loading=lazy }](../images/console/dataset-1-configure.webp)
 
-1. Start from a **new run folder** (top bar → **Run folders**, or **Start with
-   a new run folder** on the workflow page).
+1. Start from a **new run folder** (top bar: open the **Active acquisition
+   run** menu → **Create new run folder**, or **Start with a new run folder**
+   on the workflow page).
 2. Tick **Use for this recording** for each camera. Check the alias,
    mounting, and image orientation for this run.
 3. Select a **saved camera calibration**. Only calibrations that match the
    selected cameras exactly (identity, resolution, mounting) are offered,
-   newest first.
-4. Choose the **BOP annotation outcome**. Nothing is preselected:
+   newest first. Once saved, the top-bar **Active calibration** menu names
+   the calibration this run uses on every page.
+4. Choose **Frames per second**. Only rates that every ticked camera
+   supports at the chosen resolution are offered (RealSense D435 and
+   OAK-D Pro: 6, 15 or 30 fps; ZED 2i: 15, 30 or 60 fps).
+5. Set the robot capture speed. Object datasets need at least 0.05 m/s,
+   because slower motion makes the robot jitter.
+6. Save the setup.
 
-    | Option | You get | Choose it when |
-    | --- | --- | --- |
-    | Base dataset only | Images, depth, models, calibration | You only need the raw dataset |
-    | Pose ground truth | + `scene_gt.json` with object poses | You need poses, or want depth evaluation |
-    | Pose ground truth plus masks | + object masks and visibility | You want to **run a pose estimator** or compute **BOP scores** |
-
-5. Save the setup.
+You do not decide about ground truth here. Record first; step 6 lets you add
+it afterwards.
 
 !!! note
 
@@ -47,7 +49,7 @@ where you are; you can click any step to review it.
 2. Fill in **Measured template position in the workcell**: translation
    (X, Y, Z in mm) and rotation of the printed sheet relative to the
    template base frame. Ask your supervisor how this is measured in your lab.
-3. Confirm the placement.
+3. Confirm the placement. The **Operator name** is optional.
 
 Place each object exactly on its printed outline.
 
@@ -89,16 +91,42 @@ This takes a few minutes, depending on the number of frames. When it shows
 
 [![Step 6: ground truth](../images/console/dataset-6-ground-truth.webp){ loading=lazy }](../images/console/dataset-6-ground-truth.webp)
 
-If you chose pose ground truth (with or without masks) in step 1, click
-**Generate pose GT** or **Generate pose + masks**. Masks are rendered for
-every frame, so this can take a while. When it finishes, continue with
-[pose estimation](pose-estimation.md) or
+This step is optional: the base BOP dataset from step 5 is already complete.
+To add ground truth, choose a **Ground-truth outcome** (nothing is
+preselected):
+
+| Option | You get | Choose it when |
+| --- | --- | --- |
+| Pose ground truth | + `scene_gt.json` with object poses | You need poses, or want depth evaluation |
+| Pose ground truth + masks | + object masks and visibility | You want to **run a pose estimator** or compute **BOP scores** |
+
+Then click **Generate pose GT** or **Generate pose + masks**. Masks are
+rendered for every frame, so this can take a while. When it finishes,
+continue with [pose estimation](pose-estimation.md) or
 [evaluation](evaluate-poses.md).
 
 To check that the objects line up with the images, open **Inspect → Cell View**
 or click **Review dataset in Cell View**.
 
 [![Cell View](../images/console/cell-view.webp){ loading=lazy }](../images/console/cell-view.webp)
+
+## Capture a variant as a subrun
+
+To record the same objects and template again with a different material,
+lighting/environment, or another physical copy of the part, you do not need to
+repeat steps 1 and 2:
+
+1. In a captured dataset run, click **New subrun from this run** (step 4,
+   step 6, or **Run folders**).
+2. Check what is reused: cameras, frame rate and speed, calibration, pose
+   template, and the measured placement.
+3. Enter a **Variant description**, for example `anodised aluminium, diffuse
+   light`, and accept or change the new folder name.
+4. Click **Create subrun**. The console switches to the new run at step 3.
+
+The parent run is not changed. Each subrun has its own recording, processing,
+and BOP export. If the cameras, calibration, or template change, start a
+normal new run folder instead.
 
 ## Common problems
 

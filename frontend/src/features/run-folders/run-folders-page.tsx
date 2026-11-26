@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Link } from "react-router-dom"
+import { Link, useSearchParams } from "react-router-dom"
 import {
   AlertTriangle,
   Archive,
@@ -41,6 +41,7 @@ import type { ClusterArchive, ClusterCapabilityDomain, ClusterJob, Job, RunFolde
 import { cn, formatDate, titleCase } from "@/lib/utils"
 import { activeWorkflowHref } from "@/lib/workflow-session"
 import { useOperator } from "@/providers/operator-provider"
+import { NewSubrunButton } from "@/features/workflow/subrun-dialog"
 
 const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "canceling"])
 const TERMINAL_JOB_STATUSES = new Set(["succeeded", "failed", "canceled", "cancelled"])
@@ -483,6 +484,19 @@ export function RunFoldersPage() {
   const [runSort, setRunSort] = useState("recent")
   const [newRunRoot, setNewRunRoot] = useState(() => runRootForPath(selectedRun, bootstrap.allowed_run_roots))
   const [newRunFolderName, setNewRunFolderName] = useState("")
+  // The header's "Create new run folder" action lands here with ?new=1.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const createRequested = searchParams.get("new") === "1"
+  useEffect(() => {
+    if (!createRequested) return
+    const frame = window.requestAnimationFrame(() => {
+      const input = document.getElementById("new-run-folder-name")
+      input?.scrollIntoView({ behavior: "smooth", block: "center" })
+      input?.focus({ preventScroll: true })
+      setSearchParams({}, { replace: true })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [createRequested, setSearchParams])
   const [trackedOperation, setTrackedOperation] = useState<TrackedOperation | null>(null)
   const automaticRefreshSignature = useRef<string | null>(null)
   const handledTerminalJob = useRef<string | null>(null)
@@ -745,7 +759,7 @@ export function RunFoldersPage() {
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-4"><p className="max-w-2xl text-[11px] leading-relaxed text-muted-foreground">Use one sibling folder per physical acquisition. A multi-object template may place several objects in that single capture.</p><Button asChild size="sm"><Link to={workflowHref}>{activeConfigured ? "Open active run in Workflow" : "Open Workflow setup"}</Link></Button></div>
         </div>
         <form className="rounded-lg border bg-card p-4" onSubmit={(event) => { event.preventDefault(); activateNewRun() }}>
-          <div className="flex items-start gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10"><FolderPlus className="size-4 text-primary-strong" /></span><div><h2 className="text-sm font-semibold">Start another acquisition</h2><p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">Select a new sibling folder now. It remains unconfigured until you save setup in Workflow; its run name will initially default to this folder name.</p></div></div>
+          <div className="flex items-start gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10"><FolderPlus className="size-4 text-primary-strong" /></span><div><h2 className="text-sm font-semibold">Start another acquisition</h2><p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">Select a new sibling folder now. It remains unconfigured until you save setup in Workflow; its run name will initially default to this folder name. To capture another variant of an existing object dataset with the same cameras, calibration and pose template, use <strong>New subrun from this run</strong> on that run instead.</p></div></div>
           <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(220px,1fr)_minmax(190px,0.8fr)]">
             <div className="space-y-1.5"><Label htmlFor="new-run-root">Storage root</Label><Select value={newRunRoot} onValueChange={setNewRunRoot}><SelectTrigger id="new-run-root" aria-label="New run storage root"><SelectValue /></SelectTrigger><SelectContent>{bootstrap.allowed_run_roots.map((root) => <SelectItem value={root} key={root}>{root}</SelectItem>)}</SelectContent></Select></div>
             <div className="space-y-1.5"><Label htmlFor="new-run-folder-name">Run folder name</Label><Input id="new-run-folder-name" aria-invalid={Boolean(newRunFolderName) && (!newRunNameValid || newRunCollision)} aria-describedby={Boolean(newRunFolderName) && (!newRunNameValid || newRunCollision) ? "new-run-folder-error" : undefined} value={newRunFolderName} onChange={(event) => setNewRunFolderName(event.target.value)} placeholder="object_A_20260806_001" />{Boolean(newRunFolderName) && (!newRunNameValid || newRunCollision) && <p id="new-run-folder-error" role="alert" className="text-xs text-destructive">{newRunCollision ? "This run folder already exists. Choose it below or enter a new name." : "Use one folder name only; paths, “.”, and “..” are not allowed."}</p>}</div>
@@ -863,7 +877,7 @@ export function RunFoldersPage() {
                         </td>
                         <td className="px-4 py-4">
                           {run.config.valid
-                            ? <><div className="mb-3 flex flex-wrap items-center gap-1.5"><StatusBadge status="configured" tone="success" /><span className="text-[10px] text-muted-foreground">{run.config.intent ? titleCase(run.config.intent) : "Unknown intent"} · {run.config.annotation_mode ? titleCase(run.config.annotation_mode) : "Unknown annotation mode"}</span></div><ContentsSummary run={run} /></>
+                            ? <><div className="mb-3 flex flex-wrap items-center gap-1.5"><StatusBadge status="configured" tone="success" /><span className="text-[10px] text-muted-foreground">{run.config.intent ? titleCase(run.config.intent) : "Unknown intent"} · {run.config.annotation_mode ? titleCase(run.config.annotation_mode) : "Unknown annotation mode"}</span></div>{run.config.subrun_variant && <p className="mb-2 text-[11px]" data-testid="run-folder-subrun"><span className="font-semibold">Subrun</span> of {run.config.subrun_parent_run_root?.split("/").at(-1)} · {run.config.subrun_variant}</p>}<ContentsSummary run={run} /></>
                             : <div className="space-y-3">
                                 <div className="flex items-start gap-2 rounded border border-destructive/35 bg-destructive/5 p-3 text-[11px] leading-relaxed text-destructive"><AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0" /><div><div className="font-semibold">Invalid run configuration</div><div className="mt-1 break-words text-muted-foreground">{run.config.error ?? "The configuration could not be read."}</div></div></div>
                                 <ContentsSummary run={run} />
@@ -877,6 +891,7 @@ export function RunFoldersPage() {
                         <td className="px-4 py-4">
                           <div className="flex flex-col items-stretch gap-2">
                             <Button size="sm" variant={active ? "secondary" : "outline"} disabled={active} aria-label={active ? `${run.name} is the active run` : `Use ${run.name} as active run`} onClick={() => activateRun(run.path, runDisplayName(run))}>{active ? "Current run" : "Use this run"}</Button>
+                            {run.config.valid && run.config.intent === "dataset" && <NewSubrunButton parentRunRoot={run.config.subrun_parent_run_root ?? run.path} />}
                             <Button size="sm" variant="outline" aria-label={`Move ${run.name}`} disabled={!canMove} onClick={() => openMove(run)}><MoveRight />Move</Button>
                             <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" aria-label={`Delete ${run.name}`} disabled={actionDisabled} onClick={() => { setRetainCalibration(null); setDeleteTarget(run) }}><Trash2 />Delete</Button>
                             {active && <p data-testid="run-folder-active-action-reason" className="text-left text-[10px] leading-relaxed text-warning-foreground">Switch the active run folder before moving or deleting this folder.</p>}

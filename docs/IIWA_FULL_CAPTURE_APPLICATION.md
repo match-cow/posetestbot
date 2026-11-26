@@ -117,8 +117,9 @@ available in KUKA's official
 and
 [LBR iiwa 14 R820 data sheet](https://www.kuka.com/-/media/kuka-downloads/imported/8350ff3ca11642998dbdc81dcc2ed44c/0000246833_en.pdf).
 
-New run configurations default to 0.01 m/s. Calibration setup permits
-0.01–0.03 m/s; object-dataset setup permits 0.01–1.00 m/s and exposes the
+Calibration runs default to 0.01 m/s and permit 0.01–0.03 m/s. Object-dataset
+setup defaults to and requires at least 0.05 m/s, because slower motion makes
+the robot jitter, permits up to 1.00 m/s, and exposes the
 requested value again at physical authorization. The 720-second supervisor
 envelope accommodates the slowest full A1 sweep while the independent
 first-packet and inter-packet timeouts still detect a receiver that never

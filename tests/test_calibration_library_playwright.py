@@ -237,56 +237,55 @@ def test_deleting_a_calibration_run_requires_choosing_what_happens_to_it(
     ]
 
 
-def test_dataset_setup_never_preselects_the_annotation_outcome(
+def test_dataset_setup_offers_shared_frame_rates_and_no_ground_truth_choice(
     console_server, page
 ) -> None:
-    # A configured calibration run routes a dataset link back to the chooser.
-    install_common_mocks(page, config_payload=run_config(intent="calibration"))
-    page.route(
-        "**/ui/calibrations?**",
-        lambda route: fulfill_json(route, {"selected": None, "calibrations": []}),
-    )
-    page.goto(
-        f"{console_server.url}/#/workflow/dataset?step=configure",
-        wait_until="networkidle",
-    )
-    expect(page).to_have_url(f"{console_server.url}/#/workflow/setup")
-    expect(page.get_by_role("link", name="Start with a new run folder")).to_have_attribute(
-        "href", "#/run-folders"
-    )
-    expect(page.get_by_role("link", name="Active run new-run · Continue")).to_be_visible()
-
-    page.route("**/ui/overview**", lambda route: fulfill_json(route, {**overview_payload(), "config": None}))
-    page.route("**/run-config**", lambda route: fulfill_json(route, {"output": "Run config missing"}, status=404))
-    page.goto(f"{console_server.url}/?unconfigured#/workflow/dataset?step=configure", wait_until="networkidle")
-
-    setup = page.get_by_test_id("dataset-run-setup")
-    outcome = setup.get_by_role("combobox", name="BOP annotation mode")
-    expect(outcome).to_contain_text("Choose the dataset outcome")
-    expect(outcome).to_have_attribute("aria-invalid", "true")
-    expect(setup.get_by_test_id("annotation-mode-required")).to_contain_text(
-        "Nothing is preselected"
-    )
-    expect(setup.get_by_role("button", name="Save setup")).to_be_disabled()
-
-    outcome.click()
-    expect(page.get_by_role("option")).to_have_count(3)
-    page.get_by_role("option").filter(has_text="Pose ground truth + masks").click()
-
-    expect(outcome).to_contain_text("Pose ground truth + masks")
-    expect(outcome).to_have_attribute("aria-invalid", "false")
-    expect(setup.get_by_test_id("annotation-mode-required")).to_have_count(0)
-
-
-def test_dataset_setup_shows_the_outcome_a_dataset_run_already_saved(
-    console_server, page
-) -> None:
+    sensors = [
+        {
+            "sensor_type": sensor_type,
+            "device_id": device_id,
+            "display_name": label,
+            "mounting_mode": "eye_in_hand",
+            "enabled": True,
+            "inverted": False,
+        }
+        for sensor_type, device_id, label in (
+            ("realsense_d435", "wrist-1", "Wrist RGB-D"),
+            ("zed_2i", "zed-1", "Stereo ZED"),
+        )
+    ]
     install_common_mocks(
-        page, config_payload=run_config(intent="dataset", annotation_mode="pose")
+        page, config_payload=run_config(intent="dataset", sensors=sensors)
     )
     page.route(
         "**/ui/calibrations?**",
         lambda route: fulfill_json(route, {"selected": None, "calibrations": []}),
+    )
+    page.route(
+        "**/sensors/status",
+        lambda route: fulfill_json(
+            route,
+            {
+                "schema_version": "sensor_status.v1",
+                "families": [
+                    {
+                        "sensor_type": "realsense_d435",
+                        "display_name": "Intel RealSense D435",
+                        "devices": [],
+                        "supported_resolutions": ["720p"],
+                        "supported_fps": {"720p": [6, 15, 30]},
+                    },
+                    {
+                        "sensor_type": "zed_2i",
+                        "display_name": "Stereolabs ZED 2i",
+                        "devices": [],
+                        "supported_resolutions": ["720p", "360p"],
+                        "supported_fps": {"720p": [15, 30, 60], "360p": [15, 30, 60, 100]},
+                    },
+                ],
+                "total_connected": 0,
+            },
+        ),
     )
     page.goto(
         f"{console_server.url}/#/workflow/dataset?step=configure",
@@ -294,8 +293,15 @@ def test_dataset_setup_shows_the_outcome_a_dataset_run_already_saved(
     )
 
     setup = page.get_by_test_id("dataset-run-setup")
-    expect(setup.get_by_role("combobox", name="BOP annotation mode")).to_contain_text(
-        "Pose ground truth"
-    )
-    expect(setup.get_by_test_id("annotation-mode-required")).to_have_count(0)
-    expect(setup.get_by_test_id("run-intent-mismatch")).to_have_count(0)
+    # Ground truth is chosen after capture in step 6, never in setup.
+    expect(setup.get_by_role("combobox", name="BOP annotation mode")).to_have_count(0)
+    fps = setup.get_by_role("combobox", name="Frames per second")
+    # The saved 6 fps is not delivered by the ZED 2i, so nothing is preselected.
+    expect(fps).to_have_attribute("aria-invalid", "true")
+    expect(setup.get_by_test_id("fps-unsupported")).to_contain_text("Choose 15, 30 fps")
+    fps.click()
+    expect(page.get_by_role("option")).to_have_text(["15 fps", "30 fps"])
+    page.get_by_role("option", name="15 fps").click()
+    expect(fps).to_contain_text("15 fps")
+    expect(setup.get_by_test_id("fps-unsupported")).to_have_count(0)
+    expect(setup.locator("#velocity")).to_have_attribute("min", "0.05")

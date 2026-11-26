@@ -105,6 +105,8 @@ def test_inventory_sizes_and_summarizes_without_following_symlinks(
         "run_id": load_run_config_for_run_root(run)["run_id"],
         "intent": "dataset",
         "annotation_mode": "none",
+        "subrun_variant": None,
+        "subrun_parent_run_root": None,
     }
     assert record["contents"]["sensor_count"] == 1
     assert record["contents"]["enabled_sensor_count"] == 1

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from posetestbot.sensors.contracts import MountingMode, SensorType
@@ -21,6 +22,9 @@ class SensorAdapterSpec:
     capture_script: str
     folder_prefix: str
     supported_resolutions: tuple[str, ...]
+    # Frame rates the sensor SDK delivers natively for each supported
+    # resolution. Capture setup offers and validates only these values.
+    supported_fps: Mapping[str, tuple[int, ...]] = field(default_factory=dict)
     live_rgb_preview_supported: bool = False
     default_resolution: str = "720p"
     mounting_modes: tuple[MountingMode, ...] = (
@@ -35,6 +39,10 @@ class SensorAdapterSpec:
         data = asdict(self)
         data["sensor_type"] = self.sensor_type.value
         data["supported_resolutions"] = list(self.supported_resolutions)
+        data["supported_fps"] = {
+            resolution: list(self.supported_fps.get(resolution, ()))
+            for resolution in self.supported_resolutions
+        }
         data["mounting_modes"] = [mode.value for mode in self.mounting_modes]
         data["notes"] = list(self.notes)
         return data
@@ -48,6 +56,7 @@ SENSOR_ADAPTERS: dict[SensorType, SensorAdapterSpec] = {
         capture_script="scripts/capture_realsense_720p.py",
         folder_prefix="realsense",
         supported_resolutions=("720p",),
+        supported_fps={"720p": (6, 15, 30)},
         live_rgb_preview_supported=True,
         notes=(
             "Depth is aligned to color by the capture script.",
@@ -61,6 +70,7 @@ SENSOR_ADAPTERS: dict[SensorType, SensorAdapterSpec] = {
         capture_script="scripts/capture_luxonis_720p.py",
         folder_prefix="luxonis",
         supported_resolutions=("720p",),
+        supported_fps={"720p": (6, 15, 30)},
         live_rgb_preview_supported=True,
         notes=(
             "DepthAI stereo depth is aligned to RGB by the capture script.",
@@ -74,6 +84,7 @@ SENSOR_ADAPTERS: dict[SensorType, SensorAdapterSpec] = {
         capture_script="scripts/capture_zed_2i.py",
         folder_prefix="zed_2i",
         supported_resolutions=("720p", "360p"),
+        supported_fps={"720p": (15, 30, 60), "360p": (15, 30, 60, 100)},
         notes=(
             "Captures left RGB plus depth aligned to the left RGB stream.",
             "Requires the Stereolabs ZED SDK Python module outside ordinary PyPI.",
@@ -130,6 +141,28 @@ def capture_script_for_sensor(sensor_type: SensorType | str, resolution: str) ->
             f"got {resolution!r}."
         )
     return adapter.capture_script
+
+
+def supported_fps_for(sensor_type: SensorType | str, resolution: str) -> tuple[int, ...]:
+    """Return the native frame rates for one sensor family and resolution."""
+
+    adapter = get_sensor_adapter(sensor_type)
+    capture_script_for_sensor(sensor_type, resolution)
+    return tuple(adapter.supported_fps.get(resolution, ()))
+
+
+def validate_sensor_fps(
+    sensor_type: SensorType | str, resolution: str, fps: int
+) -> None:
+    """Reject a frame rate the sensor cannot deliver at this resolution."""
+
+    supported = supported_fps_for(sensor_type, resolution)
+    if fps not in supported:
+        adapter = get_sensor_adapter(sensor_type)
+        raise ValueError(
+            f"{adapter.display_name} supports {', '.join(map(str, supported))} fps "
+            f"at {resolution}; got {fps}."
+        )
 
 
 def build_sensor_capture_command(

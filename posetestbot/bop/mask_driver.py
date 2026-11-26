@@ -17,18 +17,23 @@ import shutil
 import subprocess
 import uuid
 from collections.abc import Callable, Iterable
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from posetestbot.io.atomic import atomic_write_json
+from posetestbot.jobs.cancellation import raise_on_first_cancel_signal
+from posetestbot.pipeline.derived_work import frame_worker_count
 
 
 TOOLKIT_REVISION = "cea62d651c7e395b2e1962b9749e4e89693c6ac4"
 GENERATION_REPORT = "posetestbot_gt_generation.json"
 VISIBILITY_DELTA_MM = 15.0
 RENDERER_TYPE = "vispy"
+MAX_MASK_WORKERS = 3
 
 
 def bop_gt_output_sha256(paths: Iterable[Path], *, root: Path) -> str:
@@ -45,11 +50,178 @@ def bop_gt_output_sha256(paths: Iterable[Path], *, root: Path) -> str:
     return digest.hexdigest()
 
 
+def _radial_distance(
+    depth: np.ndarray, x_rays: np.ndarray, y_rays: np.ndarray
+) -> np.ndarray:
+    # Keep the toolkit's operation order and float64 precision, using rays at
+    # the original image coordinates even though depth is a cropped rectangle.
+    return np.sqrt(
+        np.multiply(x_rays, depth) ** 2
+        + np.multiply(y_rays[:, None], depth) ** 2
+        + depth.astype(np.float64) ** 2
+    )
+
+
+def _mask_outputs(
+    rendered_depth_large: np.ndarray,
+    captured_depth: np.ndarray,
+    x_rays: np.ndarray,
+    y_rays: np.ndarray,
+    delta_mm: float,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    from bop_toolkit_lib import misc, visibility
+
+    height, width = captured_depth.shape
+    if rendered_depth_large.shape != (3 * height, 3 * width):
+        raise ValueError("The BOP renderer did not return the full 3x depth canvas")
+    rendered_depth = rendered_depth_large[height : 2 * height, width : 2 * width]
+    full_mask_large = rendered_depth_large > 0
+    # The toolkit's radial distance uses the magnitude of rendered depth.
+    silhouette_in_frame = rendered_depth != 0
+    px_count_all = int(np.count_nonzero(full_mask_large))
+    full_mask = np.zeros((height, width), dtype=np.uint8)
+    visible_mask = np.zeros_like(full_mask)
+    bbox_obj = [-1, -1, -1, -1]
+    bbox_visib = [-1, -1, -1, -1]
+    px_count_valid = px_count_visib = 0
+
+    rows = np.flatnonzero(silhouette_in_frame.any(axis=1))
+    if rows.size:
+        columns = np.flatnonzero(silhouette_in_frame.any(axis=0))
+        y_slice = slice(rows[0], rows[-1] + 1)
+        x_slice = slice(columns[0], columns[-1] + 1)
+        crop = (y_slice, x_slice)
+        captured_distance = _radial_distance(
+            captured_depth[crop], x_rays[x_slice], y_rays[y_slice]
+        )
+        rendered_distance = _radial_distance(
+            rendered_depth[crop], x_rays[x_slice], y_rays[y_slice]
+        )
+        full_crop = rendered_distance > 0
+        visible_crop = visibility.estimate_visib_mask_gt(
+            captured_distance, rendered_distance, delta_mm, visib_mode="bop19"
+        )
+        full_mask[crop] = 255 * full_crop.astype(np.uint8)
+        visible_mask[crop] = 255 * visible_crop.astype(np.uint8)
+        px_count_valid = int(np.count_nonzero(captured_distance[full_crop] > 0))
+        px_count_visib = int(np.count_nonzero(visible_crop))
+        if px_count_visib:
+            ys = np.flatnonzero(full_mask_large.any(axis=1))
+            xs = np.flatnonzero(full_mask_large.any(axis=0))
+            bbox_obj = [
+                int(value)
+                for value in misc.calc_2d_bbox(xs - width, ys - height, (width, height))
+            ]
+            ys, xs = visible_crop.nonzero()
+            bbox_visib = [
+                int(value)
+                for value in misc.calc_2d_bbox(
+                    xs + x_slice.start, ys + y_slice.start, (width, height)
+                )
+            ]
+
+    visibility_fraction = px_count_visib / float(px_count_all) if px_count_all else 0.0
+    info = {
+        "bbox_obj": bbox_obj,
+        "bbox_visib": bbox_visib,
+        "px_count_all": px_count_all,
+        "px_count_valid": px_count_valid,
+        "px_count_visib": px_count_visib,
+        "visib_fract": visibility_fraction,
+    }
+    return full_mask, visible_mask, info
+
+
+class _MaskWorker:
+    def __init__(
+        self,
+        dp_split: dict[str, Any],
+        dp_model: dict[str, Any],
+        renderer_type: str,
+        delta_mm: float,
+    ) -> None:
+        from bop_toolkit_lib.rendering import renderer
+
+        self.dp_split = dp_split
+        self.width, self.height = (int(value) for value in dp_split["im_size"])
+        self.delta_mm = delta_mm
+        self.render = renderer.create_renderer(
+            3 * self.width, 3 * self.height, renderer_type=renderer_type, mode="depth"
+        )
+        for obj_id in dp_model["obj_ids"]:
+            self.render.add_object(
+                int(obj_id), dp_model["model_tpath"].format(obj_id=int(obj_id))
+            )
+        self.scene_id: int | None = None
+
+    def render_frame(self, frame: tuple[int, int]) -> list[dict[str, Any]]:
+        from bop_toolkit_lib import inout
+
+        scene_id, im_id = frame
+        if scene_id != self.scene_id:
+            self.scene_camera = inout.load_scene_camera(
+                self.dp_split["scene_camera_tpath"].format(scene_id=scene_id)
+            )
+            self.scene_gt = inout.load_scene_gt(
+                self.dp_split["scene_gt_tpath"].format(scene_id=scene_id)
+            )
+            self.scene_id = scene_id
+
+        camera = self.scene_camera[im_id]
+        intrinsic = camera["cam_K"]
+        fx, fy = intrinsic[0, 0], intrinsic[1, 1]
+        cx, cy = intrinsic[0, 2], intrinsic[1, 2]
+        x_rays = (np.arange(self.width) - cx) / np.float64(fx)
+        y_rays = (np.arange(self.height) - cy) / np.float64(fy)
+        depth_path = self.dp_split["depth_tpath"].format(scene_id=scene_id, im_id=im_id)
+        captured_depth = inout.load_depth(depth_path)
+        if captured_depth.shape != (self.height, self.width):
+            raise ValueError(
+                f"BOP depth does not match mask rendering dimensions: {depth_path}"
+            )
+        captured_depth *= camera["depth_scale"]
+
+        frame_info = []
+        for gt_id, gt in enumerate(self.scene_gt[im_id]):
+            rendered_depth_large = self.render.render_object(
+                gt["obj_id"],
+                gt["cam_R_m2c"],
+                gt["cam_t_m2c"],
+                fx,
+                fy,
+                cx + self.width,
+                cy + self.height,
+            )["depth"]
+            full_mask, visible_mask, info = _mask_outputs(
+                rendered_depth_large, captured_depth, x_rays, y_rays, self.delta_mm
+            )
+            for name, mask in (("mask", full_mask), ("mask_visib", visible_mask)):
+                inout.save_im(
+                    self.dp_split[f"{name}_tpath"].format(
+                        scene_id=scene_id, im_id=im_id, gt_id=gt_id
+                    ),
+                    mask,
+                )
+            frame_info.append(info)
+        return frame_info
+
+
+_mask_worker: _MaskWorker
+
+
+def _initialize_mask_worker(*args: Any) -> None:
+    global _mask_worker
+    _mask_worker = _MaskWorker(*args)
+
+
+def _render_mask_frame(frame: tuple[int, int]) -> list[dict[str, Any]]:
+    return _mask_worker.render_frame(frame)
+
+
 def _compute_masks_and_info(args: argparse.Namespace) -> dict[str, Any]:
     # Imports are deliberately local: the normal PoseTestBot environment must
     # not need the pinned toolkit's NumPy<2 dependency set.
-    from bop_toolkit_lib import dataset_params, inout, misc, visibility
-    from bop_toolkit_lib.rendering import renderer
+    from bop_toolkit_lib import dataset_params, inout
 
     loaded_alias = os.environ.get("POSETESTBOT_BOP_ADAPTER_LOADED")
     if loaded_alias != args.dataset_alias:
@@ -71,157 +243,67 @@ def _compute_masks_and_info(args: argparse.Namespace) -> dict[str, Any]:
         args.dataset_alias,
         None,
     )
-    width, height = (int(value) for value in dp_split["im_size"])
-    render_width, render_height = 3 * width, 3 * height
-    x_offset, y_offset = width, height
-    render = renderer.create_renderer(
-        render_width,
-        render_height,
-        renderer_type=args.renderer_type,
-        mode="depth",
-    )
-    for obj_id in dp_model["obj_ids"]:
-        render.add_object(
-            int(obj_id),
-            dp_model["model_tpath"].format(obj_id=int(obj_id)),
-        )
-
-    scene_summaries: dict[str, dict[str, int]] = {}
-    output_paths: list[Path] = []
+    frame_infos: dict[int, dict[int, list[dict[str, Any]]]] = {}
+    frames: list[tuple[int, int]] = []
     for scene_id in sorted(int(value) for value in dp_split["scene_ids"]):
-        scene_camera = inout.load_scene_camera(
-            dp_split["scene_camera_tpath"].format(scene_id=scene_id)
-        )
+        frame_infos[scene_id] = {}
         scene_gt = inout.load_scene_gt(
             dp_split["scene_gt_tpath"].format(scene_id=scene_id)
         )
-        mask_folder = Path(
-            dp_split["mask_tpath"].format(scene_id=scene_id, im_id=0, gt_id=0)
-        ).parent
-        mask_visib_folder = Path(
-            dp_split["mask_visib_tpath"].format(
-                scene_id=scene_id,
-                im_id=0,
-                gt_id=0,
-            )
-        ).parent
-        for folder in (mask_folder, mask_visib_folder):
+        frames.extend((scene_id, im_id) for im_id in sorted(scene_gt))
+        for name in ("mask", "mask_visib"):
+            folder = Path(
+                dp_split[f"{name}_tpath"].format(scene_id=scene_id, im_id=0, gt_id=0)
+            ).parent
             if folder.exists():
                 shutil.rmtree(folder)
             folder.mkdir(parents=True)
 
-        scene_gt_info: dict[int, list[dict[str, Any]]] = {}
-        annotation_count = 0
-        for im_id in sorted(scene_gt):
-            camera = scene_camera[im_id]
-            intrinsic = camera["cam_K"]
-            fx, fy = intrinsic[0, 0], intrinsic[1, 1]
-            cx, cy = intrinsic[0, 2], intrinsic[1, 2]
-            depth_path = Path(
-                dp_split["depth_tpath"].format(scene_id=scene_id, im_id=im_id)
+    worker_count = frame_worker_count(len(frames), limit=MAX_MASK_WORKERS)
+    print(
+        f"Generating BOP masks for {len(frames)} frame(s) with {worker_count} worker(s).",
+        flush=True,
+    )
+    worker_args = (dp_split, dp_model, args.renderer_type, args.delta_mm)
+    if worker_count > 1:
+        executor = ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=get_context("spawn"),
+            initializer=_initialize_mask_worker,
+            initargs=worker_args,
+        )
+        try:
+            results = list(executor.map(_render_mask_frame, frames))
+        finally:
+            executor.shutdown(cancel_futures=True)
+    elif frames:
+        worker = _MaskWorker(*worker_args)
+        results = list(map(worker.render_frame, frames))
+    else:
+        results = []
+    for (scene_id, im_id), info in zip(frames, results, strict=True):
+        frame_infos[scene_id][im_id] = info
+
+    scene_summaries: dict[str, dict[str, int]] = {}
+    output_paths: list[Path] = []
+    for scene_id, scene_gt_info in frame_infos.items():
+        annotation_count = sum(len(infos) for infos in scene_gt_info.values())
+        output_paths.extend(
+            Path(
+                dp_split[f"{name}_tpath"].format(
+                    scene_id=scene_id, im_id=im_id, gt_id=gt_id
+                )
             )
-            captured_depth = inout.load_depth(depth_path)
-            captured_depth *= camera["depth_scale"]
-            captured_distance = misc.depth_im_to_dist_im_fast(
-                captured_depth,
-                intrinsic,
-            )
-            scene_gt_info[im_id] = []
-
-            for gt_id, gt in enumerate(scene_gt[im_id]):
-                rendered_depth_large = render.render_object(
-                    gt["obj_id"],
-                    gt["cam_R_m2c"],
-                    gt["cam_t_m2c"],
-                    fx,
-                    fy,
-                    cx + x_offset,
-                    cy + y_offset,
-                )["depth"]
-                rendered_depth = rendered_depth_large[
-                    y_offset : y_offset + height,
-                    x_offset : x_offset + width,
-                ]
-                rendered_distance = misc.depth_im_to_dist_im_fast(
-                    rendered_depth,
-                    intrinsic,
-                )
-                full_mask_large = rendered_depth_large > 0
-                full_mask = rendered_distance > 0
-                visible_mask = visibility.estimate_visib_mask_gt(
-                    captured_distance,
-                    rendered_distance,
-                    args.delta_mm,
-                    visib_mode="bop19",
-                )
-
-                px_count_all = int(np.sum(full_mask_large))
-                px_count_valid = int(np.sum(captured_distance[full_mask] > 0))
-                px_count_visib = int(np.sum(visible_mask))
-                visibility_fraction = (
-                    px_count_visib / float(px_count_all) if px_count_all else 0.0
-                )
-                bbox_obj = [-1, -1, -1, -1]
-                bbox_visib = [-1, -1, -1, -1]
-                if px_count_visib > 0:
-                    ys, xs = full_mask_large.nonzero()
-                    ys -= y_offset
-                    xs -= x_offset
-                    bbox_obj = [
-                        int(value)
-                        for value in misc.calc_2d_bbox(
-                            xs,
-                            ys,
-                            (width, height),
-                        )
-                    ]
-                    ys, xs = visible_mask.nonzero()
-                    bbox_visib = [
-                        int(value)
-                        for value in misc.calc_2d_bbox(
-                            xs,
-                            ys,
-                            (width, height),
-                        )
-                    ]
-                scene_gt_info[im_id].append(
-                    {
-                        "bbox_obj": bbox_obj,
-                        "bbox_visib": bbox_visib,
-                        "px_count_all": px_count_all,
-                        "px_count_valid": px_count_valid,
-                        "px_count_visib": px_count_visib,
-                        "visib_fract": float(visibility_fraction),
-                    }
-                )
-
-                mask_path = Path(
-                    dp_split["mask_tpath"].format(
-                        scene_id=scene_id,
-                        im_id=im_id,
-                        gt_id=gt_id,
-                    )
-                )
-                mask_visib_path = Path(
-                    dp_split["mask_visib_tpath"].format(
-                        scene_id=scene_id,
-                        im_id=im_id,
-                        gt_id=gt_id,
-                    )
-                )
-                inout.save_im(mask_path, 255 * full_mask.astype(np.uint8))
-                inout.save_im(
-                    mask_visib_path,
-                    255 * visible_mask.astype(np.uint8),
-                )
-                output_paths.extend((mask_path, mask_visib_path))
-                annotation_count += 1
+            for im_id, infos in scene_gt_info.items()
+            for gt_id in range(len(infos))
+            for name in ("mask", "mask_visib")
+        )
 
         info_path = Path(dp_split["scene_gt_info_tpath"].format(scene_id=scene_id))
         inout.save_json(info_path, scene_gt_info)
         output_paths.append(info_path)
         scene_summaries[str(scene_id)] = {
-            "image_count": len(scene_gt),
+            "image_count": len(scene_gt_info),
             "annotation_count": annotation_count,
             "full_mask_count": annotation_count,
             "visible_mask_count": annotation_count,
@@ -458,6 +540,8 @@ def main() -> None:
         raise ValueError("PoseTestBot GT generation requires the pinned vispy renderer")
     if args.delta_mm != VISIBILITY_DELTA_MM:
         raise ValueError("PoseTestBot GT generation requires BOP19's 15 mm delta")
+    os.environ["LP_NUM_THREADS"] = "1"
+    raise_on_first_cancel_signal(KeyboardInterrupt("BOP mask generation canceled"))
     _compute_masks_and_info(args)
 
 

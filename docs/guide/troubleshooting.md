@@ -25,7 +25,8 @@ staff.
 ## Workflow
 
 **I cannot save the setup.**
-A required choice is still empty, for example the BOP annotation outcome.
+A required choice is still empty or invalid, for example a frame rate that
+not every ticked camera supports.
 Or the active run belongs to the other workflow: a calibration run cannot
 become a dataset run, and vice versa. Start a new run folder.
 

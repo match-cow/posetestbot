@@ -387,7 +387,7 @@ def select_pose_template(
     *,
     placement: Mapping[str, Any],
     confirmed: bool,
-    operator: str,
+    operator: str | None = None,
     library_root: str | Path | None = None,
 ) -> dict[str, Any]:
     root = Path(run_root).resolve()
@@ -395,9 +395,11 @@ def select_pose_template(
         raise FileNotFoundError(f"Run root does not exist: {root}")
     if type(confirmed) is not bool:
         raise ValueError("confirmed must be a boolean")
-    if not isinstance(operator, str) or not operator.strip():
-        raise ValueError("Selection operator provenance must be a non-empty string")
-    operator_name = operator.strip()
+    # The operator name is optional provenance; blank means not recorded.
+    if operator is not None and not isinstance(operator, str):
+        raise ValueError("Selection operator provenance must be a string or null")
+    operator_name = operator.strip() if operator is not None else ""
+    operator_name = operator_name or None
     placement_matrix = matrix_from_record(placement, label="template placement")
     library = Path(library_root or default_template_library_root())
     with _selection_lock(root):
@@ -647,8 +649,10 @@ def _validate_selection_value(
     if type(value.get("placement_confirmed")) is not bool:
         raise ValueError("Selection placement_confirmed must be a boolean")
     operator = value.get("operator")
-    if not isinstance(operator, str) or not operator.strip():
-        raise ValueError("Selection operator provenance must be a non-empty string")
+    if operator is not None and (not isinstance(operator, str) or not operator.strip()):
+        raise ValueError(
+            "Selection operator provenance must be a non-empty string or null"
+        )
     _validate_selection_timestamp(value.get("selected_at"))
     snapshot_relative = Path(str(value.get("bundle_snapshot", "")))
     if snapshot_relative.is_absolute() or ".." in snapshot_relative.parts:

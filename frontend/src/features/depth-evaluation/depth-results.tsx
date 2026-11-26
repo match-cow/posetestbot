@@ -1,14 +1,18 @@
 import { useState } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { Download, Film, Images, Info } from "lucide-react"
+import { Activity, Download, FileSpreadsheet, Film, Images, Info } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { api, errorMessage, query } from "@/lib/api"
-import type { DepthComparisonReport, DepthFrame, DepthKind, DepthMetrics, DepthReport, DepthRow, DepthSettings, DepthVideoChoices, DepthVideoSeries } from "./contracts"
+import type { DepthComparisonReport, DepthFrame, DepthFrameSeriesRow, DepthKind, DepthMetrics, DepthReport, DepthRow, DepthSettings, DepthVideoChoices, DepthVideoSeries } from "./contracts"
+import { ComparisonSummary, MotionCharts } from "./depth-insights"
 import { DepthVideos } from "./depth-videos"
+
+/** A frame chosen elsewhere (e.g. a chart point) to open in the frame inspector. */
+interface FrameFocus { seriesIndex: number; offset: number; frameKey: string }
 
 const pct = (n: number | null) => n == null ? "Unavailable" : `${(100 * n).toFixed(1)}%`
 const mm = (n: number | null) => n == null ? "Unavailable" : n.toFixed(3)
@@ -37,17 +41,17 @@ function MetricsTable({ rows, settings }: { rows: DepthRow[]; settings: DepthSet
 
 function ComparisonCoverage({ data, region }: { data: DepthComparisonReport; region: string }) {
   return <div data-testid="depth-common-coverage" className="space-y-3">
-    <div><h3 className="text-sm font-semibold">Common-bin coverage</h3><p className="mt-1 text-xs text-muted-foreground">Compare finishes within common distance/incidence bins. Runs and sensors remain separate; there is no pooled finish ranking.</p></div>
+    <div><h3 className="text-sm font-semibold">Strictly comparable subset: common-bin coverage</h3><p className="mt-1 text-xs text-muted-foreground">The Metrics tab compares finishes only within distance/incidence bins that every run/camera series observed, so differences cannot come from viewing distance or angle. Few or no common bins are normal when inputs were seen from different distances; the per-input table above stays complete.</p></div>
     <div className="overflow-x-auto rounded-lg border"><table className="depth-table w-full text-left text-xs"><thead><tr><th>Finish / sensor</th><th>Geometry</th><th>Common bins</th><th>Common reference px</th><th>Unmatched reference px</th><th>Coverage</th></tr></thead><tbody>{data.coverage.filter(c => c.region === region).map((c, i) => <tr key={i}>
       <td><strong>{c.finish_label}</strong><div>{c.sensor_name}</div><span className="text-muted-foreground">Input {c.input_id}</span></td><td className="font-mono" title={c.canonical_sha256}>{c.canonical_sha256.slice(0, 12)}</td><td>{c.common_bin_count}</td><td>{c.common_reference_pixels.toLocaleString()}</td><td>{c.unmatched_reference_pixels.toLocaleString()}</td><td>{c.reason ?? "Common support available"}{c.unmatched_bins.length > 0 && <details><summary>Unmatched bins ({c.unmatched_bins.length})</summary><pre>{JSON.stringify(c.unmatched_bins, null, 2)}</pre></details>}</td>
     </tr>)}</tbody></table></div>
   </div>
 }
 
-function FrameInspection({ run, kind, id, data, region, series }: { run: string; kind: DepthKind; id: string; data: DepthReport; region: string; series: DepthVideoSeries[] }) {
-  const [offset, setOffset] = useState(0)
-  const [frameKey, setFrameKey] = useState("")
-  const [seriesIndex, setSeriesIndex] = useState(0)
+function FrameInspection({ run, kind, id, data, region, series, focus }: { run: string; kind: DepthKind; id: string; data: DepthReport; region: string; series: DepthVideoSeries[]; focus?: FrameFocus | null }) {
+  const [offset, setOffset] = useState(focus?.offset ?? 0)
+  const [frameKey, setFrameKey] = useState(focus?.frameKey ?? "")
+  const [seriesIndex, setSeriesIndex] = useState(focus?.seriesIndex ?? 0)
   const [view, setView] = useState<keyof typeof viewNames>("error")
   const camera = series[seriesIndex]
   const frames = useQuery({
@@ -81,6 +85,7 @@ export function DepthResults({ run, kind, id }: { run: string; kind: DepthKind; 
   const [region, setRegion] = useState("interior")
   const [scope, setScope] = useState("sensor_geometry")
   const [videoOffset, setVideoOffset] = useState(0)
+  const [frameFocus, setFrameFocus] = useState<FrameFocus | null>(null)
   const report = useQuery({ queryKey: ["depth-report", run, kind, id], queryFn: () => api<DepthReport>(base(kind, id, run, "/report")) })
   const videos = useQuery({
     queryKey: ["depth-video-choices", run, kind, id, videoOffset],
@@ -92,16 +97,24 @@ export function DepthResults({ run, kind, id }: { run: string; kind: DepthKind; 
   if (!data) return <p role="status" className="p-4 text-sm text-muted-foreground">Loading frozen depth evidence…</p>
   const rows = (data.kind === "evaluation" ? data.aggregates.filter(r => r.scope === scope) : data.bins).filter(r => r.region === region)
   const overall = data.kind === "evaluation" ? data.aggregates.find(r => r.scope === "run" && r.region === region) : undefined
+  const cameraSeries = videos.data?.series ?? []
+  // A chart point opens its frame: find the camera series and the 12-frame page holding it.
+  const openFrame = (row: DepthFrameSeriesRow, all: DepthFrameSeriesRow[]) => {
+    const seriesIndex = Math.max(0, cameraSeries.findIndex(s => s.scene_id === row.scene_id && (s.input_id ?? null) === (row.input_id ?? null)))
+    const position = new Set(all.filter(r => r.scene_id === row.scene_id && (r.input_id ?? null) === (row.input_id ?? null) && r.ordinal < row.ordinal).map(r => r.frame_key)).size
+    setFrameFocus({ seriesIndex, offset: Math.floor(position / 12) * 12, frameKey: row.frame_key })
+    setTab("frames")
+  }
   return <Card className="min-w-0" data-testid="depth-results">
     <CardHeader className="gap-3 border-b">
       <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-primary-strong">Retained {data.kind}</p><h2 className="font-display text-lg font-semibold">{data.kind === "evaluation" ? data.finish_label : `${data.series.length} separate run/sensor series`}</h2><p className="mt-1 text-xs text-muted-foreground">{data.frame_count.toLocaleString()} frames · <span className="font-mono text-[10px]" title={id}>{id}</span></p></div>
-        <Button asChild variant="outline" size="sm"><a href={base(kind, id, run, "/download")}><Download className="size-4" />Download research bundle</a></Button>
+        <div className="flex flex-wrap gap-2"><Button asChild variant="outline" size="sm"><a href={base(kind, id, run, "/download/csv")}><FileSpreadsheet className="size-4" />Download depth quality CSV</a></Button><Button asChild variant="outline" size="sm"><a href={base(kind, id, run, "/download")}><Download className="size-4" />Download research bundle</a></Button></div>
       </div>
       <Label className="flex items-center gap-2 text-xs">Region<select aria-label="Depth metric region" className="depth-select" value={region} onChange={e => setRegion(e.target.value)}><option value="interior">2-pixel-eroded interior</option><option value="full">Full reference region</option><option value="boundary">Boundary only</option></select></Label>
     </CardHeader>
     <CardContent className="pt-4">
       <Tabs value={tab} onValueChange={setTab}>
-        <TabsList className="mb-1 h-auto max-w-full flex-wrap justify-start" aria-label="Depth result views"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="frames"><Images className="mr-1.5 size-3.5" />Frames</TabsTrigger><TabsTrigger value="metrics">Metrics</TabsTrigger><TabsTrigger value="videos"><Film className="mr-1.5 size-3.5" />Videos</TabsTrigger><TabsTrigger value="evidence">Evidence</TabsTrigger></TabsList>
+        <TabsList className="mb-1 h-auto max-w-full flex-wrap justify-start" aria-label="Depth result views"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="frames"><Images className="mr-1.5 size-3.5" />Frames</TabsTrigger><TabsTrigger value="motion"><Activity className="mr-1.5 size-3.5" />Along motion</TabsTrigger><TabsTrigger value="metrics">Metrics</TabsTrigger><TabsTrigger value="videos"><Film className="mr-1.5 size-3.5" />Videos</TabsTrigger><TabsTrigger value="evidence">Evidence</TabsTrigger></TabsList>
         <TabsContent value="overview" className="space-y-5">
           {overall && <div className="grid grid-cols-2 gap-3 2xl:grid-cols-4" data-testid="depth-summary">{[
             ["Depth completeness", pct(overall.completeness), "Valid returns / object pixels"],
@@ -109,11 +122,12 @@ export function DepthResults({ run, kind, id }: { run: string; kind: DepthKind; 
             ["RMSE", `${mm(overall.rmse_mm)}${overall.rmse_mm == null ? "" : " mm"}`, "On valid measured returns"],
             ["Missing returns", overall.missing_pixels.toLocaleString(), "Reference pixels without depth"],
           ].map(([title, value, note]) => <div key={title} className="min-w-0 rounded-lg border bg-muted/20 p-3"><p className="text-[11px] text-muted-foreground">{title}</p><p className="my-1.5 font-display text-xl font-semibold tabular-nums">{value}</p><p className="text-[10px] text-muted-foreground">{note}</p></div>)}</div>}
-          {data.kind === "comparison" ? <ComparisonCoverage data={data} region={region} /> : <div className="space-y-3"><h3 className="text-sm font-semibold">Quality by camera and geometry</h3><div className="overflow-x-auto rounded-lg border"><table className="depth-table w-full text-left text-xs"><thead><tr><th>Camera / geometry</th><th>Completeness</th><th>MAE mm</th><th>RMSE mm</th><th>P95 abs mm</th></tr></thead><tbody>{data.aggregates.filter(r => r.scope === "sensor_geometry" && r.region === region).map((r, i) => <tr key={i}><td className="break-all"><strong>{r.sensor_name}</strong><div className="mt-1 font-mono text-[10px] text-muted-foreground" title={r.canonical_sha256}>{r.canonical_sha256.slice(0, 12)}</div></td><td>{pct(r.completeness)}</td><td>{mm(r.mae_mm)}</td><td>{mm(r.rmse_mm)}</td><td>{mm(r.p95_absolute_error_mm)}</td></tr>)}</tbody></table></div></div>}
-          <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => setTab("frames")}><Images className="size-4" />Inspect frames</Button><Button size="sm" onClick={() => setTab("videos")}><Film className="size-4" />Create quality video</Button></div>
+          {data.kind === "comparison" ? <><ComparisonSummary data={data} region={region} /><ComparisonCoverage data={data} region={region} /></> : <div className="space-y-3"><h3 className="text-sm font-semibold">Quality by camera and geometry</h3><div className="overflow-x-auto rounded-lg border"><table className="depth-table w-full text-left text-xs" data-testid="depth-camera-geometry-table"><thead><tr><th>Camera / geometry</th><th>Frames</th><th>Reference px</th><th>Valid px</th><th>Completeness</th><th>Bias mm</th><th>MAE mm</th><th>RMSE mm</th><th>Median abs mm</th><th>P95 abs mm</th></tr></thead><tbody>{data.aggregates.filter(r => r.scope === "sensor_geometry" && r.region === region).map((r, i) => <tr key={i}><td className="break-all"><strong>{r.sensor_name}</strong><div className="mt-1 font-mono text-[10px] text-muted-foreground" title={r.canonical_sha256}>{r.canonical_sha256.slice(0, 12)}</div></td><td>{r.contributing_frame_count} / {r.frame_count}</td><td>{r.reference_pixels.toLocaleString()}</td><td>{r.valid_pixels.toLocaleString()}</td><td>{pct(r.completeness)}</td><td>{mm(r.bias_mm)}</td><td>{mm(r.mae_mm)}</td><td>{mm(r.rmse_mm)}</td><td>{mm(r.median_absolute_error_mm)}</td><td>{mm(r.p95_absolute_error_mm)}</td></tr>)}</tbody></table></div></div>}
+          <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => setTab("frames")}><Images className="size-4" />Inspect frames</Button><Button size="sm" variant="outline" onClick={() => setTab("motion")}><Activity className="size-4" />Errors along the motion</Button><Button size="sm" onClick={() => setTab("videos")}><Film className="size-4" />Create quality video</Button></div>
           <p className="flex items-start gap-2 text-xs text-muted-foreground"><Info className="mt-0.5 size-3.5 shrink-0" />Metrics use the selected reference region and frozen calibrated poses. Pose uncertainty contributes to depth error.</p>
         </TabsContent>
-        <TabsContent value="frames"><FrameInspection run={run} kind={kind} id={id} data={data} region={region} series={videos.data?.series ?? []} /></TabsContent>
+        <TabsContent value="frames"><FrameInspection key={frameFocus ? `${frameFocus.seriesIndex}:${frameFocus.frameKey}` : "browse"} run={run} kind={kind} id={id} data={data} region={region} series={cameraSeries} focus={frameFocus} /></TabsContent>
+        <TabsContent value="motion"><MotionCharts run={run} kind={kind} id={id} region={region} settings={data.settings} onOpenFrame={openFrame} /></TabsContent>
         <TabsContent value="metrics" className="space-y-4">
           {data.kind === "evaluation" && <Label className="flex items-center gap-2">Breakdown<select aria-label="Depth metric breakdown" className="depth-select" value={scope} onChange={e => setScope(e.target.value)}><option value="sensor_geometry">Sensor and geometry</option><option value="instance">Individual instance</option><option value="sensor">Sensor</option><option value="run">Run</option><option value="bin">Distance and incidence bins</option></select></Label>}
           <p className="text-xs text-muted-foreground">Thresholds {data.settings.thresholds_mm.join(" / ")} mm · Bins {data.settings.distance_bin_mm} mm / {data.settings.angle_bin_deg}°, anchored at zero.</p>

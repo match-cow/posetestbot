@@ -882,21 +882,9 @@ def inspect_annotation_setup(
             )
         )
 
+    # Ground truth is an optional post-capture choice; readiness depends only
+    # on the recorded evidence and runtimes, not on a setup-time outcome.
     pose_blockers = list(common_blockers)
-    if configured_mode != "pose":
-        pose_blockers.append(
-            _issue(
-                "annotation_mode_not_configured",
-                "Run setup does not request pose-only ground truth.",
-            )
-        )
-    if configured_mode != "pose_and_masks":
-        full_blockers.append(
-            _issue(
-                "annotation_mode_not_configured",
-                "Run setup does not request pose-and-mask ground truth.",
-            )
-        )
 
     return {
         "schema_version": "bop_annotation_setup.v1",

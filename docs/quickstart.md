@@ -65,15 +65,14 @@ Details: [Prepare objects and pose templates](guide/objects-and-templates.md).
 
 Follow the six steps of **Record an object dataset**:
 
-1. Select cameras and the matching calibration, and choose the
-   **BOP annotation outcome**. Choose *pose ground truth plus masks* if you
-   want to run a pose estimator or compute BOP scores later.
+1. Select cameras, frame rate, speed, and the matching calibration.
 2. Select your pose template and enter the measured position of the printed
    sheet.
 3. **Check readiness** and fix anything shown in red.
 4. Clear the workcell, confirm the authorization, and **Start recording**.
 5. **Process and export dataset**. This runs in the background.
-6. Generate the ground truth (pose, or pose + masks).
+6. Optionally add ground truth. Choose *pose ground truth + masks* if you
+   want to run a pose estimator or compute BOP scores later.
 
 Details: [Record an object dataset](guide/record-dataset.md).
 

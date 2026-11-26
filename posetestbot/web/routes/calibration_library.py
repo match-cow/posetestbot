@@ -8,6 +8,7 @@ from flask import Blueprint, jsonify, request
 
 from posetestbot.calibration.profile_library import (
     CalibrationSelectionConflict,
+    active_calibration_summary,
     list_calibration_library,
     select_calibration_profile_composite_snapshot,
     select_calibration_profile_snapshot,
@@ -30,6 +31,19 @@ def calibration_library_view():
 
     try:
         return jsonify(calibration_library_overview())
+    except (OSError, ValueError) as exc:
+        return jsonify({"output": str(exc)}), 400
+
+
+@calibration_library_bp.get("/ui/calibrations/active")
+def active_calibration_view():
+    """The calibration the given run uses or publishes, without a library scan."""
+
+    run_root = request.args.get("run_root")
+    if not run_root:
+        return jsonify({"output": "run_root is required"}), 400
+    try:
+        return jsonify(active_calibration_summary(run_root))
     except (OSError, ValueError) as exc:
         return jsonify({"output": str(exc)}), 400
 

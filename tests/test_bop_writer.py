@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import replace
@@ -168,7 +169,8 @@ def _write_official_annotation_fixture(root: Path) -> BopSceneExport:
         (scene / "rgb" / "000000.png").as_posix(),
         np.zeros((4, 5, 3), dtype=np.uint8),
     )
-    (scene / "scene_gt.json").write_text(
+    scene_gt_path = scene / "scene_gt.json"
+    scene_gt_path.write_text(
         json.dumps(
             {
                 "0": [
@@ -181,6 +183,20 @@ def _write_official_annotation_fixture(root: Path) -> BopSceneExport:
             }
         )
     )
+    (scene / "scene_camera.json").write_text(
+        json.dumps({"0": {"cam_K": [1, 0, 2, 0, 1, 1.5, 0, 0, 1], "depth_scale": 1}})
+    )
+    provenance_path = scene / "posetestbot_gt_provenance.json"
+    provenance_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "posetestbot_gt_provenance.v1",
+                "annotation_mode": "pose_and_masks",
+                "frame_bindings": [{"im_id": 0}],
+            }
+        )
+    )
+    provenance_relative = provenance_path.relative_to(root).as_posix()
     full = np.zeros((4, 5), dtype=np.uint8)
     full[1:3, 1:3] = 255
     visible = np.zeros((4, 5), dtype=np.uint8)
@@ -213,9 +229,17 @@ def _write_official_annotation_fixture(root: Path) -> BopSceneExport:
         scene_folder="test/000001",
         rgb_count=1,
         depth_count=1,
-        artifacts={"scene_gt": "test/000001/scene_gt.json"},
+        artifacts={
+            "scene_gt": "test/000001/scene_gt.json",
+            "gt_provenance": provenance_relative,
+        },
         annotation_source="blenderproc",
         annotation_mode="pose_and_masks",
+        annotation_provenance={
+            "artifact": provenance_relative,
+            "sha256": hashlib.sha256(provenance_path.read_bytes()).hexdigest(),
+            "scene_gt_sha256": hashlib.sha256(scene_gt_path.read_bytes()).hexdigest(),
+        },
     )
 
 

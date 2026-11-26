@@ -511,6 +511,8 @@ def _config_summary(root: Path) -> tuple[dict[str, Any], Mapping[str, Any] | Non
                 "run_id": None,
                 "intent": None,
                 "annotation_mode": None,
+                "subrun_variant": None,
+                "subrun_parent_run_root": None,
             },
             _read_json_object(root / RUN_CONFIG),
         )
@@ -524,6 +526,10 @@ def _config_summary(root: Path) -> tuple[dict[str, Any], Mapping[str, Any] | Non
             "run_id": str(config["run_id"]),
             "intent": str(config["capture"]["intent"]),
             "annotation_mode": str(config["bop"]["annotation_mode"]),
+            "subrun_variant": (config.get("subrun") or {}).get("variant"),
+            "subrun_parent_run_root": (config.get("subrun") or {}).get(
+                "parent_run_root"
+            ),
         },
         config,
     )

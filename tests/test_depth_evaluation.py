@@ -1031,3 +1031,212 @@ def test_real_blenderproc_front_tilt_off_axis_occlusion_and_resolutions(tmp_path
         and np.array_equal(again_normals, normals)
         and np.array_equal(again_mask, mask)
     )
+
+
+def add_matched_robot_poses(root, positions_mm):
+    """Bind synthetic matched robot poses to the exported GT provenance."""
+
+    folder = "processed/sync/realsense_test"
+    matched_path = root / folder / "match_robot_ee_poses.json"
+    matched_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(
+        matched_path,
+        {
+            f"{i:06d}.png": {
+                "robot_timestamp_ns": 2_000_000_000 + i * 500_000_000,
+                "robot_ee_pose": {"X": x, "Y": 0.0, "Z": 0.0, "A": 0.0, "B": 0.0, "C": 0.0},
+            }
+            for i, x in enumerate(positions_mm)
+        },
+    )
+    scene = root / "bop/test/000001"
+    provenance_path = scene / "posetestbot_gt_provenance.json"
+    provenance = json.loads(provenance_path.read_text())
+    provenance.setdefault("source_artifact_sha256", {})[
+        "match_robot_ee_poses.json"
+    ] = depth._sha256_file(matched_path)
+    atomic_write_json(provenance_path, provenance)
+    manifest_path = root / "bop/bop_export_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["exports"][0]["input_sensor_folder"] = folder
+    manifest["exports"][0]["annotation_provenance"]["sha256"] = depth._sha256_file(
+        provenance_path
+    )
+    atomic_write_json(manifest_path, manifest)
+
+
+def test_per_frame_series_follow_the_robot_path_and_match_exact_aggregates(tmp_path):
+    root = make_depth_run(tmp_path, frame_count=3)
+    for i in range(3):
+        # Frame i measures i mm too far, so per-frame bias is exactly i.
+        cv2.imwrite(
+            str(root / f"bop/test/000001/depth/{i:06d}.png"),
+            np.full((24, 32), 500 + i, np.uint16),
+        )
+    add_matched_robot_poses(root, [0.0, 30.0, 70.0])
+    request, report = evaluate(root)
+
+    series = json.loads(
+        depth.artifact(root, "evaluations", request["id"], "frame_series.json").read_text()
+    )
+    assert series["motion_available"] is True
+    frames = sorted(
+        (r for r in series["rows"] if r["level"] == "frame" and r["region"] == "full"),
+        key=lambda r: r["im_id"],
+    )
+    assert [r["bias_mm"] for r in frames] == [0, 1, 2]
+    assert [r["rmse_mm"] for r in frames] == [0, 1, 2]
+    assert [r["path_mm"] for r in frames] == [0, 30, 70]
+    assert [r["path_fraction"] for r in frames] == [0, 30 / 70, 1]
+    assert [r["t_motion_s"] for r in frames] == [0, 0.5, 1.0]
+    assert {r["level"] for r in series["rows"]} == {"frame", "frame_geometry"}
+    run_full = next(
+        r for r in report["aggregates"] if r["scope"] == "run" and r["region"] == "full"
+    )
+    # Equal pixel counts per frame: the run MAE is the mean of the frame MAEs.
+    assert run_full["mae_mm"] == pytest.approx(1)
+    assert run_full["reference_pixels"] == sum(r["reference_pixels"] for r in frames)
+
+    rows = list(
+        __import__("csv").DictReader(
+            depth.depth_quality_csv(root, "evaluations", request["id"])
+            .decode()
+            .splitlines()
+        )
+    )
+    assert {r["level"] for r in rows} == {
+        "run",
+        "sensor",
+        "sensor_geometry",
+        "instance",
+        "bin",
+        "frame_instance",
+        "frame",
+        "frame_geometry",
+    }
+    assert {"outlier_rate_gt_1mm", "usable_coverage_le_10mm", "path_fraction"} <= set(
+        rows[0]
+    )
+    csv_frames = [r for r in rows if r["level"] == "frame" and r["region"] == "full"]
+    assert sorted(float(r["path_mm"]) for r in csv_frames) == [0, 30, 70]
+    assert all(r["finish_label"] == "matte" for r in rows)
+
+
+def test_missing_robot_evidence_leaves_motion_empty_without_blocking(tmp_path):
+    root = make_depth_run(tmp_path, frame_count=2)
+    request, _report = evaluate(root)
+    series = json.loads(
+        depth.artifact(root, "evaluations", request["id"], "frame_series.json").read_text()
+    )
+    assert series["motion_available"] is False
+    assert series["rows"] and all(r["path_mm"] is None for r in series["rows"])
+
+
+def test_comparison_summary_keeps_every_input_without_common_bins(tmp_path):
+    a, b = make_depth_run(tmp_path, name="a"), make_depth_run(tmp_path, name="b")
+    # Moving b's surface 300 mm away leaves no common distance bin with a.
+    for path in (b / "bop/test/000001/depth").glob("*.png"):
+        cv2.imwrite(str(path), np.full((24, 32), 800, np.uint16))
+    ar, _ = evaluate(a, label="matte")
+
+    def far_reference(root, data, frames, work):
+        render_ids = analytic_reference(root, data, frames, work)
+        for path in (work / "reference").glob("*.npz"):
+            with np.load(path) as maps:
+                arrays = dict(maps)
+            arrays["depth_mm"] = np.where(arrays["instance_ids"] > 0, 800.0, 0.0)
+            np.savez_compressed(path, **arrays)
+        return render_ids
+
+    b_request = depth.create_evaluation(b, submission(b, label="polished"))
+    depth.run_evaluation(
+        depth.folder(b, "evaluations", b_request["id"]) / "request.json",
+        render_reference=far_reference,
+    )
+    request = depth.create_comparison(
+        a,
+        {
+            "schema_version": "depth_comparison_submission.v1",
+            "run_root": str(a),
+            "evaluations": [
+                {"run_root": str(a), "evaluation_id": ar["id"]},
+                {"run_root": str(b), "evaluation_id": b_request["id"]},
+            ],
+        },
+    )
+    report = depth.run_comparison(
+        depth.folder(a, "comparisons", request["id"]) / "request.json"
+    )
+
+    assert report["bins"] == []
+    runs = {
+        r["finish_label"]: r
+        for r in report["summary"]
+        if r["scope"] == "run" and r["region"] == "full"
+    }
+    assert set(runs) == {"matte", "polished"}
+    assert runs["matte"]["rmse_mm"] == 0 and runs["polished"]["completeness"] == 1
+    assert {r["input_id"] for r in report["series_bins"]} == {"0", "1"}
+    series = json.loads(
+        depth.artifact(a, "comparisons", request["id"], "frame_series.json").read_text()
+    )
+    assert {r["input_id"] for r in series["rows"]} == {"0", "1"}
+    assert series["inputs_without_series"] == []
+    rows = depth.depth_quality_csv(a, "comparisons", request["id"]).decode()
+    assert "polished" in rows and "frame_instance" in rows
+
+
+def test_parallel_render_reports_live_progress_and_merges_slices(tmp_path, monkeypatch):
+    root = make_depth_run(tmp_path, frame_count=4)
+    data = inventory(root)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setattr(depth, "renderer_status", lambda: {"available": True})
+    monkeypatch.setattr(depth, "_render_layout", lambda count: (2, 1))
+    monkeypatch.setattr(depth, "RENDER_POLL_SECONDS", 0.01)
+    launched = []
+
+    class FakeProcess:
+        def __init__(self, command, cwd):
+            plan = json.loads(open(command[command.index("--plan") + 1]).read())
+            assert plan["schema_version"] == "depth_render_plan.v2"
+            launched.append(plan)
+            self.plan, self.polls = plan, 0
+
+        def poll(self):
+            # Write one reference per poll so progress is observed mid-render.
+            self.polls += 1
+            frames = self.plan["frames"]
+            output = depth.Path(self.plan["output"])
+            if self.polls <= len(frames):
+                frame = frames[self.polls - 1]
+                (output / f"{frame['scene_id']:06d}_{frame['im_id']:06d}.npz").write_bytes(b"x")
+                return None
+            (output / self.plan["manifest"]).write_text(
+                json.dumps(
+                    {
+                        "schema_version": "depth_renderer.v1",
+                        "outputs": [
+                            {"file": f"{f['scene_id']:06d}_{f['im_id']:06d}.npz", "sha256": "0"}
+                            for f in frames
+                        ],
+                    }
+                )
+            )
+            return 0
+
+        def terminate(self):
+            raise AssertionError("finished slices are not terminated")
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(depth.subprocess, "Popen", FakeProcess)
+    seen = []
+    depth._render(root, data, data["frames"], work, on_progress=seen.append)
+
+    assert [len(plan["frames"]) for plan in launched] == [2, 2]
+    assert seen == [2, 4]
+    merged = json.loads((work / "reference/renderer.json").read_text())
+    assert len(merged["outputs"]) == 4
+    assert not list((work / "reference").glob("renderer.*.json"))

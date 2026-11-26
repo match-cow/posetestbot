@@ -38,7 +38,8 @@ of datasets can reuse them.
 3. **Arrange selected slice contours**: drag and rotate the outlines on the
    sheet. Arrow keys nudge by 1 mm; hold Shift for 10 mm.
 4. **Generate immutable version** and print the PDF at **100 % scale**. Check
-   a known dimension on the printout with a ruler.
+   a known dimension on the printout with a ruler. Each template card shows
+   its **Print scale** (X and Y print compensation) below the preview.
 
 A published template never changes. To modify it, create a new version.
 

@@ -155,6 +155,7 @@ def _validate_adapter_capabilities(config: Mapping[str, Any]) -> list[dict[str, 
     resolution = str(
         capture.get("resolution", "") if isinstance(capture, Mapping) else ""
     )
+    fps = capture.get("fps") if isinstance(capture, Mapping) else None
     checks: list[dict[str, Any]] = []
     for sensor in _enabled_config_sensors(config):
         sensor_type = str(sensor.get("sensor_type", ""))
@@ -194,6 +195,31 @@ def _validate_adapter_capabilities(config: Mapping[str, Any]) -> list[dict[str, 
                     "capture_script": adapter.capture_script,
                     "configured_resolution": resolution,
                     "supported_resolutions": supported_resolutions,
+                },
+            )
+        )
+        if not resolution_supported:
+            continue
+        supported_fps = list(adapter.supported_fps.get(resolution, ()))
+        fps_supported = fps in supported_fps
+        checks.append(
+            _check(
+                f"sensor_fps:{sensor_type}:{device_id}",
+                "ok" if fps_supported else "error",
+                (
+                    f"{adapter.display_name} supports {fps} fps at {resolution}."
+                    if fps_supported
+                    else (
+                        f"{adapter.display_name} does not deliver {fps!r} fps at "
+                        f"{resolution}; supported: "
+                        f"{', '.join(map(str, supported_fps))} fps."
+                    )
+                ),
+                details={
+                    "sensor_type": sensor_type,
+                    "device_id": device_id,
+                    "configured_fps": fps,
+                    "supported_fps": supported_fps,
                 },
             )
         )

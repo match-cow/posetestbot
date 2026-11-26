@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from functools import lru_cache
 import hashlib
 import html
+import io
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import time
 import uuid
 import zipfile
 
@@ -30,6 +32,7 @@ from posetestbot.jobs.cancellation import write_terminal_progress
 from posetestbot.bop.depth_metrics import (
     REVISION,
     Aggregate,
+    _result,
     ComparisonReport,
     ComparisonSubmission,
     EvaluationReport,
@@ -60,6 +63,7 @@ from posetestbot.bop.inspection import (
 )
 from posetestbot.io.atomic import atomic_write_json
 from posetestbot.io.sqlite import open_readonly
+from posetestbot.pipeline.derived_work import frame_worker_count
 
 
 BASE = Path("processed/bop_evaluation/depth")
@@ -353,6 +357,120 @@ def history(root, kind, *, offset=0, limit=25, search=""):
     }
 
 
+DEPTH_QUALITY_KEYS = (
+    "level",
+    "input_id",
+    "finish_label",
+    "evaluation_id",
+    "sensor_name",
+    "scene_id",
+    "im_id",
+    "frame_key",
+    "instance_uuid",
+    "canonical_sha256",
+    "region",
+    "distance_bin",
+    "angle_bin",
+    "frame_count",
+    "contributing_frame_count",
+    "reference_pixels",
+    "valid_pixels",
+    "missing_pixels",
+    "completeness",
+    "bias_mm",
+    "mae_mm",
+    "rmse_mm",
+    "median_absolute_error_mm",
+    "p95_absolute_error_mm",
+)
+DEPTH_QUALITY_MOTION = ("robot_timestamp_ns", "t_motion_s", "path_mm", "path_fraction")
+
+
+def _threshold_label(value):
+    return f"{value:g}".replace(".", "p")
+
+
+def depth_quality_csv(root, kind, record_id):
+    """One tidy CSV of every depth-quality value in a completed study.
+
+    Rows cover the study aggregates (run, sensor, geometry, instance, and
+    distance/incidence bins), each frame's instance regions, and the per-frame
+    series with robot timing. Only manifest-verified published files are read,
+    so studies published before this export existed are covered as well.
+    """
+
+    publication = completed(root, kind, record_id)
+    report = json.loads(publication.artifact("report.json").read_text())
+    thresholds = report["settings"]["thresholds_mm"]
+    threshold_fields = [
+        name
+        for t in thresholds
+        for name in (
+            f"outlier_rate_gt_{_threshold_label(t)}mm",
+            f"usable_coverage_le_{_threshold_label(t)}mm",
+        )
+    ]
+    fields = [*DEPTH_QUALITY_KEYS, *threshold_fields, *DEPTH_QUALITY_MOTION]
+
+    def flat(row, **extra):
+        value = {key: row.get(key) for key in fields if key in row}
+        value.update(extra)
+        # Evaluation rows carry empty comparison tags; fill the study identity.
+        for key, default_value in default.items():
+            if value.get(key) is None:
+                value[key] = default_value
+        for item in row.get("thresholds") or []:
+            label = _threshold_label(item["threshold_mm"])
+            value[f"outlier_rate_gt_{label}mm"] = item.get("outlier_rate")
+            value[f"usable_coverage_le_{label}mm"] = item.get("usable_coverage")
+        return value
+
+    rows = []
+    if kind == "evaluations":
+        aggregates = report["aggregates"]
+        default = {"finish_label": report["finish_label"], "evaluation_id": record_id}
+    else:
+        aggregates = report.get("summary", []) + report.get(
+            "series_bins", report.get("bins", [])
+        )
+        default = {}
+    for row in aggregates:
+        rows.append(flat(row, level=row["scope"]))
+    with open_readonly(publication.artifact("frames.sqlite3")) as connection:
+        for (metadata,) in connection.execute(
+            "SELECT metadata FROM frames ORDER BY ordinal"
+        ):
+            frame = json.loads(metadata)
+            for instance in frame["instances"]:
+                for region, metrics in instance["regions"].items():
+                    rows.append(
+                        flat(
+                            metrics,
+                            level="frame_instance",
+                            input_id=frame.get("input_id"),
+                            finish_label=frame.get(
+                                "finish_label", default.get("finish_label")
+                            ),
+                            sensor_name=frame["sensor_name"],
+                            scene_id=frame["scene_id"],
+                            im_id=frame["im_id"],
+                            frame_key=frame["key"],
+                            instance_uuid=instance["instance_uuid"],
+                            canonical_sha256=instance["canonical_sha256"],
+                            region=region,
+                        )
+                    )
+    if "frame_series.json" in publication.files:
+        series = json.loads(publication.artifact("frame_series.json").read_text())
+        for row in series["rows"]:
+            rows.append(flat(row, level=row["level"]))
+    stream = io.StringIO()
+    writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    return stream.getvalue().encode("utf-8")
+
+
 def depth_setup(root):
     return {
         "schema_version": "depth_evaluation_setup.v1",
@@ -398,39 +516,126 @@ def frames_page(
     }
 
 
-def _render(root, data, frames, work):
+# Each BlenderProc process renders a contiguous slice of frames with a fixed
+# number of Cycles threads; slices run concurrently on the job's CPU token.
+MAX_DEPTH_RENDER_WORKERS = 8
+DEPTH_RENDER_THREADS_PER_WORKER = 4
+RENDER_POLL_SECONDS = 0.5
+
+
+def _render_layout(frame_count):
+    cpus = (
+        len(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity")
+        else os.cpu_count() or 1
+    )
+    limit = max(1, min(MAX_DEPTH_RENDER_WORKERS, cpus // DEPTH_RENDER_THREADS_PER_WORKER))
+    workers = frame_worker_count(frame_count, limit=limit)
+    return max(1, workers), max(1, cpus // max(1, workers))
+
+
+def _merge_renderer_manifests(reference, names):
+    merged, outputs = None, []
+    for name in names:
+        value = read_json(reference, name)
+        chunk_outputs = value.pop("outputs")
+        if merged is None:
+            merged = value
+        elif value != merged:
+            raise ValueError("Parallel depth renderers reported different settings")
+        outputs.extend(chunk_outputs)
+    files = [row["file"] for row in outputs]
+    if len(files) != len(set(files)):
+        raise ValueError("Parallel depth renderers produced duplicate references")
+    atomic_write_json(
+        reference / "renderer.json",
+        {**merged, "outputs": sorted(outputs, key=lambda row: row["file"])},
+    )
+    for name in names:
+        (reference / name).unlink()
+
+
+def _stop(processes):
+    for process in processes:
+        if process.poll() is None:
+            process.terminate()
+    for process in processes:
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def _render(root, data, frames, work, *, on_progress=None):
     if not renderer_status()["available"]:
         raise ValueError(renderer_status()["reason"])
     ids = {g["instance_uuid"]: g["obj_id"] for f in frames for g in f["gt"]}
     objects = {o["obj_id"]: o for o in data["objects"]}
     render_ids = {instance: i + 1 for i, instance in enumerate(sorted(ids))}
-    plan = {
-        "schema_version": "depth_render_plan.v1",
-        "output": str(work / "reference"),
-        "frames": frames,
-        "instances": [
-            {
-                "instance_uuid": instance,
-                "render_id": render_ids[instance],
-                "path": str(root / objects[obj]["path"]),
-            }
-            for instance, obj in ids.items()
-        ],
-    }
-    atomic_write_json(work / "render_plan.json", plan)
-    subprocess.run(
-        [
-            "blenderproc",
-            "run",
-            "--temp-dir",
-            str(work / ".blender-temp"),
-            str(APP_ROOT / "scripts/blenderproc_depth_reference.py"),
-            "--plan",
-            str(work / "render_plan.json"),
-        ],
-        check=True,
-        cwd=APP_ROOT,
-    )
+    instances = [
+        {
+            "instance_uuid": instance,
+            "render_id": render_ids[instance],
+            "path": str(root / objects[obj]["path"]),
+        }
+        for instance, obj in ids.items()
+    ]
+    reference = work / "reference"
+    reference.mkdir(parents=True, exist_ok=True)
+    workers, threads = _render_layout(len(frames))
+    # Contiguous slices keep each camera's frames together in one process.
+    bounds = np.linspace(0, len(frames), workers + 1).round().astype(int)
+    chunks = [frames[a:b] for a, b in zip(bounds[:-1], bounds[1:]) if b > a]
+    names = [f"renderer.{index}.json" for index in range(len(chunks))]
+    processes = []
+    try:
+        for index, chunk in enumerate(chunks):
+            plan_path = work / f"render_plan.{index}.json"
+            atomic_write_json(
+                plan_path,
+                {
+                    "schema_version": "depth_render_plan.v2",
+                    "output": str(reference),
+                    "render_dir": str(work / ".render" / str(index)),
+                    "manifest": names[index],
+                    "threads": threads,
+                    "frames": chunk,
+                    "instances": instances,
+                },
+            )
+            processes.append(
+                subprocess.Popen(
+                    [
+                        "blenderproc",
+                        "run",
+                        "--temp-dir",
+                        str(work / ".blender-temp" / str(index)),
+                        str(APP_ROOT / "scripts/blenderproc_depth_reference.py"),
+                        "--plan",
+                        str(plan_path),
+                    ],
+                    cwd=APP_ROOT,
+                )
+            )
+        reported = -1
+        while True:
+            codes = [process.poll() for process in processes]
+            rendered = sum(1 for _ in reference.glob("*.npz"))
+            if on_progress is not None and rendered != reported:
+                on_progress(rendered)
+                reported = rendered
+            failed = [code for code in codes if code not in (None, 0)]
+            if failed:
+                raise subprocess.CalledProcessError(failed[0], "blenderproc")
+            if all(code == 0 for code in codes):
+                break
+            time.sleep(RENDER_POLL_SECONDS)
+    finally:
+        # A failed or canceled slice must not leave its siblings rendering.
+        _stop(processes)
+    _merge_renderer_manifests(reference, names)
+    shutil.rmtree(work / ".render", ignore_errors=True)
     return render_ids
 
 
@@ -661,6 +866,107 @@ def _publish(path, work, request_hash, record_id, *, before_publish):
     os.rename(work, path / "complete")
 
 
+FRAME_SERIES_SCHEMA = "depth_frame_series.v1"
+# Per-frame aggregates: all selected instances in the frame, and per geometry.
+FRAME_SERIES_SCOPES = {"sensor": "frame", "sensor_geometry": "frame_geometry"}
+
+
+def frame_motion(root, frames, hashes):
+    """Robot timing and path progress per BOP frame from hash-bound matched poses.
+
+    Missing matched-pose evidence leaves the motion fields empty; it never
+    blocks the depth study. Path progress is cumulative end-effector travel
+    along each camera's selected frames in image order.
+    """
+
+    loaded, by_frame = {}, {}
+    for frame in frames:
+        source = frame.get("motion_source")
+        if not source:
+            continue
+        relative = source["matched"]
+        if relative not in loaded:
+            if hashes.get(relative) is None:
+                loaded[relative] = None
+                continue
+            verify_hashes(root, {relative: hashes[relative]})
+            loaded[relative] = read_json(root, relative)
+        record = (loaded[relative] or {}).get(source["source_filename"])
+        pose = record.get("robot_ee_pose") if isinstance(record, dict) else None
+        stamp = record.get("robot_timestamp_ns") if isinstance(record, dict) else None
+        if (
+            not isinstance(pose, dict)
+            or type(stamp) is not int
+            or any(
+                type(pose.get(axis)) not in (int, float)
+                or not np.isfinite(pose[axis])
+                for axis in ("X", "Y", "Z")
+            )
+        ):
+            continue
+        by_frame[(frame["scene_id"], frame["im_id"])] = {
+            "robot_timestamp_ns": stamp,
+            "robot_ee_pose": {
+                axis: float(pose[axis])
+                for axis in ("X", "Y", "Z", "A", "B", "C")
+                if type(pose.get(axis)) in (int, float)
+            },
+        }
+    scenes = {}
+    for key in sorted(by_frame):
+        scenes.setdefault(key[0], []).append(key)
+    for keys in scenes.values():
+        start = min(by_frame[key]["robot_timestamp_ns"] for key in keys)
+        travelled, previous = 0.0, None
+        for key in keys:
+            pose = by_frame[key]["robot_ee_pose"]
+            point = np.array([pose["X"], pose["Y"], pose["Z"]])
+            if previous is not None:
+                travelled += float(np.linalg.norm(point - previous))
+            previous = point
+            by_frame[key]["t_motion_s"] = (
+                by_frame[key]["robot_timestamp_ns"] - start
+            ) / 1e9
+            by_frame[key]["path_mm"] = travelled
+        for key in keys:
+            by_frame[key]["path_fraction"] = (
+                by_frame[key]["path_mm"] / travelled if travelled > 0 else None
+            )
+    return by_frame
+
+
+def _frame_series_rows(frame, key, ordinal, frame_groups, motion, submission):
+    timing = motion.get((frame["scene_id"], frame["im_id"]), {})
+    rows = []
+    for group, pieces in frame_groups.items():
+        scope, sensor, geometry, _instance, region, _d, _a = group
+        if scope not in FRAME_SERIES_SCOPES:
+            continue
+        rows.append(
+            {
+                "level": FRAME_SERIES_SCOPES[scope],
+                "frame_key": key,
+                "ordinal": ordinal,
+                "scene_id": frame["scene_id"],
+                "im_id": frame["im_id"],
+                "sensor_name": sensor,
+                "canonical_sha256": geometry,
+                "region": region,
+                **_result(
+                    sum(n for n, _ in pieces),
+                    np.concatenate([e for _, e in pieces]),
+                    submission.settings,
+                ),
+                "robot_timestamp_ns": timing.get("robot_timestamp_ns"),
+                "t_motion_s": timing.get("t_motion_s"),
+                "path_mm": timing.get("path_mm"),
+                "path_fraction": timing.get("path_fraction"),
+                "robot_ee_pose": timing.get("robot_ee_pose"),
+            }
+        )
+    return rows
+
+
 def run_evaluation(request_path, *, render_reference=None):
     path = Path(request_path).absolute()
     value = json.loads(path.read_text())
@@ -723,8 +1029,19 @@ def run_evaluation(request_path, *, render_reference=None):
                 )
         if [[f["scene_id"], f["im_id"]] for f in frames] != request["frame_ids"]:
             raise ValueError("Depth frame selection changed")
-        progress("rendering")
-        render_ids = (render_reference or _render)(root, data, frames, work)
+        progress("rendering", rendered_frames=0)
+        if render_reference is None:
+            render_ids = _render(
+                root,
+                data,
+                frames,
+                work,
+                on_progress=lambda count: progress("rendering", rendered_frames=count),
+            )
+        else:
+            render_ids = render_reference(root, data, frames, work)
+        motion = frame_motion(root, frames, hashes)
+        frame_series = []
         depth_max = 1.0
         for frame in frames:
             key = f"{frame['scene_id']:06d}_{frame['im_id']:06d}"
@@ -880,6 +1197,11 @@ def run_evaluation(request_path, *, render_reference=None):
                         sum(n for n, _ in pieces),
                         np.concatenate([e for _, e in pieces]),
                     )
+                frame_series.extend(
+                    _frame_series_rows(
+                        frame, key, completed_frames, frame_groups, motion, submission
+                    )
+                )
                 np.savez_compressed(
                     media / f"{key}.npz",
                     measured_mm=measured,
@@ -937,7 +1259,19 @@ def run_evaluation(request_path, *, render_reference=None):
                 }
             )
         shutil.rmtree(spool)
-        shutil.rmtree(work / "reference" / ".render", ignore_errors=True)
+        shutil.rmtree(work / ".render", ignore_errors=True)
+        atomic_write_json(
+            work / "frame_series.json",
+            {
+                "schema_version": FRAME_SERIES_SCHEMA,
+                "id": record_id,
+                "finish_label": submission.finish_label,
+                "motion_available": any(
+                    row["path_mm"] is not None for row in frame_series
+                ),
+                "rows": frame_series,
+            },
+        )
         report = {
             "schema_version": "depth_evaluation_report.v1",
             "kind": "evaluation",
@@ -967,7 +1301,8 @@ def run_evaluation(request_path, *, render_reference=None):
         # host paths; publishing them doubled the study on disk and again
         # inside the research ZIP.
         shutil.rmtree(work / "reference")
-        (work / "render_plan.json").unlink(missing_ok=True)
+        for plan in work.glob("render_plan*.json"):
+            plan.unlink()
         shutil.rmtree(work / ".blender-temp", ignore_errors=True)
         _tables_and_bundle(work, report, request, hashes)
 
@@ -1134,8 +1469,18 @@ def run_comparison(request_path):
         geometry = request["common_geometry_hashes"]
         # Each evaluation/sensor is a separate series. Shared support is the
         # intersection across those series within a geometry/region.
-        series = []
+        series, summary, series_bins = [], [], []
         for i, report in enumerate(reports):
+            tag = {
+                "input_id": str(i),
+                "finish_label": report["finish_label"],
+                "evaluation_id": report["id"],
+                "run_root": request["inputs"][i]["run_root"],
+            }
+            for row in report["aggregates"]:
+                (series_bins if row["scope"] == "bin" else summary).append(
+                    {**row, **tag}
+                )
             for sensor in report["sensors"]:
                 rows = [
                     r
@@ -1263,6 +1608,8 @@ def run_comparison(request_path):
             "series": series,
             "bins": bins,
             "coverage": coverage,
+            "summary": summary,
+            "series_bins": series_bins,
             "scales": scales,
             "frame_count": ordinal,
             "assumptions": ASSUMPTIONS,
@@ -1273,6 +1620,36 @@ def run_comparison(request_path):
             "created_at": now(),
         }
         report = ComparisonReport.model_validate(report).model_dump()
+        series_rows, missing_series = [], []
+        for i, publication in enumerate(publications):
+            if "frame_series.json" not in publication.files:
+                missing_series.append(str(i))
+                continue
+            source = json.loads(publication.artifact("frame_series.json").read_text())
+            if source.get("schema_version") != FRAME_SERIES_SCHEMA:
+                raise ValueError("Depth evaluation frame series schema is unsupported")
+            series_rows.extend(
+                {
+                    **row,
+                    "frame_key": f"{i}_{row['frame_key']}",
+                    "input_id": str(i),
+                    "finish_label": reports[i]["finish_label"],
+                }
+                for row in source["rows"]
+            )
+        atomic_write_json(
+            work / "frame_series.json",
+            {
+                "schema_version": FRAME_SERIES_SCHEMA,
+                "id": record_id,
+                "motion_available": any(
+                    row["path_mm"] is not None for row in series_rows
+                ),
+                # Inputs published before per-frame series existed.
+                "inputs_without_series": missing_series,
+                "rows": series_rows,
+            },
+        )
         _tables_and_bundle(work, report, request, request["inputs"])
 
         _publish(target, work, request_hash, record_id, before_publish=check)

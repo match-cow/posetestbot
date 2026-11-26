@@ -5,7 +5,7 @@ import { ArrowRight, CheckCircle2, LoaderCircle, RefreshCw, Send } from "lucide-
 import { Link } from "react-router-dom"
 import { toast } from "sonner"
 import { HelpTip } from "@/components/help-tip"
-import { TemplateFootprintThumbnail, useTemplatePreview } from "@/components/geometry-previews"
+import { TemplateFootprintThumbnail, TemplatePrintScale, useTemplatePreview } from "@/components/geometry-previews"
 import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -81,7 +81,7 @@ export function GroundTruthWorkflow() {
     queueMicrotask(() => setPendingJob(null))
   }, [client, pendingJob, selectionJob.data])
   const select = useMutation({
-    mutationFn: (submission: { runRoot: string; templateUuid: string; placementValues: number[]; confirmed: boolean; operator: string }) => api<{ job_id: string }>("/pose-templates/runs/selection", {
+    mutationFn: (submission: { runRoot: string; templateUuid: string; placementValues: number[]; confirmed: boolean; operator: string | null }) => api<{ job_id: string }>("/pose-templates/runs/selection", {
       method: "POST",
       body: JSON.stringify({
         run_root: submission.runRoot,
@@ -137,6 +137,7 @@ export function GroundTruthWorkflow() {
                 key={item.template_uuid}
               >
                 <TemplateFootprintThumbnail bundle={item} className="h-28" />
+                <TemplatePrintScale bundle={item} className="mt-1 text-center" />
                 <div className="mt-2 flex items-start justify-between gap-2"><div><div className="text-xs font-semibold">{item.display_name}</div><div className="mt-0.5 text-[10px] text-muted-foreground">{item.instances.length} immutable instance{item.instances.length === 1 ? "" : "s"}</div></div>{selected && <CheckCircle2 className="size-4 shrink-0 text-primary" />}</div>
               </button>
             })}
@@ -151,10 +152,10 @@ export function GroundTruthWorkflow() {
 
         <div className="@container space-y-3">
           <div><Label className="inline-flex items-center gap-1">Measured template position in the workcell <HelpTip label="measured template position">This six-degree-of-freedom transform places the origin printed on the reusable pose template into the fixed workcell frame used by the exported dataset.</HelpTip></Label><p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">Translation and rotation from the blue origin printed on the template into <code>template_base</code>, the dataset's fixed workcell reference.</p><div className="mt-2 grid grid-cols-2 gap-2 @sm:grid-cols-3 @2xl:grid-cols-6" data-testid="template-placement-grid">{["X mm", "Y mm", "Z mm", "Roll °", "Pitch °", "Yaw °"].map((label, index) => <div key={label}><Label className="text-[10px]">{label}</Label><Input aria-label={`Template placement ${label}`} type="number" step="0.1" value={placement[index]} onChange={(event) => updatePlacement(index, event.target.value)} /></div>)}</div>{!placementComplete && <p data-testid="template-placement-required" className="mt-2 text-[11px] font-medium text-destructive">Enter all six measured values before confirming. Nothing is assumed.</p>}<Button type="button" variant="outline" size="sm" className="mt-2" onClick={() => { setPlacement(["0", "0", "0", "0", "0", "0"]); setConfirmation({ runRoot: selectedRun, runEpoch: selectedRunEpoch, value: false }) }}>Template origin sits exactly on PoseTemplateBase (all zeros)</Button></div>
-          <div className="max-w-[210px]"><Label>Operator name <span className="text-destructive">Required</span></Label><Input aria-label="Operator name" placeholder="Who measured this placement" value={operator} onChange={(event) => setOperator(event.target.value)} /></div>
+          <div className="max-w-[210px]"><Label>Operator name <span className="font-normal text-muted-foreground">(optional)</span></Label><Input aria-label="Operator name" placeholder="Who measured this placement" value={operator} onChange={(event) => setOperator(event.target.value)} /></div>
         </div>
         <div className="flex items-start gap-2 rounded-lg border bg-muted/40 p-3"><Checkbox id="confirm-placement" checked={confirmed} disabled={!placementComplete} onCheckedChange={(value) => setConfirmation({ runRoot: selectedRun, runEpoch: selectedRunEpoch, value: value === true })} /><div><Label htmlFor="confirm-placement">I confirm this measured physical placement</Label><p className="mt-1 text-[11px] text-muted-foreground">Changing the run, template, or any placement value clears this confirmation. Print compensation never changes Ground Truth.</p></div></div>
-        <div className="flex flex-wrap items-center gap-3"><Button onClick={() => { localStorage.setItem(OPERATOR_NAME_KEY, operator.trim()); select.mutate({ runRoot: selectedRun, templateUuid: template, placementValues: placementValues, confirmed, operator: operator.trim() }) }} disabled={!template || status.isError || status.isPending || library.isError || !operator.trim() || !placementComplete || !confirmed || select.isPending || Boolean(pendingJob) || Boolean(status.data?.replacement_blockers.length)}><Send />{select.isPending ? "Queueing…" : pendingJob ? "Selection running…" : hasSavedSelection ? "Replace run selection" : "Select for run"}</Button>{pendingJob && <div className="flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground"><span className="flex items-center gap-1.5 font-mono"><LoaderCircle className="size-3 animate-spin" />{pendingJob.id} · {pendingJob.runRoot === selectedRun ? selectionJob.data?.job.status ?? "queued" : "another run"}</span><span>Continues after navigation.</span><Link className="inline-flex items-center gap-1 font-semibold text-primary-strong underline-offset-4 hover:underline" to="/jobs">Open Jobs<ArrowRight className="size-3" /></Link></div>}</div>
+        <div className="flex flex-wrap items-center gap-3"><Button onClick={() => { localStorage.setItem(OPERATOR_NAME_KEY, operator.trim()); select.mutate({ runRoot: selectedRun, templateUuid: template, placementValues: placementValues, confirmed, operator: operator.trim() || null }) }} disabled={!template || status.isError || status.isPending || library.isError || !placementComplete || !confirmed || select.isPending || Boolean(pendingJob) || Boolean(status.data?.replacement_blockers.length)}><Send />{select.isPending ? "Queueing…" : pendingJob ? "Selection running…" : hasSavedSelection ? "Replace run selection" : "Select for run"}</Button>{pendingJob && <div className="flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground"><span className="flex items-center gap-1.5 font-mono"><LoaderCircle className="size-3 animate-spin" />{pendingJob.id} · {pendingJob.runRoot === selectedRun ? selectionJob.data?.job.status ?? "queued" : "another run"}</span><span>Continues after navigation.</span><Link className="inline-flex items-center gap-1 font-semibold text-primary-strong underline-offset-4 hover:underline" to="/jobs">Open Jobs<ArrowRight className="size-3" /></Link></div>}</div>
       </CardContent>
     </Card>
   </div>

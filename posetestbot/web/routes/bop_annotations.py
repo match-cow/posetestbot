@@ -13,6 +13,7 @@ from posetestbot.bop.annotations import (
 )
 from posetestbot.bop.ground_truth import combined_scene_gt_bytes
 from posetestbot.jobs.runner import ResourceBusyError
+from posetestbot.pipeline.run_config import record_bop_annotation_mode
 from posetestbot.web.paths import APP_ROOT
 from posetestbot.web.runtime import job_runner
 from posetestbot.web.security import resolve_web_run_root
@@ -56,35 +57,18 @@ def queue_bop_annotations():
         run_root = resolve_web_run_root(value.get("run_root"))
         mode = validate_annotation_mode(value.get("mode"))
         setup = inspect_annotation_setup(run_root, app_root=APP_ROOT)
-        if setup.get("configured_mode") != mode:
-            raise ValueError(
-                "Requested ground-truth mode does not match run_config.json"
-            )
         readiness = setup["readiness_by_mode"][mode]
         if not readiness["ready"]:
             message = "; ".join(str(item["message"]) for item in readiness["blockers"])
             raise ValueError(f"Ground-truth generation is not ready: {message}")
-        job = job_runner.submit(
-            name="bop_annotations",
-            command=[
-                "uv",
-                "run",
-                "python",
-                "scripts/run_bop_annotations.py",
-                run_root.as_posix(),
-                "--mode",
-                mode,
-            ],
-            cwd=APP_ROOT,
-            resources=["cpu", "render", "disk_io"],
-            scope_kind="run",
-            run_root=run_root,
-            parameters={
-                "run_root": run_root.as_posix(),
-                "bop_annotations": True,
-                "annotation_mode": mode,
-            },
-        )
+        # The operator chooses ground truth after capture; record it in the run
+        # config so the run, its manifest, and later exports agree.
+        previous_mode = record_bop_annotation_mode(run_root, mode)
+        try:
+            job = _submit_annotation_job(run_root, mode)
+        except Exception:
+            record_bop_annotation_mode(run_root, previous_mode)
+            raise
         return (
             jsonify(
                 {
@@ -97,6 +81,30 @@ def queue_bop_annotations():
         )
     except Exception as exc:
         return _error(exc)
+
+
+def _submit_annotation_job(run_root, mode: str):
+    return job_runner.submit(
+        name="bop_annotations",
+        command=[
+            "uv",
+            "run",
+            "python",
+            "scripts/run_bop_annotations.py",
+            run_root.as_posix(),
+            "--mode",
+            mode,
+        ],
+        cwd=APP_ROOT,
+        resources=["cpu", "render", "disk_io"],
+        scope_kind="run",
+        run_root=run_root,
+        parameters={
+            "run_root": run_root.as_posix(),
+            "bop_annotations": True,
+            "annotation_mode": mode,
+        },
+    )
 
 
 @bop_annotations_bp.get("/bop/annotations/ground-truth/download")

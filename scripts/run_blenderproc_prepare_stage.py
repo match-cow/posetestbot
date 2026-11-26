@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Mapping
 from pathlib import Path
+from time import perf_counter
 
 from posetestbot.jobs.cancellation import raise_on_first_cancel_signal
 from posetestbot.pipeline.derived_work import derived_stage_lock
@@ -224,6 +225,7 @@ def _run(args: argparse.Namespace) -> None:
     manifest = load_or_create_run_manifest(run_root)
     upsert_stage(manifest, name="blenderproc_prepare", status="running")
     write_run_manifest(manifest, run_root)
+    started = perf_counter()
 
     try:
         stage_artifacts: dict[str, Path] = {}
@@ -316,6 +318,7 @@ def _run(args: argparse.Namespace) -> None:
         message=f"Prepared BlenderProc inputs for {len(artifacts)} sensor folder(s).",
     )
     write_run_manifest(manifest, run_root)
+    print(f"GT preparation took {perf_counter() - started:.1f} s.", flush=True)
     print(f"Prepared BlenderProc inputs for {len(artifacts)} sensor folder(s).")
 
 

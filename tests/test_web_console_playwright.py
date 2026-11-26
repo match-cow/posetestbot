@@ -1180,6 +1180,23 @@ def install_common_mocks(
         ),
     )
     page.route(
+        "**/ui/calibrations/active?**",
+        lambda route: fulfill_json(
+            route,
+            {
+                "run_root": RUN_ROOT,
+                "selected": None,
+                "published": {
+                    "valid": True,
+                    "issues": [],
+                    "bundle_sha256": "ab" * 32,
+                    "calibrated_at": "2026-07-10T12:00:00Z",
+                    "profile_count": 1,
+                },
+            },
+        ),
+    )
+    page.route(
         "**/ui/run-folders",
         lambda route: fulfill_json(route, run_folder_inventory()),
     )
@@ -1528,20 +1545,20 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     expect(active_run_context.get_by_test_id("active-run-path")).to_have_text(RUN_ROOT)
     run_switcher = page.get_by_role("combobox", name="Active run folder")
     expect(run_switcher).to_be_visible()
-    manage_runs = page.get_by_role("link", name="Manage run folders")
-    expect(manage_runs).to_have_attribute("href", "#/run-folders")
+    calibration_switcher = page.get_by_role("combobox", name="Active calibration")
+    expect(calibration_switcher).to_be_visible()
     summary_box = run_switcher.bounding_box()
-    manage_box = manage_runs.bounding_box()
+    calibration_box = calibration_switcher.bounding_box()
     app_header_box = page.locator("header").first.bounding_box()
     assert (
         summary_box is not None
-        and manage_box is not None
+        and calibration_box is not None
         and app_header_box is not None
     )
-    assert summary_box["height"] == pytest.approx(manage_box["height"], abs=1)
+    assert summary_box["height"] == pytest.approx(calibration_box["height"], abs=1)
     assert summary_box["height"] <= 40
     assert app_header_box["height"] <= 56
-    assert summary_box["y"] == pytest.approx(manage_box["y"], abs=1)
+    assert summary_box["y"] == pytest.approx(calibration_box["y"], abs=1)
     top_gap = summary_box["y"] - app_header_box["y"]
     bottom_gap = (
         app_header_box["y"]
@@ -1551,7 +1568,8 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     )
     assert top_gap == pytest.approx(bottom_gap, abs=1)
     run_switcher.click()
-    expect(page.get_by_role("option")).to_have_count(2)
+    # Two runs plus the Open run folders / Create new run folder actions.
+    expect(page.get_by_role("option")).to_have_count(4)
     page.get_by_role("option").filter(has_text="Object A capture").click()
     expect(page).to_have_url(f"{console_server.url}/#/dashboard")
     expect(active_run_context).to_contain_text("Object A capture")
@@ -1560,7 +1578,8 @@ def test_navigation_run_fallback_persistence_and_both_themes(
         page.evaluate("localStorage.getItem('posetestbot.selectedRun')")
         == "/tmp/posetestbot-console/old-run"
     )
-    manage_runs.click()
+    run_switcher.click()
+    page.get_by_role("option", name="Open run folders").click()
     expect(page).to_have_url(f"{console_server.url}/#/run-folders")
     expect(page.get_by_role("heading", name="Run folders", exact=True)).to_be_visible()
     cluster_storage = page.get_by_test_id("cluster-storage-section")
@@ -1605,7 +1624,8 @@ def test_navigation_run_fallback_persistence_and_both_themes(
     page.get_by_role("option").filter(has_text="Object A capture").click()
     expect(page).to_have_url(f"{console_server.url}/#/devices")
     expect(active_run_context).to_contain_text("Object A capture")
-    page.get_by_role("link", name="Manage run folders").click()
+    page.get_by_role("combobox", name="Active run folder").click()
+    page.get_by_role("option", name="Open run folders").click()
     expect(
         page.get_by_text("Use one sibling folder per physical acquisition.")
     ).to_be_visible()
@@ -1999,15 +2019,17 @@ def test_active_run_header_is_compact_dropdown_with_management_handoff(
 
     active_run_context = page.get_by_test_id("active-run-context")
     run_switcher = page.get_by_role("combobox", name="Active run folder")
-    manage_runs = page.get_by_role("link", name="Manage run folders")
+    calibration_switcher = page.get_by_role("combobox", name="Active calibration")
     active_context_box = active_run_context.bounding_box()
     switcher_box = run_switcher.bounding_box()
+    calibration_box = calibration_switcher.bounding_box()
     header_box = page.locator("header").first.bounding_box()
     page_content_box = page.locator("main > div").first.bounding_box()
 
     assert (
         active_context_box is not None
         and switcher_box is not None
+        and calibration_box is not None
         and header_box is not None
         and page_content_box is not None
     )
@@ -2017,20 +2039,95 @@ def test_active_run_header_is_compact_dropdown_with_management_handoff(
         <= page_content_box["x"] + page_content_box["width"] + 1
     )
     assert switcher_box["height"] <= 40
+    assert calibration_box["x"] >= switcher_box["x"] + switcher_box["width"]
     assert header_box["height"] <= 56
     expect(run_switcher).to_contain_text("Active acquisition run")
-    expect(manage_runs).to_contain_text("Run folders")
-    expect(manage_runs).to_have_attribute("href", "#/run-folders")
+    expect(page.get_by_test_id("manage-run-folders")).to_have_count(0)
+
+    # The calibration-intent run reports the bundle it publishes.
+    expect(calibration_switcher).to_contain_text("Active calibration")
+    expect(calibration_switcher).to_contain_text("Published by this run")
+    calibration_switcher.click()
+    calibration_details = page.get_by_test_id("active-calibration-details")
+    expect(calibration_details).to_contain_text("Bundle abababababab")
+    expect(calibration_details).to_contain_text("1 profile")
+    page.get_by_role("option", name="Open Calibrations library").click()
+    expect(page).to_have_url(re.compile(r"#/calibrations$"))
+
     run_switcher.click()
-    expect(page.get_by_test_id("active-run-options").get_by_role("option")).to_have_count(2)
+    options = page.get_by_test_id("active-run-options").get_by_role("option")
+    expect(options).to_have_count(4)
     expect(
         page.get_by_role("option").filter(has_text="Object A capture")
     ).to_contain_text("/tmp/posetestbot-console/old-run")
-    page.keyboard.press("Escape")
+    page.get_by_role("option", name="Open run folders").click()
+    expect(page).to_have_url(re.compile(r"#/run-folders$"))
+    expect(run_switcher).to_contain_text("Calibration baseline")
+
+    run_switcher.click()
+    page.get_by_role("option", name="Create new run folder").click()
+    expect(page.locator("#new-run-folder-name")).to_be_focused()
+    expect(page).to_have_url(re.compile(r"#/run-folders$"))
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
     )
 
+
+def test_active_calibration_header_names_dataset_selection_sources(
+    console_server, page
+) -> None:
+    install_common_mocks(page)
+    page.route(
+        "**/ui/calibrations/active?**",
+        lambda route: fulfill_json(
+            route,
+            {
+                "run_root": "/tmp/posetestbot-console/old-run",
+                "selected": {
+                    "valid": True,
+                    "issues": [],
+                    "selected_at": "2026-07-09T12:00:00Z",
+                    "source": {
+                        "kind": "composite",
+                        "run_name": "Combined calibration from 2 source runs",
+                        "bundle_sha256": "cd" * 32,
+                    },
+                    "sources": [
+                        {
+                            "run_root": "/tmp/posetestbot-console/static-cal",
+                            "run_name": "Static cameras",
+                            "bundle_sha256": "ef" * 32,
+                            "selected_sensor_keys": ["realsense_d435:111"],
+                        },
+                        {
+                            "run_root": "/tmp/posetestbot-console/flange-cal",
+                            "run_name": "Flange camera",
+                            "bundle_sha256": "12" * 32,
+                            "selected_sensor_keys": ["realsense_d435:222"],
+                        },
+                    ],
+                },
+                "published": None,
+            },
+        ),
+    )
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    page.goto(f"{console_server.url}/#/dashboard", wait_until="networkidle")
+    run_switcher = page.get_by_role("combobox", name="Active run folder")
+    run_switcher.click()
+    page.get_by_role("option").filter(has_text="Object A capture").click()
+
+    calibration_switcher = page.get_by_role("combobox", name="Active calibration")
+    expect(calibration_switcher).to_contain_text("Static cameras, Flange camera")
+    expect(page.get_by_test_id("active-calibration-status")).to_have_text(
+        "Snapshot verified"
+    )
+    calibration_switcher.click()
+    details = page.get_by_test_id("active-calibration-details")
+    expect(details).to_contain_text("realsense_d435:222")
+    expect(details).to_contain_text("cdcdcdcdcdcd")
+    page.get_by_role("option", name="Change in Workflow step 1").click()
+    expect(page).to_have_url(re.compile(r"#/workflow/dataset\?step=configure$"))
 
 @pytest.mark.parametrize("viewport", [(1920, 1080), (1440, 900)])
 @pytest.mark.parametrize(
@@ -4248,8 +4345,13 @@ def test_calibration_target_selection_returns_workflow_to_readiness(
     page.get_by_role("button", name="Select for run", exact=True).click()
     select_target = page.get_by_role("button", name="Select target", exact=True)
     expect(select_target).to_be_disabled()
+    placement_help = page.get_by_test_id("target-placement-help")
+    expect(placement_help).to_contain_text("Exactly at the template base origin")
+    expect(placement_help).to_contain_text(
+        "Used for Cell View placement only; the calibration solve always estimates"
+    )
     page.get_by_label("Target placement").click()
-    page.get_by_role("option", name="Fixed target; estimate grid → PoseTemplateBase").click()
+    page.get_by_role("option", name="Not known: the calibration estimates it").click()
     select_target.click()
 
     expect(page).to_have_url(
@@ -4615,7 +4717,8 @@ def test_run_config_preflight_blocker_and_fresh_capture_gates(
     expect(page.get_by_text("Calibration recording setup saved")).to_be_visible()
     written = next(item["body"] for item in requests if item["path"] == "/run-config")
     assert written["intent"] == "calibration"
-    assert written["annotation_mode"] == "none"
+    # Setup no longer sends a ground-truth outcome; the server records "none".
+    assert "annotation_mode" not in written
     assert written["velocity_m_s"] == 0.03
     assert "pipeline" not in written
     assert "mounting_mode" not in written
@@ -5018,6 +5121,116 @@ def test_dataset_processing_is_one_ordered_operator_action(
     expect(export_outcome).to_contain_text(
         "base export has populated calibrated scenes, models, and object targets"
     )
+
+
+def test_workflow_polls_ground_truth_jobs_without_rechecking_readiness(
+    console_server, page
+) -> None:
+    page.set_viewport_size({"width": 1920, "height": 1080})
+    configured = run_config(intent="dataset", annotation_mode="pose_and_masks")
+    overview = overview_payload(configured)
+    next(section for section in overview["sidebar"] if section["id"] == "bop")[
+        "artifacts"
+    ] = [{"path": "bop/bop_export_manifest.json", "exists": True, "status": "complete"}]
+    install_common_mocks(page, config_payload=configured)
+    page.route("**/ui/overview**", lambda route: fulfill_json(route, overview))
+
+    job = {
+        "id": "annotation-job",
+        "name": "BOP ground-truth generation",
+        "status": "queued",
+        "created_at": "2026-07-26T10:57:51Z",
+        "scope_kind": "run",
+        "run_root": RUN_ROOT,
+        "parameters": {"bop_annotations": True, "annotation_mode": "pose_and_masks"},
+    }
+    submitted = []
+    readiness_requests = []
+
+    def annotation_jobs_url(url: str) -> bool:
+        parsed = urlparse(url)
+        return parsed.path == "/jobs" and parse_qs(parsed.query).get("search") == [
+            '"bop_annotations": true'
+        ]
+
+    def jobs_handler(route) -> None:
+        jobs = [job] if submitted and annotation_jobs_url(route.request.url) else []
+        fulfill_json(route, {"jobs": jobs, "resources": {}})
+
+    def submit_handler(route) -> None:
+        submitted.append(route.request.post_data_json)
+        job["status"] = "running"
+        fulfill_json(route, {"job_id": job["id"], "job": job}, status=202)
+
+    def setup_handler(route) -> None:
+        readiness_requests.append(job["status"])
+        ready = {"ready": True, "blockers": [], "warnings": []}
+        output = None
+        if job["status"] == "succeeded":
+            output = {
+                "mode": "pose_and_masks",
+                "state": "complete",
+                "verified": True,
+                "evaluation_ready": True,
+                "annotation_count": 12,
+                "mask_count": 12,
+                "visible_mask_count": 12,
+                "manifest_sha256": "a" * 64,
+                "blenderproc_version": "2.8.0",
+                "toolkit_revision": "renderer-revision",
+            }
+        fulfill_json(
+            route,
+            {
+                "schema_version": "bop_annotation_setup.v1",
+                "run_root": RUN_ROOT,
+                "configured_mode": "pose_and_masks",
+                "runtime": {"available": True, "detected_version": "2.8.0"},
+                "toolkit": {"available": True, "renderer": "vispy"},
+                "readiness_by_mode": {"pose": ready, "pose_and_masks": ready},
+                "current_output": output,
+                "counts": {"sensors": 1, "frames": 12, "instances": 1},
+            },
+        )
+
+    page.route(LOCAL_JOBS_URL_RE, jobs_handler)
+    page.route("**/bop/annotations", submit_handler)
+    page.route("**/bop/annotations/setup?**", setup_handler)
+    page.goto(
+        f"{console_server.url}/#/workflow/dataset?step=export",
+        wait_until="networkidle",
+    )
+
+    annotations = page.get_by_test_id("bop-ground-truth-generation")
+    # The optional outcome starts blank and generation stays disabled until chosen.
+    expect(annotations.get_by_role("button", name="Generate ground truth")).to_be_disabled()
+    expect(annotations.get_by_test_id("bop-annotation-disabled-reasons")).to_contain_text(
+        "This step is optional"
+    )
+    annotations.get_by_role("radio", name="Pose ground truth + masks").click()
+    generate = annotations.get_by_role("button", name="Generate pose + masks")
+    expect(generate).to_be_enabled()
+    initial_requests = len(readiness_requests)
+    generate.click()
+    status = annotations.get_by_test_id("bop-annotation-job-status")
+    expect(status).to_contain_text("Ground-truth generation is running")
+    assert submitted == [{"run_root": RUN_ROOT, "mode": "pose_and_masks"}]
+    expect(annotations.get_by_role("button", name="Generating…")).to_be_disabled()
+    for _ in range(2):
+        with page.expect_response(lambda response: annotation_jobs_url(response.url)):
+            pass
+    assert len(readiness_requests) == initial_requests
+
+    with page.expect_response("**/bop/annotations/setup?**"):
+        annotations.get_by_role("button", name="Refresh readiness").click()
+    assert readiness_requests[initial_requests:] == ["running"]
+
+    job["status"] = "succeeded"
+    expect(status).to_contain_text("Ground-truth job finished")
+    evidence = annotations.get_by_test_id("bop-annotation-evidence")
+    expect(evidence).to_contain_text("verified for evaluation")
+    expect(evidence.get_by_role("link", name="Inspect BOP metrics")).to_be_visible()
+    assert readiness_requests[initial_requests:] == ["running", "succeeded"]
 
 
 def test_robot_controls_are_dashboard_only_fixed_target_and_acknowledged(

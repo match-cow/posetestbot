@@ -20,9 +20,38 @@ export interface RunIndexItem {
   run_id: string | null
   intent: "calibration" | "dataset" | null
   annotation_mode: "none" | "pose" | "pose_and_masks" | null
+  /** Set for object-dataset subruns: the original run and what differs. */
+  subrun?: SubrunLineage | null
   config_valid: boolean
   config_error: string | null
   modified_at: string
+}
+
+export interface SubrunLineage {
+  parent_run_id: string
+  parent_run_root: string
+  variant: string
+  created_at?: string
+}
+
+export interface SubrunParent {
+  schema_version: "subrun_parent.v1"
+  parent_run_root: string
+  parent_run_id: string
+  parent_run_name: string
+  default_folder_name: string
+  capture: {
+    resolution: string
+    fps: number
+    velocity_m_s: number
+    sensors: Array<{ sensor_type: string; device_id: string; display_name: string; mounting_mode: string }>
+  }
+  calibration_bundle_sha256: string
+  calibration_sources: Array<{ run_root: string; run_name: string | null; bundle_sha256: string; sensor_keys: string[] }>
+  template_uuid: string
+  template_name: string | null
+  template_bundle_sha256: string
+  placement_matrix: number[][]
 }
 
 export interface OverviewSection {
@@ -51,6 +80,31 @@ export interface CalibrationSyncOverview {
   bundle_sha256?: string
   sensors: CalibrationSyncSensor[]
   error?: string
+}
+
+export interface CalibrationIssueSummary {
+  code: string
+  message: string
+  sensor_key?: string
+}
+
+/** GET /ui/calibrations/active: the calibration one run uses or publishes. */
+export interface ActiveCalibration {
+  run_root: string
+  selected:
+    | {
+        valid: true
+        issues: CalibrationIssueSummary[]
+        selected_at: string
+        source: { kind?: "composite"; run_root?: string; run_name: string; bundle_sha256: string }
+        sources?: Array<{ run_root: string; run_name: string; bundle_sha256: string; selected_sensor_keys: string[] }>
+      }
+    | { valid: false; issues: CalibrationIssueSummary[] }
+    | null
+  published:
+    | { valid: true; issues: CalibrationIssueSummary[]; bundle_sha256: string; calibrated_at: string | null; profile_count: number }
+    | { valid: false; issues: CalibrationIssueSummary[] }
+    | null
 }
 
 export interface Overview {
@@ -124,6 +178,8 @@ export interface RunFolder {
     run_id: string | null
     intent: "calibration" | "dataset" | null
     annotation_mode: "none" | "pose" | "pose_and_masks" | null
+    subrun_variant?: string | null
+    subrun_parent_run_root?: string | null
   }
   contents: {
     dataset_mode: string | null
@@ -605,6 +661,7 @@ export interface RunConfig {
   bop: {
     annotation_mode: "none" | "pose" | "pose_and_masks"
   }
+  subrun?: SubrunLineage
 }
 
 export interface PoseTemplateSourceStatus {

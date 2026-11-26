@@ -358,3 +358,51 @@ def test_create_run_config_cli_writes_v4_config_and_manifest(tmp_path: Path) -> 
     manifest = json.loads((run_root / DATASET_MANIFEST).read_text())
     stage = next(item for item in manifest["stages"] if item["name"] == "run_config")
     assert stage["status"] == "succeeded"
+
+
+def test_new_capture_settings_offer_only_native_rates_and_dataset_speed_floor() -> None:
+    from posetestbot.pipeline.run_config import (
+        default_lab_sensors,
+        shared_capture_fps,
+        validate_new_capture_settings,
+    )
+
+    sensors = default_lab_sensors()
+    realsense_only = tuple(
+        sensor for sensor in sensors if sensor.sensor_type == "realsense_d435"
+    )
+    assert shared_capture_fps(realsense_only, "720p") == (6, 15, 30)
+    # The lab profile includes the ZED 2i, which has no 6 fps mode.
+    assert shared_capture_fps(sensors, "720p") == (15, 30)
+
+    validate_new_capture_settings(
+        intent="dataset",
+        resolution="720p",
+        fps=15,
+        velocity_m_s=0.05,
+        sensors=realsense_only,
+    )
+    with pytest.raises(ValueError, match="supports 6, 15, 30 fps at 720p; got 10"):
+        validate_new_capture_settings(
+            intent="dataset",
+            resolution="720p",
+            fps=10,
+            velocity_m_s=0.05,
+            sensors=realsense_only,
+        )
+    with pytest.raises(ValueError, match="at least 0.05 m/s"):
+        validate_new_capture_settings(
+            intent="dataset",
+            resolution="720p",
+            fps=6,
+            velocity_m_s=0.01,
+            sensors=realsense_only,
+        )
+    # Calibration keeps its slower 0.01-0.03 m/s range.
+    validate_new_capture_settings(
+        intent="calibration",
+        resolution="720p",
+        fps=6,
+        velocity_m_s=0.01,
+        sensors=realsense_only,
+    )
